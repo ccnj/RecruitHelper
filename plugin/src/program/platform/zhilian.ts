@@ -6,6 +6,8 @@ import { describeError, reportHandLog } from '../../base/handLog'
 import type {
   DebugOsProbeArgs,
   DebugOsProbeData,
+  AccountReadNoticesData,
+  PlatformNotice,
   AccountReadWechatSettingData,
   CandidateApplySourcingFiltersArgs,
   CandidateApplySourcingFiltersData,
@@ -5132,11 +5134,12 @@ function mainReadZhilianWechatSetting(): MainWechatSettingResult {
 // account.readWechatSetting@1:读取招聘方账号的微信号配置是否已填。唯一页面
 // 动作是导航到个人中心;不点击、不滚动、不打开弹层、不修改任何配置。返回
 // 只有布尔——招聘方自己的微信号不进契约,这里连读都不往外带。
-export async function readZhilianWechatSetting(
+// 找到(或导航出)一个已核对账号的个人中心标签页,返回 tabId。微信配置闸与
+// 平台通知读面共用:两者都只在"这次点击会开启新工作"时跑,页面正好是同一个。
+async function ensureZhilianPersonalTab(
   ctx: PrimitiveContext,
   expectedPrincipalFingerprint: string | undefined,
-): Promise<AccountReadWechatSettingData> {
-  ctx.checkpoint()
+): Promise<number> {
   const existing = (await chrome.tabs.query({ url: TAB_QUERY }))
     .filter((tab) => tab.id !== undefined && isZhilianPersonalURL(tab.url))
   let tab = existing.find((candidate) => candidate.status === 'complete') ?? existing[0]
@@ -5162,6 +5165,15 @@ export async function readZhilianWechatSetting(
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
   })
+  return tabId
+}
+
+export async function readZhilianWechatSetting(
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<AccountReadWechatSettingData> {
+  ctx.checkpoint()
+  const tabId = await ensureZhilianPersonalTab(ctx, expectedPrincipalFingerprint)
   // 条件轮询:呈现可判定形态即返回,最长约 20 秒,不做固定等待。
   for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
@@ -5184,6 +5196,197 @@ export async function readZhilianWechatSetting(
   // 等不到可判定形态只报失败,不返回猜测;脑侧把失败与未配置同向处理(不放行)。
   throw new ZhilianPlatformError(
     'CTX_NOT_READY', '智联个人中心「微信号」栏在期限内未呈现可判定形态', 'afterRecovery', 'pageBroken',
+  )
+}
+
+// ── 平台通知读面(account.readNotices@1,2026-09-02 甲方裁决) ──────────────
+//
+// 个人中心下半区「面试 / 通知」两页签,默认停在面试;通知列表在页签激活后才由
+// 页面自己拉取(第一页 10 条),同时页面会自行发「更新曝光时间」——那是平台自己
+// 的已读回执,红点随之消失,契约按 idempotentReadReceipt 登记,甲方知情接受。
+// 数据取自页面组件状态(与会话消息数组同一取数口径:MAIN world 感知,不是守卫),
+// 因为 DOM 文本没有通知 id、类型码和年份,服务端幂等靠 id。
+// 失效方向:页签点不着、列表等不到、组件状态读不到一律整体 failed;脑侧只记
+// 日志,不拦开始。
+
+type MainNoticeTabResult =
+  | { status: 'ok'; clicked: boolean }
+  | { status: 'pending'; reason: string }
+
+// 页签未激活就点一次;已激活直接返回。判据是页签容器的 active_notification
+// 类名或激活页签 label 上的 active,两者 2026-09-02 真机同现。
+function mainActivateZhilianNoticeTab(): MainNoticeTabResult {
+  const header = document.querySelector('.todo-notification__tab__header')
+  if (!header) return { status: 'pending', reason: 'tab_header_absent' }
+  const items = Array.from(header.querySelectorAll('.todo-notification__tab__header-item')) as HTMLElement[]
+  const target = items.find((item) => (item.innerText || '').normalize('NFC').trim().startsWith('通知'))
+  if (!target) return { status: 'pending', reason: 'notice_tab_absent' }
+  const label = target.querySelector('.todo-notification__tab__header-item-label') as HTMLElement | null
+  const active = header.className.includes('active_notification') ||
+    Boolean(label && label.className.includes('active'))
+  if (active) return { status: 'ok', clicked: false }
+  const clickable = label ?? target
+  if (typeof clickable.click !== 'function') return { status: 'pending', reason: 'notice_tab_not_clickable' }
+  clickable.click()
+  return { status: 'ok', clicked: true }
+}
+
+interface MainNoticeRaw {
+  id: unknown
+  messageType: unknown
+  title: unknown
+  content: unknown
+  time: unknown
+  isRead: unknown
+}
+
+type MainNoticeListResult =
+  | { status: 'ok'; items: MainNoticeRaw[] }
+  | { status: 'pending'; reason: string }
+
+// 列表"装载完成"的判据:组件数组非空且 DOM 条目数与之相等;数组为空时只有组件
+// 明确 hasMore=false 才算真的空(装载前的初始态就是 [] + hasMore=true,
+// 不能把初始态当空箱)。其余一律 pending,交给外层条件轮询。
+function mainReadZhilianNoticeList(): MainNoticeListResult {
+  const root = document.querySelector('.notification') as (HTMLElement & { __vue__?: unknown }) | null
+  if (!root) return { status: 'pending', reason: 'notification_root_absent' }
+  const vm = root.__vue__ as { noticeList?: unknown; hasMore?: unknown } | undefined
+  if (!vm) return { status: 'pending', reason: 'vue_instance_absent' }
+  const list = vm.noticeList
+  if (!Array.isArray(list)) return { status: 'pending', reason: 'notice_list_absent' }
+  if (list.length === 0) {
+    if (vm.hasMore === false) return { status: 'ok', items: [] }
+    return { status: 'pending', reason: 'notice_list_empty_unsettled' }
+  }
+  const rendered = root.querySelectorAll('.notification__list-item').length
+  if (rendered !== list.length) return { status: 'pending', reason: `notice_list_rendering:${rendered}/${list.length}` }
+  const items: MainNoticeRaw[] = []
+  for (const entry of list) {
+    const record = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<string, unknown>
+    items.push({
+      id: record.id, messageType: record.messageType, title: record.title,
+      content: record.content, time: record.time, isRead: record.isRead,
+    })
+  }
+  return { status: 'ok', items }
+}
+
+function validNoticeListResult(value: unknown): value is MainNoticeListResult {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'pending') return typeof record.reason === 'string'
+  return record.status === 'ok' && Array.isArray(record.items)
+}
+
+function validNoticeTabResult(value: unknown): value is MainNoticeTabResult {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'pending') return typeof record.reason === 'string'
+  return record.status === 'ok' && typeof record.clicked === 'boolean'
+}
+
+function clampRunes(value: unknown, limit: number): string {
+  const text = typeof value === 'string' ? value.normalize('NFC').trim() : ''
+  const runes = Array.from(text)
+  return runes.length <= limit ? text : runes.slice(0, limit).join('')
+}
+
+function nonNegativeIntOrNull(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
+  if (typeof value === 'string' && /^\d{1,16}$/.test(value.trim())) {
+    const parsed = Number(value.trim())
+    return Number.isSafeInteger(parsed) ? parsed : null
+  }
+  return null
+}
+
+// 没有 id 的条目服务端无法幂等落库;那不是"未见值",是形状漂移,整体失败留痕。
+function normalizeZhilianNotice(raw: MainNoticeRaw): PlatformNotice {
+  const noticeId = typeof raw.id === 'string'
+    ? raw.id.trim()
+    : (typeof raw.id === 'number' && Number.isSafeInteger(raw.id) ? String(raw.id) : '')
+  if (!noticeId || noticeId.length > 64) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', `智联通知条目缺少可用 id${failureDetailSuffix(`id=${String(raw.id).slice(0, 40)}`)}`, 'manualOnly',
+    )
+  }
+  return {
+    noticeId,
+    messageType: nonNegativeIntOrNull(raw.messageType),
+    title: clampRunes(raw.title, 256),
+    content: clampRunes(raw.content, 4000),
+    noticeTimeMs: nonNegativeIntOrNull(raw.time),
+    isRead: raw.isRead === true,
+  }
+}
+
+export async function readZhilianNotices(
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<AccountReadNoticesData> {
+  ctx.checkpoint()
+  const tabId = await ensureZhilianPersonalTab(ctx, expectedPrincipalFingerprint)
+
+  // 第一段条件轮询:等页签栏渲染,未激活就点一次「通知」。最长约 20 秒。
+  let lastReason = 'not_attempted'
+  let activated: Extract<MainNoticeTabResult, { status: 'ok' }> | undefined
+  for (let attempt = 0; attempt < 80 && !activated; attempt += 1) {
+    ctx.checkpoint()
+    const latest = await chrome.tabs.get(tabId)
+    if (latest.status === 'complete' && isZhilianPersonalURL(latest.url)) {
+      const result = await runMain(tabId, mainActivateZhilianNoticeTab, [])
+      if (!validNoticeTabResult(result)) {
+        throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联通知页签结果结构不符合预期', 'manualOnly')
+      }
+      if (result.status === 'ok') {
+        activated = result
+        break
+      }
+      lastReason = result.reason
+    } else {
+      lastReason = `tab:${latest.status ?? 'unknown'}`
+    }
+    if (attempt % 10 === 0) await ctx.progress('等待智联个人中心页签就绪', Math.min(30, 5 + attempt))
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  if (!activated) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY', `智联个人中心「通知」页签在期限内未就绪${failureDetailSuffix(lastReason)}`,
+      'afterRecovery', 'pageBroken',
+    )
+  }
+  if (activated.clicked) {
+    // 点击是一次平台可见交互;给页面至少一秒拉取列表,再进入条件轮询。
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+    })
+  }
+  await ctx.progress('读取智联通知列表', 40)
+
+  // 第二段条件轮询:等列表装载完成。最长约 20 秒。
+  lastReason = 'not_attempted'
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    ctx.checkpoint()
+    const result = await runMain(tabId, mainReadZhilianNoticeList, [])
+    if (!validNoticeListResult(result)) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联通知列表结果结构不符合预期', 'manualOnly')
+    }
+    if (result.status === 'ok') {
+      const notices = result.items.slice(0, 50).map(normalizeZhilianNotice)
+      const data: AccountReadNoticesData = { notices, observedAt: Date.now() }
+      if (validatePrimitiveData(PrimitiveName.AccountReadNotices, 1, data).length !== 0) {
+        throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联通知列表不符合当前契约', 'manualOnly')
+      }
+      await ctx.progress(`智联通知列表读取完成(${notices.length} 条)`, 100)
+      return data
+    }
+    lastReason = result.reason
+    if (attempt % 10 === 0) await ctx.progress('等待智联通知列表装载', Math.min(90, 40 + attempt))
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  throw new ZhilianPlatformError(
+    'CTX_NOT_READY', `智联通知列表在期限内未装载完成${failureDetailSuffix(lastReason)}`,
+    'afterRecovery', 'pageBroken',
   )
 }
 
@@ -15977,6 +16180,7 @@ export const zhilianAdapter = {
   },
 
   readWechatSetting: ({ ctx, fingerprint }) => readZhilianWechatSetting(ctx, fingerprint),
+  readNotices: ({ ctx, fingerprint }) => readZhilianNotices(ctx, fingerprint),
 
   readList: ({ args, ctx, fingerprint }) => readZhilianList(args, ctx, fingerprint),
   readThread: ({ args, ctx, fingerprint }) => readZhilianThread(args, ctx, fingerprint),

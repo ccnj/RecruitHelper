@@ -14761,6 +14761,7 @@ const KNOWN_OTHER_PACING = {
   mainCancelZhilianOfflineDialog: '下线取消,调用点前有行内节奏',
   mainClickRevealPeerPhone: '查看电话,调用点前有行内节奏',
   mainSendGreetingOnce: '招呼发送,三个调用点前均有行内节奏',
+  mainActivateZhilianNoticeTab: '个人中心「通知」页签切换,导航后有行内节奏(ensureZhilianPersonalTab),点击后再等一秒才读列表',
 
   // —— 未确认:2026-08-26 静态核查时,调用点前 45 行内没找到节奏构造。
   //    这**不等于**没有节奏(可能在更上层、或在调用者里),只是本次没能从源码
@@ -14895,11 +14896,11 @@ test('注入接缝:页面内抛出的异常经哨兵还原成真异常,不被当
   }
 })
 
-test('智联适配器把 35 条能力实现齐,并如实声明自己的执行世界与输入通道', () => {
+test('智联适配器把 36 条能力实现齐,并如实声明自己的执行世界与输入通道', () => {
   // 少一条能力,对应原语在真机上会以 PROTO_UNSUPPORTED_CMD 静默退化;
   // 这条用例让它在门禁上就红。
   const required = [
-    'probePlatform', 'ensureSurface', 'readWechatSetting',
+    'probePlatform', 'ensureSurface', 'readWechatSetting', 'readNotices',
     'readList', 'readThread', 'readUnreadTotal', 'identifyCurrentConversation', 'openConversation',
     'readCurrentCandidate', 'readResume',
     'selectSourcingPosition', 'applySourcingFilters', 'readSourcingWindow',
@@ -14911,7 +14912,7 @@ test('智联适配器把 35 条能力实现齐,并如实声明自己的执行世
     'prepareJobDraft', 'publishJobDraft', 'takeJobOffline',
     'inspectSendSurface', 'probeInterviewEditor', 'capturePageSnapshot',
   ]
-  assert.equal(required.length, 35)
+  assert.equal(required.length, 36)
   for (const name of required) {
     assert.equal(typeof zhilianAdapter[name], 'function', `智联适配器缺能力 ${name}`)
   }

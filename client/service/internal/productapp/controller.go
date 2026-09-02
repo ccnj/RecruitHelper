@@ -43,6 +43,13 @@ type WechatSettingReader interface {
 	ReadWechatConfigured(ctx context.Context, key store.AccountKey) (bool, error)
 }
 
+// NoticeCollector 在"开始"时经手读取平台个人中心「通知」页签第一页并上报旧后台
+// (2026-09-02 甲方裁决,平台通知上报,第十一项云端出站)。它不是闸:失败只记
+// 日志,不影响开始;只在与微信闸相同的前置下调用(这次点击会开启新工作)。
+type NoticeCollector interface {
+	CollectNotices(ctx context.Context, key store.AccountKey) error
+}
+
 type Workflow interface {
 	StartFull(store.AccountKey, string) (*store.ProductWorkflowRun, error)
 	StartFullDailyPlan(store.AccountKey) (*store.ProductWorkflowRun, error)
@@ -85,6 +92,8 @@ type Controller struct {
 	// wechatReader 可以为 nil(既有测试不注入,行为同闸引入前)。生产装配始终
 	// 注入,见 main.go。
 	wechatReader WechatSettingReader
+	// noticeCollector 可以为 nil(既有测试不注入)。生产装配始终注入,见 main.go。
+	noticeCollector NoticeCollector
 }
 
 // SetAccountResolver 注入"开始"时的账号解析器(装配期一次,非并发安全)。
@@ -96,6 +105,12 @@ func (c *Controller) SetAccountResolver(resolver AccountResolver) *Controller {
 // SetWechatSettingReader 注入微信配置开工闸的读取器(装配期一次,非并发安全)。
 func (c *Controller) SetWechatSettingReader(reader WechatSettingReader) *Controller {
 	c.wechatReader = reader
+	return c
+}
+
+// SetNoticeCollector 注入平台通知读取上报器(装配期一次,非并发安全)。
+func (c *Controller) SetNoticeCollector(collector NoticeCollector) *Controller {
+	c.noticeCollector = collector
 	return c
 }
 
@@ -206,6 +221,7 @@ func (c *Controller) Start(
 	if err := c.gateWechatConfigured(ctx, key); err != nil {
 		return err
 	}
+	c.collectNoticesBestEffort(ctx, key)
 	if mode == string(workflow.ModeReplyOnly) {
 		c.syncJobsBestEffort(ctx, "startReplyOnly")
 		_, err = c.workflow.StartReplyOnly(key)
@@ -271,14 +287,9 @@ func (c *Controller) gateWechatConfigured(ctx context.Context, key store.Account
 	if c.wechatReader == nil {
 		return nil
 	}
-	if run, err := c.store.ActiveProductWorkflowRun(); err != nil {
+	if fresh, err := c.startsNewWork(key); err != nil {
 		return err
-	} else if run != nil {
-		return nil
-	}
-	if batch, err := c.store.ActiveSourcingBatch(key); err != nil {
-		return err
-	} else if batch != nil {
+	} else if !fresh {
 		return nil
 	}
 	configured, err := c.wechatReader.ReadWechatConfigured(ctx, key)
@@ -297,6 +308,46 @@ func (c *Controller) gateWechatConfigured(ctx context.Context, key store.Account
 		return ErrWechatNotConfigured
 	}
 	return nil
+}
+
+// startsNewWork 判定这次点击是否会开启新工作:没有活跃工作流、也没有未终局
+// 采集批次。微信闸与平台通知读取共用这一个判据——两者都要导航去个人中心,
+// 而批次运行期不得离开推荐页(推荐页运行连续性)。
+func (c *Controller) startsNewWork(key store.AccountKey) (bool, error) {
+	if run, err := c.store.ActiveProductWorkflowRun(); err != nil {
+		return false, err
+	} else if run != nil {
+		return false, nil
+	}
+	if batch, err := c.store.ActiveSourcingBatch(key); err != nil {
+		return false, err
+	} else if batch != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+// collectNoticesBestEffort 是平台通知上报的开始入口消费点(2026-09-02 甲方裁决):
+// 微信闸通过之后、工作流创建之前同步读一次个人中心「通知」页签第一页。同步是
+// 硬要求——它要导航页面,必须在批次读推荐流之前收束。它不是闸:读不到、手离线、
+// 上报失败一律只记日志,开始照常;不重试,下次开始自愈。
+func (c *Controller) collectNoticesBestEffort(ctx context.Context, key store.AccountKey) {
+	if c.noticeCollector == nil {
+		return
+	}
+	fresh, err := c.startsNewWork(key)
+	if err != nil {
+		slog.Warn("平台通知读取前置判定失败,跳过本次(不影响开始)",
+			"errorCode", "noticeCollectSkipped", "err", err)
+		return
+	}
+	if !fresh {
+		return
+	}
+	if err := c.noticeCollector.CollectNotices(ctx, key); err != nil {
+		slog.Warn("平台通知读取失败,跳过本次(不影响开始)",
+			"errorCode", "noticeCollectFailed", "err", err)
+	}
 }
 
 // SyncJobs 是产品面"同步职位"的入口:刷新有效职位集,并把旧后台当前职位重新

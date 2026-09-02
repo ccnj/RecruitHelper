@@ -730,6 +730,90 @@ func (f *fakeWechatReader) ReadWechatConfigured(
 	return f.configured, nil
 }
 
+type fakeNoticeCollector struct {
+	err   error
+	calls int
+}
+
+func (f *fakeNoticeCollector) CollectNotices(context.Context, store.AccountKey) error {
+	f.calls++
+	return f.err
+}
+
+// 平台通知上报(2026-09-02 甲方裁决):微信闸通过后同步读一次,失败不拦开始;
+// 微信闸拦下时不读;已有活跃工作或未终局批次时不读(不得导航去个人中心)。
+func TestStartCollectsNoticesBestEffort(t *testing.T) {
+	now := time.Date(2026, 9, 2, 9, 0, 0, 0, time.Local)
+
+	t.Run("collects once after the gate passes and failure does not block", func(t *testing.T) {
+		db, key := controllerFixture(t)
+		flow := &fakeWorkflow{}
+		collector := &fakeNoticeCollector{err: errors.New("通知列表在期限内未装载完成")}
+		controller, err := New(
+			db, flow, &fakeSource{}, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(&fakeWechatReader{configured: true})
+		controller.SetNoticeCollector(collector)
+		if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+			t.Fatalf("通知读取失败不得拦住开始: %v", err)
+		}
+		if flow.replyKey != key || collector.calls != 1 {
+			t.Fatalf("应读一次且照常开始: key=%+v calls=%d", flow.replyKey, collector.calls)
+		}
+	})
+
+	t.Run("wechat gate rejection skips the read", func(t *testing.T) {
+		db, _ := controllerFixture(t)
+		collector := &fakeNoticeCollector{}
+		controller, err := New(
+			db, &fakeWorkflow{}, &fakeSource{}, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(&fakeWechatReader{configured: false})
+		controller.SetNoticeCollector(collector)
+		if err := controller.Start(context.Background(), "replyOnly", ""); !errors.Is(err, ErrWechatNotConfigured) {
+			t.Fatalf("微信闸应先拦下: %v", err)
+		}
+		if collector.calls != 0 {
+			t.Fatalf("被闸拦下的开始不得读通知: %d", collector.calls)
+		}
+	})
+
+	t.Run("active workflow run skips the read", func(t *testing.T) {
+		db, key := controllerFixture(t)
+		if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
+			RunID: "wf-notice-skip", Platform: key.Platform, AccountRef: key.AccountRef,
+			State: workflow.State{
+				Mode: workflow.ModeReplyOnly, Status: workflow.StatusRunning,
+			},
+			Stage:     store.ProductWorkflowStageCommunication,
+			StartedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		collector := &fakeNoticeCollector{}
+		controller, err := New(
+			db, &fakeWorkflow{}, &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")},
+			func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetNoticeCollector(collector)
+		if err := controller.Start(context.Background(), "full", "42"); err != nil {
+			t.Fatal(err)
+		}
+		if collector.calls != 0 {
+			t.Fatalf("活跃工作流在场不得导航去读通知: %d", collector.calls)
+		}
+	})
+}
+
 // 微信配置开工闸(2026-08-18 甲方裁决):未配置或读不到都不放行,已有活跃
 // 工作时跳过检查(创建那次点击已过闸,且运行期不得导航去个人中心)。
 func TestStartGatedOnWechatConfiguration(t *testing.T) {

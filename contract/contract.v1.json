@@ -431,6 +431,29 @@
           "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
+      "AccountReadNoticesArgs": { "type": "object", "fields": {} },
+      "PlatformNotice": {
+        "type": "object",
+        "fields": {
+          "noticeId": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "messageType": { "type": "int64", "nullable": true, "minimum": 0 },
+          "title": { "type": "string", "minLength": 0, "maxLength": 256, "maxBytes": 1024 },
+          "content": { "type": "string", "minLength": 0, "maxLength": 4000, "maxBytes": 16384 },
+          "noticeTimeMs": { "type": "int64", "nullable": true, "minimum": 0 },
+          "isRead": { "type": "boolean" }
+        }
+      },
+      "AccountReadNoticesData": {
+        "type": "object",
+        "maxJsonBytes": 262144,
+        "fields": {
+          "notices": {
+            "type": "array", "minItems": 0, "maxItems": 50,
+            "items": { "ref": "PlatformNotice" }
+          },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "NavEnsureSurfaceArgs": {
         "type": "object",
         "fields": { "surface": { "type": "string", "enumRef": "enums.surfaceName" } }
@@ -1456,6 +1479,13 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
       "note": "读取招聘方账号在平台上的微信号联系配置是否已填(2026-08-18 甲方裁决立案),供脑在用户显式开始工作流前裁决放行——该配置空着时换微信链路无号可给。智联实现:导航平台页到个人中心,条件轮询等「微信号」栏渲染(最长约 10 秒),按可见文本判定:值非空且非「暂未添加」占位即 configured=true,占位/为空/存在可见「去添加」动作即 false;判据必须读文本——真机实测未配置时值元素照样存在,只显示占位,「元素出现」不构成判据。栏等不到、路由不可达、读取异常一律整体 failed,不返回猜测;脑侧对 failed 与 configured=false 同向处理(拒绝开始),失效方向永远朝少做。data 刻意只含布尔,绝不携带微信号本身(招聘方自己的微信号不进契约的既有禁令原样适用)。唯一页面动作是导航,不点击、不滚动、不打开弹层、不修改任何配置;读完不负责导航回原页面,后续页面需要由既有恢复路径重建。读数只授权本次开始请求放行与否,不得复用为任何 effectful 动作的前置正证或验证读"
+    },
+    "account.readNotices": {
+      "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentReadReceipt",
+      "argsSchema": "AccountReadNoticesArgs", "dataSchema": "AccountReadNoticesData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
+      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "note": "读取招聘方账号个人中心「通知」页签第一页(2026-09-02 甲方裁决立案,第十一项云端出站「平台通知上报」),供脑在用户显式开始或每日自动开始工作流、微信配置开工闸通过之后上报旧后台。它不是闸:failed 只记日志,不影响开始。智联实现:复用个人中心导航与账号核对,页签未激活则点一次「通知」,条件轮询等列表装载(最长约 20 秒),从页面组件状态读第一页(平台默认 10 条);不翻页、不点「查看详情」、不进「查看全部通知」。平台副作用:切换页签触发平台自身的「更新曝光时间」请求,等价于已读回执、账号通知红点被清,幂等,甲方知情接受。messageType 是平台整数原样,不做枚举白名单,未见值原样携带不丢弃,平台没给时为 null;noticeTimeMs 由平台毫秒字符串换算,换不出为 null;content 是平台原样文案,可能自含候选人姓名,不脱敏(与聊天记录上报同款口径)。列表等不到、页签点不着、组件状态读不到一律整体 failed,不返回半截。读数只授权上报,不得复用为任何业务裁决、effectful 前置正证或验证读"
     },
     "nav.ensureSurface": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
