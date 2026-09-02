@@ -233,8 +233,15 @@ export function classifyBossEntry(url: string, payload: unknown): BossClassifica
       const code = String(item['p2'] ?? '')
       if (code === '') continue
       const isDevice = action === 'device-action-report'
-      const benign = isDevice ? FINGERPRINT.has(code) : ROUTINE_BEHAVIOR.has(code)
+      // 2026-09-02 Windows 真机导出:800001 还会挂在 `web-action-heartbeat` 下再发一遍,
+      // 字段是同一套指纹(p6=UA-CH brands、p7/p8 哈希、p9 UA),只是少了 p4/p5。
+      // 它是同一份指纹的心跳重发,不是探测命中——此前只认 device-action-report,
+      // 于是 15 条指纹被摆进「探测命中」,与空状态那句"指纹算例行"自相矛盾。
+      const isFingerprintChannel = isDevice || action === 'web-action-heartbeat'
+      const benign = isFingerprintChannel ? FINGERPRINT.has(code) : ROUTINE_BEHAVIOR.has(code)
       ;(benign ? routine : hits).push({ code, action })
+      // 全局名差集**只从 device-action-report 的 p6 取**:心跳版的 p6 是 UA-CH brands
+      // 串(`Not=A?Brand=99|Google Chrome=151|…`),按 | 切开会变成三个假"未知全局名"。
       if (isDevice && code === '800001' && typeof item['p6'] === 'string' && item['p6'] !== 'null') {
         unknownGlobals.push(...item['p6'].split('|').filter(Boolean))
       }
