@@ -124,6 +124,8 @@ const {
   planMove,
   planType,
   PUNCT_KEY,
+  tokenize,
+  keyFor,
   clickAimPoint,
   mulberry32,
   SPREAD_FRACTIONS,
@@ -15048,13 +15050,13 @@ test('埋点上报自检由适配器声明驱动:没声明守卫的平台不探�
 // ---------------------------------------------------------------------------
 
 const OSENGINE_FIXTURE = JSON.parse(
-  readFileSync('test/fixtures/osengine-hiboss-70de0a8.json', 'utf8'),
+  readFileSync('test/fixtures/osengine-hiboss-95607a3.json', 'utf8'),
 )
 
 test('osengine 与 hiBoss 原件逐点一致(基准由上游原始文件生成)', () => {
   const { from, to, targetW, maxDwellMs, cases } = OSENGINE_FIXTURE
   assert.equal(maxDwellMs, DEFAULT_MAX_DWELL_MS, '基准的截断值必须与我们的缺省一致')
-  assert.equal(OSENGINE_SOURCE.commit, '70de0a8', '版本钉子与基准文件名必须同步')
+  assert.equal(OSENGINE_SOURCE.commit, '95607a3', '版本钉子与基准文件名必须同步')
 
   for (const [seedText, expected] of Object.entries(cases)) {
     const plan = planMove({ from, to, targetW, maxDwellMs, seed: Number(seedText) })
@@ -15114,7 +15116,7 @@ test('osengine 的 pressMs 来自实测池而不是常数', () => {
 // ---------------------------------------------------------------------------
 
 const COMPOSE_FIXTURE = JSON.parse(
-  readFileSync('test/fixtures/osengine-compose-hiboss-70de0a8.json', 'utf8'),
+  readFileSync('test/fixtures/osengine-compose-hiboss-95607a3.json', 'utf8'),
 )
 
 /** 上游 injector.go 的 shiftGuard:Shift 必须在下一个键按下前至少这么久松开。 */
@@ -15131,7 +15133,7 @@ function flattenPlanKeys(plan) {
 }
 
 test('osengine/compose 与 hiBoss 原件逐字段一致(基准由上游原始文件生成)', async () => {
-  assert.equal(OSENGINE_SOURCE.commit, '70de0a8', '版本钉子与基准文件名必须同步')
+  assert.equal(OSENGINE_SOURCE.commit, '95607a3', '版本钉子与基准文件名必须同步')
   assert.ok(OSENGINE_SOURCE.files.includes('compose'), '版本钉子要覆盖排版器的来源')
 
   for (const [name, { text, bySeed }] of Object.entries(COMPOSE_FIXTURE.cases)) {
@@ -15147,24 +15149,24 @@ test('osengine/compose 与 hiBoss 原件逐字段一致(基准由上游原始文
 })
 
 test('osengine/compose 打不出的字元要显式失败,不许编一个假键序', async () => {
-  // 上游把两种失败分得很清:「这个字打不出」抛异常,「排不出合格形状」返回 ok:false。
-  //
-  // 前者的安全性质在于**宁可失败也不编**。2026-08-31 上游修过一个静默 bug:
+  // 安全性质在于**宁可失败也不编**。2026-08-31 上游修过一个静默 bug:
   // pinyin-pro 给「嗯」的 `ng` 是词典注音,真人打的是 `en`,于是排出了
   // KeyN,KeyG,KeyN,KeyG —— 一个没有真人会敲的键序,而排版器照样返回 ok:true。
   // 自研 TIP 走 commit(word) 直接上屏、不查拼音串,屏幕上完全看不出问题;
   // **一旦回落到系统输入法(我们的 macOS 开发环境就是),ng 上不了屏**。
   //
   // 「呣」的注音是 m,不是完整音节,IME 会当声母等韵母,真人也打不出——所以上游
-  // 刻意不给它编输入音,而是显式抛。这条用例钉的就是「不编」。
-  await assert.rejects(
-    () => planType('呣', 1),
-    (err) => {
-      assert.match(err.message, /打不出/, '错误信息要说清是打不出,不是排不出')
-      assert.match(err.message, /呣/, '错误信息要指名是哪个字元')
-      return true
-    },
-  )
+  // 刻意不给它编输入音,而是显式失败。
+  //
+  // 失败的**形状**自上游 2026-09-01 起是返回值,不再是 throw:「有打不出的字元」与
+  // 「重采 N 次都没过预检」合成一种 `{ok:false, reasons}`。理由是同一件事两种形状
+  // 会让漏掉 catch 的那一套把**一条**文案的问题变成**整批**停机。
+  // 抛出去的只剩排版器自己坏了那一类——那种每条文案都会撞上,该停下来让人看见。
+  const r = await planType('呣', 1)
+  assert.equal(r.ok, false, '「呣」必须排不出来')
+  assert.equal(r.plan, null)
+  assert.match(r.reasons.join(';'), /打不出/, '原因要说清是打不出,不是排不出')
+  assert.match(r.reasons.join(';'), /呣/, '原因要指名是哪个字元')
   // 对照:同样极短、同样曾经排不出来的「嗯」,修好之后必须能排出来。
   const ok = await planType('嗯', 1)
   assert.ok(ok.ok, '「嗯」修好后应当排得出来')
@@ -15198,19 +15200,30 @@ test('osengine/compose 的 Shift 必须在下一个键按下前松开(「薪资�
   }
 })
 
-test('osengine/compose 的标点键集合钉死十二个——变了 Go 侧键码表就得补', () => {
-  // 键码表在 client/service/internal/handinput/keymap_darwin.go,那边按这八个建的。
-  // **上游 PUNCT_KEY 长出第九个键位时,这条先红**——否则我们一片绿,直到真机上
-  // 遇到那个标点,注入层报「键码表里没有」,或者更坏:某天有人给它加了兜底。
-  const codes = [...new Set(Object.values(PUNCT_KEY).map((v) => v.code))].sort()
-  // 十二个里有四个是数字键(！=Shift+1、…=Shift+6、（=Shift+9、）=Shift+0),
-  // 它们在 Go 表里已被 Digit0..9 覆盖;真正只从这张表来的是另外八个。
-  assert.deepEqual(codes, [
-    'Backquote', 'Backslash', 'Comma', 'Digit0', 'Digit1', 'Digit6', 'Digit9',
-    'Minus', 'Period', 'Quote', 'Semicolon', 'Slash',
-  ], '上游的标点键位变了:同步 keymap_darwin.go 与它的 punctKeysFromUpstream')
-  const nonDigit = codes.filter((c) => !c.startsWith('Digit'))
-  assert.equal(nonDigit.length, 8, 'Go 侧 punctKeysFromUpstream 是按这八个建的')
+test('osengine/compose 能发出的键位全集钉死——变了 Go 侧键码表就得补', () => {
+  // Go 键码表(keymap_darwin.go / keymap_windows.go)按这个集合建,期望在
+  // keymap_expect_test.go。**上游再长出新键位,这条先红**——否则我们一片绿,直到真机上
+  // 遇到那个字元,注入层报「键码表里没有」,或者更坏:某天有人给它加了兜底。
+  //
+  // 集合不再只看 PUNCT_KEY(全角,走组字):上游 2026-09-01 加了 ASCII_KEY(半角,透传),
+  // 它没有 export,所以这里**走 keyFor 逐字元问**,那才是排版器真正用的路。
+  const halfWidth = '`-=[]\\;\',./~!@#$%^&*()_+{}:"<>?'
+  const probe = [...Object.keys(PUNCT_KEY), ...halfWidth, ' ', '　', '\n', '0', '５']
+  const codes = new Set()
+  for (const ch of probe) {
+    const k = keyFor(tokenize(ch)[0])
+    assert.ok(k, `${JSON.stringify(ch)} 应当有键位`)
+    codes.add(k.code)
+    assert.equal(typeof k.passthrough, 'boolean', `${JSON.stringify(ch)} 的 passthrough 必须显式给出`)
+  }
+  const nonDigit = [...codes].filter((c) => !c.startsWith('Digit')).sort()
+  assert.deepEqual(nonDigit, [
+    'Backquote', 'Backslash', 'BracketLeft', 'BracketRight', 'Comma', 'Enter', 'Equal',
+    'Minus', 'Period', 'Quote', 'Semicolon', 'Slash', 'Space',
+  ], '上游能发出的键位变了:同步 keymap_expect_test.go 的 punctKeysFromUpstream')
+  // Enter 在这里、**不在** Go 表里——那是刻意的(refusedOnPurpose):裸 Enter 是发送。
+  // 换行段因此在 Validate 阶段就被拒、一个键都不发,直到单独立案放行。
+  assert.ok(codes.has('Enter'), '换行段的 Enter 是排版器真能发出的,Go 侧的拒绝必须是显式的')
 })
 
 test('osengine/compose 的英文段走 composition,键序全小写、大小写由上屏词带出', async () => {
@@ -15254,17 +15267,31 @@ test('osengine/compose 的英文段走 composition,键序全小写、大小写�
   }
 })
 
-test('osengine/compose 半角标点仍显式拒绝——别看见英文放行了就顺手放它', () => {
-  // 上游在放行英文时特意在原地留了说明:半角标点留在拒绝表里,**理由和当初的英文
-  // 一模一样**,别顺手一起放。它俩的理由现在已经不同了:
-  //   英文  当初的理由是"要切输入法模式",自研 TIP 落地后那个前提没了
-  //   半角  真输入法直接上屏(type1),而我们的 TIP 会当上屏键吃掉走 composition(type2)
-  // 后者是**真实的行为差异**,不是当初那个已作废的理由。
-  assert.rejects(
-    () => planType('年薪20-30万', 1),
-    /打不出/,
-    '半角连字符必须仍被拒绝',
-  )
+test('osengine/compose 半角标点走透传:排得出、标 passthrough,只有竖线仍拒绝', async () => {
+  // 上游 2026-09-01 放行。关键不是"能打了",是**信息流向修正了**:「这个直接段走不走
+  // 组字」排版器一直知道(synth 靠它展开事件流),却从没告诉过 TIP;TIP 手上只有键码,
+  // 同一个 Comma 键可能是「，」也可能是 ",",它没法分辨,于是把数字/空格/OEM 键
+  // 一律当上屏键吃掉。现在排版器随键位给出 passthrough,一路送到 TIP。
+  //
+  // 判据是「这个键在美式布局上按下去,出来的就是这个字元吗」——是键位表的属性,
+  // 不是 Unicode 区间的属性。上游第一版用 containsChinese 判,`— …` 六个全角标点
+  // 在 U+2000 段、会被判成透传,真机上 Minus+Shift 打出来的是 `_`。
+  const r = await planType('年薪20-30万，前端/后端', 1)
+  assert.ok(r.ok, `半角连字符与斜杠应当排得出来:${r.ok ? '' : r.reasons}`)
+  const byText = Object.fromEntries(r.plan.words.filter((w) => w.direct).map((w) => [w.text, w]))
+  for (const ch of ['2', '0', '-', '3', '/']) {
+    assert.ok(byText[ch], `${ch} 应当是一个直接段`)
+    assert.equal(byText[ch].passthrough, true, `${ch} 是键盘布局直接打出来的,必须标透传`)
+    assert.ok(!byText[ch].commit, `${ch} 透传段没有上屏键`)
+  }
+  // 全角「，」相反:Comma 键打出来的是 ",",「，」只能由 TIP 上屏——走组字。
+  assert.equal(byText['，'].passthrough, false, '全角逗号必须走组字,不能透传')
+
+  // 只有 `|` 仍拒:它是 Go→TIP 词表协议的字段分隔符,装不进去。这是真实边界,
+  // 不是当初"要切输入法模式"那种过期的理由。
+  const bar = await planType('a|b', 1)
+  assert.equal(bar.ok, false, '竖线必须仍被拒绝')
+  assert.match(bar.reasons.join(';'), /竖线|分隔符/, '原因要说清是协议分隔符')
 })
 
 test('osengine/compose 同输入必然同输出(复现与门禁的前提)', async () => {

@@ -18,7 +18,7 @@
 
 - `route.mjs` / `engines.mjs` ← `hiBoss/lab/engine/mouse/`
 - `route.bjh.mjs` / `press.bjh.mjs` ← `hiBoss/lab/probe/baseline/`
-- `compose/*.mjs`(7 个) ← `hiBoss/lab/engine/compose/`
+- `compose/*.mjs`(8 个,含 `sanitize.mjs`——当前不调用,随目录整体搬入) ← `hiBoss/lab/engine/compose/`
 - `capture/*.mjs`(3 个) ← `hiBoss/lab/engine/capture/`
 
 ### 为什么鼠标那四个是平铺的,打字那十个带目录

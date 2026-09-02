@@ -17,7 +17,8 @@
 // engine 纪律：本模块只 import engine 内部与 pinyin-pro，绝不依赖 lab/oracle。
 // 外部判定通过 `verify` 回调注入 —— 生产环境里没有 aegis wasm。
 
-import { segment, granularity } from './segment.mjs'
+import { segment, granularity, UntypableError } from './segment.mjs'
+import { sanitize } from './sanitize.mjs'
 import { makeRng, sampleMix, moments, removeOutliers } from './timing.mjs'
 import { buildView, dominantShare, evaluate } from './criteria.mjs'
 import { withParams } from './params.mjs'
@@ -130,7 +131,7 @@ export function composeOnce(text, params, rng, startTime) {
       const shiftDown = kDown - lead
       const shiftUp = shiftDown + shiftDwell
       words.push({
-        text: s.text, direct: true, shift: true,
+        text: s.text, direct: true, shift: true, passthrough: !!s.passthrough,
         keys: [
           { code: 'ShiftLeft', down: shiftDown, up: shiftUp, modifier: true },
           { code: s.code, down: kDown, up: kDown + kDwell, shift: true },
@@ -142,7 +143,10 @@ export function composeOnce(text, params, rng, startTime) {
     } else if (s.kind === 'direct') {
       advance(gap, 0, s.code, () => segGap(prevSeg, s))
       const d = dwell()
-      words.push({ text: s.text, direct: true, keys: [{ code: s.code, down: t, up: t + d }] })
+      words.push({
+        text: s.text, direct: true, passthrough: !!s.passthrough,
+        keys: [{ code: s.code, down: t, up: t + d }],
+      })
       lastUp.set(s.code, t + d)
       minNextDown = -Infinity
     } else {
@@ -283,10 +287,28 @@ export function localCheck(plan, params, platform) {
  * @param {number} [o.seed]    起始种子；每次重采 +1，故整个过程可复现
  * @param {number} [o.startTime]
  * @param {number} [o.maxTries]
+ * @param {boolean} [o.sanitize] 先摘掉打不出来的字元再排（见 sanitize.mjs）。
+ *        默认 **false** —— 排版器的严格契约不变，清理是调用方显式要的一层。
  * @param {function} [o.verify] async (plan, localResult) => {ok, detail} —— 注入 oracle 判定
+ *
+ * **文案层面的失败不抛异常**：打不出的字元、重采多少次都不过 —— 一律走返回值
+ * `{ok:false, reasons}`。先前打不出的字元是 `throw`、重采不收敛是 `ok:false`，
+ * 同一件事两种形状，调用方得写两套处理，而漏掉 catch 的那一套会让**一条**文案
+ * 停掉**整批**。跑业务时「因为小事停机」的实际机制就是这个，不是生僻字本身。
+ *
+ * **排版器自己坏了照样抛**（配置缺参数、平台名写错、pinyin-pro 对不齐）。那种失败
+ * 每一条文案都会撞上，吞成返回值等于把一次故障伪装成一堆坏文案、让生产侧安静地
+ * 逐条跳过。只 catch `UntypableError`，就是为了把这两类分开。
  */
 export async function compose(text, o = {}) {
   const params = withParams(o.params)
+  // 清理放在最前面，且只做一次 —— 重采换的是时序种子，跟文案没关系。
+  const clean = o.sanitize ? sanitize(text) : { text, dropped: [] }
+  const src = clean.text
+  if (o.sanitize && !src) {
+    return { ok: false, plan: null, tries: 0, attempts: [], text: src, dropped: clean.dropped,
+      reasons: ['清理之后没有内容可打'] }
+  }
   // 平台画像：缺省即生产目标（Windows）。见 lab/engine/capture/platform.mjs。
   const platform = o.platform
   const maxTries = o.maxTries ?? 40
@@ -297,7 +319,16 @@ export async function compose(text, o = {}) {
   for (let i = 0; i < maxTries; i++) {
     const seed = baseSeed + i
     const rng = makeRng(seed)
-    const plan = composeOnce(text, params, rng, startTime)
+    let plan
+    try {
+      plan = composeOnce(src, params, rng, startTime)
+    } catch (e) {
+      // 只接文案层面的失败（有打不出的字元）—— **换种子重采一万次也一样**，立刻返回。
+      // 别的错误是排版器自己的问题，原样抛出去，让它停下来。
+      if (!(e instanceof UntypableError)) throw e
+      return { ok: false, plan: null, tries: i + 1, attempts, text: src,
+        dropped: clean.dropped, reasons: [e.message] }
+    }
     const local = localCheck(plan, params, platform)
     if (!local.ok) {
       attempts.push({ seed, stage: 'local', reasons: local.reasons })
@@ -312,10 +343,12 @@ export async function compose(text, o = {}) {
     }
     return {
       ok: true, plan, seed, tries: i + 1, attempts,
+      text: src, dropped: clean.dropped,
       optionParams: local.params, stats: local.stats,
       keyShare: local.keyShare, maxGap: local.maxGap,
       granularity: granularity(plan._segs),
     }
   }
-  return { ok: false, tries: maxTries, attempts, plan: null }
+  return { ok: false, tries: maxTries, attempts, plan: null, text: src, dropped: clean.dropped,
+    reasons: [`${maxTries} 次重采都没通过本地预检`] }
 }

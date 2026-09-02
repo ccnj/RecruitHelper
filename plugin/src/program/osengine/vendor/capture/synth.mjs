@@ -81,8 +81,36 @@ export function synthTyping(plan, opt = {}) {
    * @param {boolean} orphaned 按住期间组字被别的键结束了
    * @param {number}  ceAt     本段 compositionend 的时刻（决定 isComposing 取值）
    */
-  const pushKeyUp = (push, t, code, realKeyCode, realKey, orphaned, ceAt) => {
-    const composing = ceAt == null ? true : t < ceAt
+  // 组字窗口一次算好：keyup 双发与否取决于**那一刻有没有任何组字在进行**，
+  // 跟这个键属于哪一段无关。真机实测（tip-win-newline-2026-09-02）：
+  //   KeyG 的 keyup 晚于「方便」的 compositionend，但「吗」的组字已经开始 → 双 keyup
+  //   KeyA 的 keyup 晚于「吗」的 compositionend，其后没有新组字        → 单 keyup
+  // 先前 orphan 规则只看「晚于自己段的 compositionend」，KeyG 那种会被判成单条，
+  // 离线预测的 keyup 数就少一个 —— 而 keyup 参与配对，配对决定 keydurations。
+  // 窗口的起止与下面展开事件时写的时刻完全一致（compositionstart 在首键 down+1；
+  // compositionend 在上屏键 down+3、标点键 down+4），改一处必须改另一处。
+  // 直接段走不走组字 —— **唯一出处**，窗口计算与下面的展开分支都问它。
+  // 由计划说了算（排版器在 passthrough 里标好了，判据是「这个键在美式布局上打出来的
+  // 就是这个字元吗」，见 pinyin.mjs 的 keyFor）；老计划（本字段之前归档的 baseline）
+  // 没有它，退回按字符判，与它们当初被合成时的口径一致，归档采集的复核结果不随代码变。
+  const viaImeOf = (w) => (w.passthrough == null
+    ? directGoesThroughIme(P, w.text)
+    : !!P.punctuationViaComposition && !w.passthrough)
+  const windows = []
+  for (const w of plan.words) {
+    if (w.direct) {
+      if (viaImeOf(w)) {
+        const k = w.keys.find((x) => !x.modifier)
+        if (k) windows.push([k.down + 1, k.down + 4])
+      }
+    } else if (w.commit && w.keys.length) {
+      windows.push([w.keys[0].down + 1, w.commit.down + 3])
+    }
+  }
+  const composingAt = (t) => windows.some(([a, b]) => t >= a && t < b)
+
+  const pushKeyUp = (push, t, code, realKeyCode, realKey, orphaned) => {
+    const composing = composingAt(t)
     if (!dblUp) {
       push(t, 'keyup', { code, keyCode: imeKeyCode ? 229 : realKeyCode, key: 'Process', isComposing: composing })
       return
@@ -103,7 +131,11 @@ export function synthTyping(plan, opt = {}) {
     if (w.direct) {
       // 中文标点在 Windows 上被 IME 接管、走 composition；在 macOS 上直接上屏。
       // 判定后果天差地别：前者记 type2（cnTextCount 不计），后者记 type1（cnTextCount +1）。
-      const viaIme = directGoesThroughIme(P, w.text)
+      // 走不走组字：由计划说了算，出处见上面的 viaImeOf。先前这里自己按字符判，
+      // 与 TIP 的行为是两条独立推理 —— 而 TIP 那边压根没有这个信息、只能按键码猜，
+      // 于是两边长期对不上账（2026-09-01 真机实测：一个字面数字就让五项对账里四项
+      // 不一致）。现在同一个标记喂给两边。
+      const viaIme = viaImeOf(w)
 
       // 遍历全部 keys —— 带 Shift 的字元里，ShiftLeft 是 keys[0]。
       // **修饰键必须出现在事件流里**：它有 down 有 up，pairKeys 会正常配对，
@@ -141,13 +173,25 @@ export function synthTyping(plan, opt = {}) {
           const ceAt = k.down + 4
           push(ceAt, 'compositionend', { data: w.text })
           // 标点键自己结束自己的组字 —— 不算 orphaned，照常双发
-          pushKeyUp(push, k.up, k.code, k.keyCode ?? 0, w.text, false, ceAt)
+          pushKeyUp(push, k.up, k.code, k.keyCode ?? 0, w.text, false)
           continue
         }
-        push(k.down, 'keydown', { code: k.code, keyCode: k.keyCode ?? 0, key: w.text,
+        // 换行是唯一一个「打出来的不是它的文本」的透传段。真机实测
+        // （lab/calibrate/baseline/tip-win-newline-2026-09-02.json）：
+        //   keydown/keyup  key="Enter" keyCode=13（不是 "\n"）
+        //   input          inputType="insertLineBreak" data=null（不是 insertText "\n"）
+        // 这三处先前都是猜的（写成 "\n" / insertText / "\n"），落进 typingFragment 就是
+        // `1,1,1,0,0,1` 对真机的 `1,1,0,0,0,insertLineBreak` —— 长度、inputType 两处不同，
+        // 而 typingFragment 是上传字段。换行段能发出去之前它是死代码，现在不是了。
+        const nl = w.text === '\n'
+        const key = nl ? 'Enter' : w.text
+        const keyCode = nl ? 13 : k.keyCode ?? 0
+        push(k.down, 'keydown', { code: k.code, keyCode, key,
           ctrlKey: false, shiftKey: !!k.shift, metaKey: false, repeat: false })
-        push(k.down + 2, 'input', { data: w.text, inputType: 'insertText', isComposing: false })
-        push(k.up, 'keyup', { code: k.code, keyCode: k.keyCode ?? 0, key: w.text, shiftKey: !!k.shift })
+        push(k.down + 2, 'input', nl
+          ? { data: null, inputType: 'insertLineBreak', isComposing: false }
+          : { data: w.text, inputType: 'insertText', isComposing: false })
+        push(k.up, 'keyup', { code: k.code, keyCode, key, shiftKey: !!k.shift })
       }
       continue
     }
@@ -196,9 +240,10 @@ export function synthTyping(plan, opt = {}) {
         }
       }
 
-      // 上屏键自己结束组字，不算 orphaned；其余键 up 晚于 compositionend 就算
-      const orphaned = !isCommit && ceAt != null && k.up > ceAt
-      pushKeyUp(push, k.up, k.code, k.keyCode ?? 0, k.letter ?? '', orphaned, ceAt)
+      // 上屏键自己结束组字，不算 orphaned；其余键要看 keyup 那一刻**有没有任何组字**
+      // 在进行 —— 包括下一段的。见文件头 composingAt 的说明与出处。
+      const orphaned = !isCommit && !composingAt(k.up)
+      pushKeyUp(push, k.up, k.code, k.keyCode ?? 0, k.letter ?? '', orphaned)
     })
   }
 

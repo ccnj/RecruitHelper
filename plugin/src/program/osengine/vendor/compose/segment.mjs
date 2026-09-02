@@ -42,6 +42,22 @@
 import { tokenize, keyFor, typable, whyUntypable } from './pinyin.mjs'
 import { segmentWords } from './lexicon.mjs'
 
+/**
+ * 「这段文案打不出来」—— 文案层面的失败，与排版器自己坏了是两回事。
+ *
+ * 类型要分开，因为处理方式相反：前者换种子重采一万次也一样，该**跳过这条**继续；
+ * 后者（配置缺参数、平台名写错、pinyin-pro 对不齐）每一条都会失败，该**停下来让人看见**。
+ * `compose` 只 catch 这一个类型，其余照抛。先前靠 try 恰好包在 composeOnce 上碰巧
+ * 做到了这一点，没有类型保证 —— 哪天有人把一个校验挪进 composeOnce，它就会被吞成
+ * 「这条文案有问题」，生产侧逐条跳过、一直跳，把一次故障掩盖成一堆坏文案。
+ */
+export class UntypableError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'UntypableError'
+  }
+}
+
 /** 真人基线的上屏字数分布 */
 export const COMMIT_LEN_DIST = [
   { len: 1, p: 0.261 },
@@ -81,7 +97,7 @@ export function segment(text, rng, opt = {}) {
   })
   if (bad.length) {
     const detail = bad.map((b) => `第 ${b.i + 1} 个字元 ${JSON.stringify(b.ch)}：${b.why}`).join('；')
-    throw new Error(`文案含 ${bad.length} 个当前方案打不出的字元 —— ${detail}`)
+    throw new UntypableError(`文案含 ${bad.length} 个当前方案打不出的字元 —— ${detail}`)
   }
   const out = []
   let buf = []
@@ -117,7 +133,7 @@ export function segment(text, rng, opt = {}) {
       // 拼音为空的汉字打不出来。旧版会静默产出 pinyin 为空的 ime 段，
       // 计划里 keys=0、只剩一个 commit 键 —— 真机上 composition 为空时按下它，
       // 屏幕直接落一个字面字符。宁可在这里显式失败。
-      throw new Error(
+      throw new UntypableError(
         `以下字缺拼音，无法用输入法打出：${missing.map((t) => t.ch).join('')}` +
           `（片段 ${JSON.stringify(take.map((t) => t.ch).join(''))}）`
       )
@@ -182,7 +198,19 @@ export function segment(text, rng, opt = {}) {
     flushHan()
     flushLatin()
     const k = keyFor(t) // 前置校验已保证非 null
-    out.push({ kind: 'direct', text: t.ch, code: k.code, shift: !!k.shift })
+    // passthrough 来自键位表，见 pinyin.mjs 的 keyFor —— 判据是「这个键在美式布局上
+    // 按下去，出来的就是这个字元吗」。是就透传（网页看到普通 keydown + insertText，
+    // type1），不是就得走组字让 TIP 上屏（type2）。
+    //
+    // **这件事离线模型一直知道**（synth 靠它展开事件流），但从来没告诉过 TIP，
+    // 而 TIP 把空格 / 数字 / OEM 标点键一律当上屏键吃掉。2026-09-01 真机实测确认了
+    // 后果：一个字面数字就让 verify-capture 的五项里四项对不上（input 29→30、
+    // compositionstart/end 5→6、keyup 55→56）。屏幕上的字是对的，歪的是我们自己的尺子。
+    // 见 lab/calibrate/baseline/tip-win-digit-2026-09-01.json。
+    out.push({
+      kind: 'direct', text: t.ch, code: k.code, shift: !!k.shift,
+      passthrough: k.passthrough,
+    })
   }
   flushHan()
   flushLatin()
