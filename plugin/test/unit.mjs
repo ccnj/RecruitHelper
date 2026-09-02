@@ -14760,6 +14760,7 @@ const KNOWN_OTHER_PACING = {
   mainCancelZhilianOfflineDialog: '下线取消,调用点前有行内节奏',
   mainClickRevealPeerPhone: '查看电话,调用点前有行内节奏',
   mainSendGreetingOnce: '招呼发送,三个调用点前均有行内节奏',
+  mainActivateZhilianNoticeTab: '个人中心「通知」页签切换,导航后有行内节奏(ensureZhilianPersonalTab),点击后再等一秒才读列表',
 
   // —— 未确认:2026-08-26 静态核查时,调用点前 45 行内没找到节奏构造。
   //    这**不等于**没有节奏(可能在更上层、或在调用者里),只是本次没能从源码
