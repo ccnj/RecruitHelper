@@ -1,5 +1,7 @@
 // 插件能力测试：在真实页面上验证手侧原语确实能跑通，但全部不产生候选人可见
-// 动作。页面按"一项能力一个区块"组织，后续新增能力照此追加。
+// 动作。页面按"页 → 组 → 卡"三层组织：一项能力一张卡，卡内固定"说明 → 参数 →
+// 运行 → 结果"四段；后续新增能力照此追加一张卡，归哪个组看它动的是页面还是
+// 操作系统。
 //
 // 邀面编辑器彩排（debug.probeInterviewEditor@1）与 chat.sendInviteCard 字面
 // 共用同一编辑器准备实现，走完整选择与终核回读后停留 5 秒供肉眼确认，再取消
@@ -30,24 +32,124 @@ export function PluginCapabilityPage({ account, conversations, conversationsLoad
 }) {
   const picker = { conversations, conversationsLoading, conversationsError }
   return (
-    <div className="panel">
-      <p>
+    <div className="probe-page">
+      <p className="probe-page-lead">
         在真实页面上验证手侧原语能不能跑通。这里的每一项都不产生候选人可见动作，
-        但会操作招聘人员自己看到的页面（开弹窗、点选择框），跑的时候别同时用浏览器。
+        但会操作招聘人员自己看到的页面（开弹窗、点选择框、挪鼠标、敲键盘），
+        跑的时候别同时用浏览器。
       </p>
-      <p>
-        最后两项是 <strong>OS 级键鼠注入</strong>，它们真的会挪你的鼠标、真的会往键盘缓冲区
-        里发按键。注入打的是<strong>最前台的窗口</strong>，所以两块都有一段倒计时：
-        点完按钮<strong>切到 Chrome</strong>，然后<strong>手离开鼠标键盘</strong>，
-        等它跑完。中途切回这里或者碰了鼠标，闸会拦下来。
-      </p>
-      <InterviewEditorProbe account={account} {...picker} />
-      <NotifyProbe account={account} {...picker} />
-      <OsProbeBlock account={account} />
-      <OsTypeBlock account={account} />
+
+      <ProbeGroup
+        title="页面彩排"
+        summary="经插件在已经打开的平台页上把整条链路真跑一遍，停在发送之前。"
+      >
+        <InterviewEditorProbe account={account} {...picker} />
+        <NotifyProbe account={account} {...picker} />
+      </ProbeGroup>
+
+      <ProbeGroup
+        title="OS 级键鼠注入"
+        summary="不经浏览器合成事件，真的在操作系统层面挪鼠标、往键盘缓冲区发按键。"
+        caution={(
+          <>
+            注入打的是<strong>最前台的窗口</strong>，所以两块都有一段倒计时：
+            点完按钮<strong>切到 Chrome</strong>，然后<strong>手离开鼠标键盘</strong>，
+            等它跑完。中途切回这里或者碰了鼠标，闸会拦下来。
+          </>
+        )}
+      >
+        <OsProbeBlock account={account} />
+        <OsTypeBlock account={account} />
+      </ProbeGroup>
     </div>
   )
 }
+
+// ── 版式骨架 ─────────────────────────────────────────────────────────────
+//
+// 组：按"动的是什么"分——页面彩排走插件合成事件，OS 注入真碰键鼠。组头只放
+// 一句定位和（OS 组独有的）操作告诫，告诫在组头说一次，不进每张卡重复。
+function ProbeGroup({ title, summary, caution, children }: {
+  title: string
+  summary: string
+  caution?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <section className="probe-group">
+      <header className="probe-group-head">
+        <h2>{title}</h2>
+        <p>{summary}</p>
+      </header>
+      {caution ? <p className="probe-group-caution">{caution}</p> : null}
+      {children}
+    </section>
+  )
+}
+
+// 卡：一项能力一张。标题栏右侧的标签回答看这一页的人点按钮前最想确认的两件
+// 事——它真的会动什么、候选人会不会看见。跑的时候整张卡左沿亮起，一屏里几张
+// 卡同时在，也看得出是哪张在动。
+type ProbeTag = { text: string; kind: 'safe' | 'real' | 'os' }
+
+function ProbeCard({ index, title, tags, running, children }: {
+  index: string
+  title: string
+  tags: readonly ProbeTag[]
+  running: boolean
+  children: React.ReactNode
+}) {
+  const headingId = `probe-card-${index}`
+  return (
+    <section className={`probe-card${running ? ' is-running' : ''}`} aria-labelledby={headingId}>
+      <header className="probe-card-head">
+        <span className="probe-card-index mono">{index}</span>
+        <h3 id={headingId}>{title}</h3>
+        <span className="probe-card-tags">
+          {tags.map((tag) => (
+            <span key={tag.text} className={`probe-card-tag is-${tag.kind}`}>{tag.text}</span>
+          ))}
+        </span>
+      </header>
+      {children}
+    </section>
+  )
+}
+
+// 段：卡内固定四段，左侧段名、右侧内容，段间横线。参数段里的说明缩进到与
+// 控件对齐（is-form），结果段底色略沉，与上面的操作面分开（is-result）。
+function ProbeZone({ label, kind, children }: {
+  label: string
+  kind?: 'form' | 'result'
+  children: React.ReactNode
+}) {
+  return (
+    <div className={`probe-zone${kind ? ` is-${kind}` : ''}`}>
+      <span className="probe-zone-label">{label}</span>
+      <div className="probe-zone-body">{children}</div>
+    </div>
+  )
+}
+
+// 前提清单：手侧会拒、或者跑了也白跑的硬条件。成块、压低字重，与"这一步会
+// 发生什么"的正文分开，看的人扫一眼就知道先去准备什么。
+function ProbePrereq({ items }: { items: readonly React.ReactNode[] }) {
+  return (
+    <div className="probe-prereq">
+      <strong>前提</strong>
+      <ul>
+        {items.map((item, index) => <li key={index}>{item}</li>)}
+      </ul>
+    </div>
+  )
+}
+
+// 结果段在没跑之前也占位：卡的形状稳定，眼睛才记得住"结果在最下面"。
+function ProbeIdle({ running, hint }: { running: boolean; hint: string }) {
+  return <p className="probe-idle">{running ? '进行中…' : hint}</p>
+}
+
+// ── 页面彩排：邀面编辑器 ─────────────────────────────────────────────────
 
 function InterviewEditorProbe({ account, conversations, conversationsLoading, conversationsError }: {
   account: AccountView | null
@@ -102,87 +204,101 @@ function InterviewEditorProbe({ account, conversations, conversationsLoading, co
   }, [running, blocked, account, conversationRef, startsAt, method])
 
   return (
-    <section className="probe-block">
-      <h3>邀面编辑器彩排</h3>
-      <p>
-        把发面试卡的整套编辑器操作真做一遍——开弹窗、切面试类型、填日期时间
-        （线上还要填时长和方式）、回读核对——然后<strong>停 5 秒给你看清</strong>，
-        再自己点取消并确认弹窗已关。全程不碰发送按钮，候选人那边什么都收不到。
-      </p>
-      <p className="probe-note">
-        两个前提：目标会话的聊天页必须已经在浏览器里打开（它不会自己导航过去）；
-        已经约过面试的会话不能彩排——那种会话的入口按钮会变成「面试详情」，
-        点开的是详情而不是邀请。
-      </p>
-
-      <ConversationPicker
-        value={conversationRef}
-        onChange={setConversationRef}
-        disabled={running}
-        account={account}
-        conversations={conversations}
-        conversationsLoading={conversationsLoading}
-        conversationsError={conversationsError}
-        note={(
+    <ProbeCard
+      index="01"
+      title="邀面编辑器彩排"
+      running={running}
+      tags={[{ text: '不碰发送按钮', kind: 'safe' }, { text: '候选人零感知', kind: 'safe' }]}
+    >
+      <ProbeZone label="说明">
+        <p>
+          把发面试卡的整套编辑器操作真做一遍——开弹窗、切面试类型、填日期时间
+          （线上还要填时长和方式）、回读核对——然后<strong>停 5 秒给你看清</strong>，
+          再自己点取消并确认弹窗已关。全程不碰发送按钮，候选人那边什么都收不到。
+        </p>
+        <ProbePrereq items={[
+          <>目标会话的聊天页必须已经在浏览器里打开（它不会自己导航过去）。</>,
           <>
-            会话就是平台聊天页地址栏 <code>?sessionId=</code> 后面那串。手侧拿它去匹配
-            你已经打开的标签页，所以<strong>不需要这条会话在脑的库里</strong>——没巡检过、
-            没收编过都能彩排。填错或页面没开只会报「目标页面不存在」，不会跑到别人身上。
-          </>
-        )}
-      />
+            已经约过面试的会话不能彩排——那种会话的入口按钮会变成「面试详情」，
+            点开的是详情而不是邀请。
+          </>,
+        ]} />
+      </ProbeZone>
 
-      <label className="probe-field">
-        <span>面试类型</span>
-        <span className="probe-radios">
-          <label>
-            <input
-              type="radio"
-              name="probe-method"
-              checked={method === 'onsite'}
-              onChange={() => setMethod('onsite')}
-              disabled={running}
-            />
-            现场面试
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="probe-method"
-              checked={method === 'wechatVideo'}
-              onChange={() => setMethod('wechatVideo')}
-              disabled={running}
-            />
-            线上面试（微信视频）
-          </label>
-        </span>
-      </label>
-
-      <label className="probe-field">
-        <span>面试时间</span>
-        <input
-          className="sql-input"
-          type="datetime-local"
-          step={300}
-          value={startsAtText}
-          onChange={(event) => setStartsAtText(event.target.value)}
+      <ProbeZone label="参数" kind="form">
+        <ConversationPicker
+          value={conversationRef}
+          onChange={setConversationRef}
           disabled={running}
+          account={account}
+          conversations={conversations}
+          conversationsLoading={conversationsLoading}
+          conversationsError={conversationsError}
+          note={(
+            <>
+              会话就是平台聊天页地址栏 <code>?sessionId=</code> 后面那串。手侧拿它去匹配
+              你已经打开的标签页，所以<strong>不需要这条会话在脑的库里</strong>——没巡检过、
+              没收编过都能彩排。填错或页面没开只会报「目标页面不存在」，不会跑到别人身上。
+            </>
+          )}
         />
-      </label>
-      <p className="probe-note">
-        现场面试没有时长可填，平台也不返回结束时间；线上面试固定按 30 分钟彩排。
-      </p>
 
-      <div className="sql-bar">
-        <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
-          {running ? '彩排中，请看浏览器…' : '开始彩排'}
-        </button>
-        {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
-        {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
-      </div>
+        <label className="probe-field">
+          <span>面试类型</span>
+          <span className="probe-radios">
+            <label>
+              <input
+                type="radio"
+                name="probe-method"
+                checked={method === 'onsite'}
+                onChange={() => setMethod('onsite')}
+                disabled={running}
+              />
+              现场面试
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="probe-method"
+                checked={method === 'wechatVideo'}
+                onChange={() => setMethod('wechatVideo')}
+                disabled={running}
+              />
+              线上面试（微信视频）
+            </label>
+          </span>
+        </label>
 
-      <ProbeOutcome result={result} transportError={transportError} />
-    </section>
+        <label className="probe-field">
+          <span>面试时间</span>
+          <input
+            className="sql-input"
+            type="datetime-local"
+            step={300}
+            value={startsAtText}
+            onChange={(event) => setStartsAtText(event.target.value)}
+            disabled={running}
+          />
+        </label>
+        <p className="probe-note">
+          现场面试没有时长可填，平台也不返回结束时间；线上面试固定按 30 分钟彩排。
+        </p>
+      </ProbeZone>
+
+      <ProbeZone label="运行">
+        <div className="probe-run">
+          <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
+            {running ? '彩排中，请看浏览器…' : '开始彩排'}
+          </button>
+          {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
+          {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
+        </div>
+      </ProbeZone>
+
+      <ProbeZone label="结果" kind="result">
+        <ProbeOutcome result={result} transportError={transportError} running={running} />
+      </ProbeZone>
+    </ProbeCard>
   )
 }
 
@@ -241,8 +357,10 @@ function ConversationPicker({
   )
 }
 
-// 运营通知彩排：把线上那条通知的完整链路真跑一遍——现场截聊天长图与简历长图、
-// 按候选人此刻的状态/微信/画像现算正文、直发运营群。
+// ── 页面彩排：运营通知 ───────────────────────────────────────────────────
+//
+// 把线上那条通知的完整链路真跑一遍——现场截聊天长图与简历长图、按候选人此刻
+// 的状态/微信/画像现算正文、直发运营群。
 //
 // 它一行都不写发件箱：不入队、不占 event_key、不落截图事实行。这不是洁癖——
 // 发件箱的 event_key 是唯一索引且入队时撞了就静默跳过，彩排只要占掉一个 key，
@@ -291,86 +409,103 @@ function NotifyProbe({ account, conversations, conversationsLoading, conversatio
   }, [running, blocked, account, conversationRef, notifyType])
 
   return (
-    <section className="probe-block">
-      <h3>运营通知彩排</h3>
-      <p>
-        把运营群通知的整条链路真跑一遍：截聊天记录长图、截简历长图，按这个人
-        <strong>此刻</strong>的状态、微信号和画像现算正文，然后
-        <strong>真的发到运营群</strong>。候选人那边什么都收不到。
-      </p>
-      <p className="probe-note">
-        正文<strong>不带任何测试标记</strong>，和线上通知长得一模一样——这是为了看到
-        真实观感，代价是群里的人分不出真假，跑之前最好跟他们打个招呼。
-      </p>
-      <p className="probe-note">
-        它一行都不写发件箱，所以<strong>影响不到线上那条真通知</strong>：这个人日后真换到
-        微信、真约成面试，该发的照发，也不会因为你彩排过就被顶掉。
-      </p>
-      <p className="probe-note">
-        两个前提：目标会话的聊天页必须已经在浏览器里打开并在前台（截图不会自己
-        导航过去）；这个人必须<strong>已经在库里收编过</strong>——简历截图和正文里的状态、
-        微信号都得从档案里取，陌生会话会被直接拒绝。截图期间会开一次简历弹窗，
-        跑的时候别同时用浏览器。
-      </p>
-
-      <ConversationPicker
-        value={conversationRef}
-        onChange={setConversationRef}
-        disabled={running}
-        account={account}
-        conversations={conversations}
-        conversationsLoading={conversationsLoading}
-        conversationsError={conversationsError}
-        note={(
+    <ProbeCard
+      index="02"
+      title="运营通知彩排"
+      running={running}
+      tags={[{ text: '真发到运营群', kind: 'real' }, { text: '候选人零感知', kind: 'safe' }]}
+    >
+      <ProbeZone label="说明">
+        <p>
+          把运营群通知的整条链路真跑一遍：截聊天记录长图、截简历长图，按这个人
+          <strong>此刻</strong>的状态、微信号和画像现算正文，然后
+          <strong>真的发到运营群</strong>。候选人那边什么都收不到。
+        </p>
+        <p className="probe-note">
+          正文<strong>不带任何测试标记</strong>，和线上通知长得一模一样——这是为了看到
+          真实观感，代价是群里的人分不出真假，跑之前最好跟他们打个招呼。
+        </p>
+        <p className="probe-note">
+          它一行都不写发件箱，所以<strong>影响不到线上那条真通知</strong>：这个人日后真换到
+          微信、真约成面试，该发的照发，也不会因为你彩排过就被顶掉。
+        </p>
+        <ProbePrereq items={[
+          <>目标会话的聊天页必须已经在浏览器里打开并在前台（截图不会自己导航过去）。</>,
           <>
-            会话就是平台聊天页地址栏 <code>?sessionId=</code> 后面那串，整条 URL 粘进来
-            也行。它同时用来定位你打开的标签页和反查候选人档案。
-          </>
-        )}
-      />
+            这个人必须<strong>已经在库里收编过</strong>——简历截图和正文里的状态、微信号
+            都得从档案里取，陌生会话会被直接拒绝。
+          </>,
+          <>截图期间会开一次简历弹窗，跑的时候别同时用浏览器。</>,
+        ]} />
+      </ProbeZone>
 
-      <label className="probe-field">
-        <span>通知模板</span>
-        <select
-          value={notifyType}
-          onChange={(event) => setNotifyType(event.target.value as typeof notifyType)}
+      <ProbeZone label="参数" kind="form">
+        <ConversationPicker
+          value={conversationRef}
+          onChange={setConversationRef}
           disabled={running}
-        >
-          <option value="">按当前状态自动选（已约面→面试确认，否则微信互加）</option>
-          <option value="wecomInterviewAccepted">面试确认</option>
-          <option value="wecomWechatAdded">微信互加</option>
-        </select>
-      </label>
+          account={account}
+          conversations={conversations}
+          conversationsLoading={conversationsLoading}
+          conversationsError={conversationsError}
+          note={(
+            <>
+              会话就是平台聊天页地址栏 <code>?sessionId=</code> 后面那串，整条 URL 粘进来
+              也行。它同时用来定位你打开的标签页和反查候选人档案。
+            </>
+          )}
+        />
 
-      <div className="sql-bar">
-        <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
-          {running ? '正在截图并发送，可能要一两分钟…' : '截图并发通知'}
-        </button>
-        {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
-        {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
-      </div>
+        <label className="probe-field">
+          <span>通知模板</span>
+          <select
+            value={notifyType}
+            onChange={(event) => setNotifyType(event.target.value as typeof notifyType)}
+            disabled={running}
+          >
+            <option value="">按当前状态自动选（已约面→面试确认，否则微信互加）</option>
+            <option value="wecomInterviewAccepted">面试确认</option>
+            <option value="wecomWechatAdded">微信互加</option>
+          </select>
+        </label>
+      </ProbeZone>
 
-      {failure ? <p className="sql-error">没发出去：{failure}</p> : null}
-      {result ? (
-        <>
-          <p className="sql-ok">
-            已发到运营群（{result.notifyType === 'wecomInterviewAccepted' ? '面试确认' : '微信互加'}模板）
-          </p>
-          <p className="probe-note">发出去的正文原文：</p>
-          <pre className="probe-content">{result.content}</pre>
-          <dl className="probe-readback">
-            <dt>聊天截图</dt>
-            <dd><ImageOutcome image={result.chat} note={result.chatNote} /></dd>
-            <dt>简历截图</dt>
-            <dd><ImageOutcome image={result.resume} note={result.resumeNote} /></dd>
-          </dl>
-        </>
-      ) : null}
-    </section>
+      <ProbeZone label="运行">
+        <div className="probe-run">
+          <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
+            {running ? '正在截图并发送，可能要一两分钟…' : '截图并发通知'}
+          </button>
+          {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
+          {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
+        </div>
+      </ProbeZone>
+
+      <ProbeZone label="结果" kind="result">
+        {failure ? <p className="sql-error">没发出去：{failure}</p> : null}
+        {result ? (
+          <>
+            <p className="sql-ok">
+              已发到运营群（{result.notifyType === 'wecomInterviewAccepted' ? '面试确认' : '微信互加'}模板）
+            </p>
+            <p className="probe-note">发出去的正文原文：</p>
+            <pre className="probe-content">{result.content}</pre>
+            <dl className="probe-readback">
+              <dt>聊天截图</dt>
+              <dd><ImageOutcome image={result.chat} note={result.chatNote} /></dd>
+              <dt>简历截图</dt>
+              <dd><ImageOutcome image={result.resume} note={result.resumeNote} /></dd>
+            </dl>
+          </>
+        ) : null}
+        {!failure && !result
+          ? <ProbeIdle running={running} hint="还没发。发完后这里显示用的模板、正文原文与两张截图的去向。" />
+          : null}
+      </ProbeZone>
+    </ProbeCard>
   )
 }
 
-// ── OS 注入：鼠标 ───────────────────────────────────────────────────────
+// ── OS 注入：鼠标 ────────────────────────────────────────────────────────
 //
 // 这两块是键鼠线在 Windows 真机上的驾驶盘。**它们刻意不做任何前置校验**
 // （2026-09-01 甲方裁决）：不查 TIP 装没装、不查平台适配器有没有这条能力、
@@ -470,79 +605,94 @@ function OsProbeBlock({ account }: { account: AccountView | null }) {
 
   const data = result?.result?.data
   return (
-    <section className="probe-block">
-      <h3>OS 鼠标注入探针</h3>
-      <p>
-        走完整条鼠标线：定位元素 → 按人的轨迹移光标 → 落点确认 → 喂搭车标定。
-        它<strong>不经浏览器合成事件</strong>，是真的在操作系统层面挪鼠标，
-        所以页面收到的 <code>isTrusted</code> 是真的。
-      </p>
-      <p className="probe-note">
-        <strong>冷启动第一趟多半打偏</strong>（窗口位置只能粗估，能差一两百物理像素），
-        outcome 会是 <code>refusedByGate</code>。它自己会重试到标定追上，实测两趟就够，
-        所以第一次被拒别当故障——看 <code>attempts</code> 与 <code>落点偏差</code>。
-      </p>
+    <ProbeCard
+      index="03"
+      title="OS 鼠标注入探针"
+      running={running}
+      tags={[{ text: '真挪鼠标', kind: 'os' }, { text: '候选人零感知', kind: 'safe' }]}
+    >
+      <ProbeZone label="说明">
+        <p>
+          走完整条鼠标线：定位元素 → 按人的轨迹移光标 → 落点确认 → 喂搭车标定。
+          它<strong>不经浏览器合成事件</strong>，是真的在操作系统层面挪鼠标，
+          所以页面收到的 <code>isTrusted</code> 是真的。
+        </p>
+        <p className="probe-note">
+          <strong>冷启动第一趟多半打偏</strong>（窗口位置只能粗估，能差一两百物理像素），
+          outcome 会是 <code>refusedByGate</code>。它自己会重试到标定追上，实测两趟就够，
+          所以第一次被拒别当故障——看 <code>attempts</code> 与 <code>落点偏差</code>。
+        </p>
+      </ProbeZone>
 
-      <label className="probe-field">
-        <span>靶子</span>
-        <span className="probe-radios">
-          <label>
-            <input type="radio" name="os-probe-target" checked={target === 'viewportSpread'}
-              onChange={() => setTarget('viewportSpread')} disabled={running} />
-            只移不点
-          </label>
-          <label>
-            <input type="radio" name="os-probe-target" checked={target === 'reversibleToggle'}
-              onChange={() => setTarget('reversibleToggle')} disabled={running} />
-            真点一次（可逆开关）
-          </label>
-        </span>
-      </label>
-      <p className="probe-note">
-        「只移不点」全程不按下鼠标键，用来验坐标算得对不对；「真点一次」会点一个
-        自身可逆的控件（比如列表页的筛选开关），点完页面会变，但不产生任何候选人
-        可见动作。
-      </p>
+      <ProbeZone label="参数" kind="form">
+        <label className="probe-field">
+          <span>靶子</span>
+          <span className="probe-radios">
+            <label>
+              <input type="radio" name="os-probe-target" checked={target === 'viewportSpread'}
+                onChange={() => setTarget('viewportSpread')} disabled={running} />
+              只移不点
+            </label>
+            <label>
+              <input type="radio" name="os-probe-target" checked={target === 'reversibleToggle'}
+                onChange={() => setTarget('reversibleToggle')} disabled={running} />
+              真点一次（可逆开关）
+            </label>
+          </span>
+        </label>
+        <p className="probe-note">
+          「只移不点」全程不按下鼠标键，用来验坐标算得对不对；「真点一次」会点一个
+          自身可逆的控件（比如列表页的筛选开关），点完页面会变，但不产生任何候选人
+          可见动作。
+        </p>
 
-      <LeadInField leadSec={lead.leadSec} setLeadSec={lead.setLeadSec} disabled={running} />
+        <LeadInField leadSec={lead.leadSec} setLeadSec={lead.setLeadSec} disabled={running} />
+      </ProbeZone>
 
-      <div className="sql-bar">
-        <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
-          {lead.left > 0
-            ? `切到 Chrome… ${lead.left}`
-            : running ? '注入中，手别碰鼠标…' : '开始注入'}
-        </button>
-        {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
-        {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
-      </div>
+      <ProbeZone label="运行">
+        <div className="probe-run">
+          <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
+            {lead.left > 0
+              ? `切到 Chrome… ${lead.left}`
+              : running ? '注入中，手别碰鼠标…' : '开始注入'}
+          </button>
+          {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
+          {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
+        </div>
+      </ProbeZone>
 
-      <OsFailure result={result} transportError={transportError} />
-      {data ? (
-        <>
-          <p className={data.outcome === 'landed' || data.outcome === 'clicked' ? 'sql-ok' : 'sql-error'}>
-            {osProbeVerdict(data.outcome)}
-          </p>
-          <dl className="probe-readback">
-            <dt>试了几趟</dt><dd className="mono">{data.attempts}</dd>
-            <dt>落点偏差</dt>
-            <dd className={data.landingDriftPx === undefined ? 'probe-absent' : 'mono'}>
-              {data.landingDriftPx === undefined ? '没测到（没走到落点确认）' : `${data.landingDriftPx} px`}
-            </dd>
-            <dt>标定</dt><dd className="mono">{data.calibStatus}</dd>
-            <dt>够不到的框</dt><dd className="mono">{data.unreachableFrames}</dd>
-            <dt>排轨迹</dt><dd className="mono">{data.planMs} ms</dd>
-            <dt>播放滞后峰值</dt><dd className="mono">{data.lagMaxUs} us</dd>
-            <dt>整条耗时</dt><dd className="mono">{data.elapsedMs} ms</dd>
-          </dl>
-          <OsDetail detail={data.detail} />
-        </>
-      ) : null}
-      {result?.msgId ? <p className="mono probe-msgid">msgId {result.msgId}</p> : null}
-    </section>
+      <ProbeZone label="结果" kind="result">
+        <OsFailure result={result} transportError={transportError} />
+        {data ? (
+          <>
+            <p className={data.outcome === 'landed' || data.outcome === 'clicked' ? 'sql-ok' : 'sql-error'}>
+              {osProbeVerdict(data.outcome)}
+            </p>
+            <dl className="probe-readback">
+              <dt>试了几趟</dt><dd className="mono">{data.attempts}</dd>
+              <dt>落点偏差</dt>
+              <dd className={data.landingDriftPx === undefined ? 'probe-absent' : 'mono'}>
+                {data.landingDriftPx === undefined ? '没测到（没走到落点确认）' : `${data.landingDriftPx} px`}
+              </dd>
+              <dt>标定</dt><dd className="mono">{data.calibStatus}</dd>
+              <dt>够不到的框</dt><dd className="mono">{data.unreachableFrames}</dd>
+              <dt>排轨迹</dt><dd className="mono">{data.planMs} ms</dd>
+              <dt>播放滞后峰值</dt><dd className="mono">{data.lagMaxUs} us</dd>
+              <dt>整条耗时</dt><dd className="mono">{data.elapsedMs} ms</dd>
+            </dl>
+            <OsDetail detail={data.detail} />
+          </>
+        ) : null}
+        {result?.msgId ? <p className="mono probe-msgid">msgId {result.msgId}</p> : null}
+        {!result && !transportError
+          ? <ProbeIdle running={running} hint="还没跑。跑完后这里显示落点结局、几项计时与手侧流水。" />
+          : null}
+      </ProbeZone>
+    </ProbeCard>
   )
 }
 
-// ── OS 注入：键盘 ───────────────────────────────────────────────────────
+// ── OS 注入：键盘 ────────────────────────────────────────────────────────
 
 // 预置文案不是图省事。Windows 真机上跑这一块时，**操作者没法自己敲进这些字**
 // ——敲中文要用输入法，而输入法正是我们马上要接管的东西。所以给按钮。
@@ -597,75 +747,93 @@ function OsTypeBlock({ account }: { account: AccountView | null }) {
 
   const data = result?.result?.data
   return (
-    <section className="probe-block">
-      <h3>OS 键盘注入探针</h3>
-      <p>
-        把一句话打进聊天输入框，然后<strong>停手——不点发送</strong>。走的是真人那条路：
-        逐个音节敲拼音、按上屏键、等组字周期，页面收到的是真键盘事件。
-        输入框里<strong>只会多出草稿</strong>，没有任何东西到达服务端，更没有任何东西
-        到达候选人。
-      </p>
-      <p className="probe-note">
-        两个硬前提，手侧自己会拒：目标平台的聊天页得开着；<strong>输入框必须是空的</strong>
-        ——覆盖你已经敲进去的字是红线，这道闸与真发消息用的是同一个，不为调试放宽。
-      </p>
+    <ProbeCard
+      index="04"
+      title="OS 键盘注入探针"
+      running={running}
+      tags={[{ text: '真敲键盘', kind: 'os' }, { text: '不点发送', kind: 'safe' }]}
+    >
+      <ProbeZone label="说明">
+        <p>
+          把一句话打进聊天输入框，然后<strong>停手——不点发送</strong>。走的是真人那条路：
+          逐个音节敲拼音、按上屏键、等组字周期，页面收到的是真键盘事件。
+          输入框里<strong>只会多出草稿</strong>，没有任何东西到达服务端，更没有任何东西
+          到达候选人。
+        </p>
+        <ProbePrereq items={[
+          <>目标平台的聊天页得开着（手侧自己会拒）。</>,
+          <>
+            <strong>输入框必须是空的</strong>——覆盖你已经敲进去的字是红线，这道闸与真发
+            消息用的是同一个，不为调试放宽。
+          </>,
+        ]} />
+      </ProbeZone>
 
-      <label className="probe-field">
-        <span>要打的话</span>
-        <input className="sql-input" value={text} onChange={(event) => setText(event.target.value)}
-          placeholder="中文即可，英文也行" disabled={running} />
-      </label>
-      <div className="sql-bar">
-        {OS_TYPE_PRESETS.map((preset) => (
-          <button key={preset.label} title={preset.why}
-            onClick={() => setText(preset.text)} disabled={running}>
-            {preset.label}
+      <ProbeZone label="参数" kind="form">
+        <label className="probe-field">
+          <span>要打的话</span>
+          <input className="sql-input" value={text} onChange={(event) => setText(event.target.value)}
+            placeholder="中文即可，英文也行" disabled={running} />
+        </label>
+        <div className="probe-run">
+          {OS_TYPE_PRESETS.map((preset) => (
+            <button key={preset.label} title={preset.why}
+              onClick={() => setText(preset.text)} disabled={running}>
+              {preset.label}
+            </button>
+          ))}
+          <small className={runes > OS_TYPE_MAX_RUNES ? 'sql-error' : 'probe-blocked'}>
+            {runes} / {OS_TYPE_MAX_RUNES} 字元
+          </small>
+        </div>
+        <p className="probe-note">
+          Windows 上你多半敲不进中文——敲中文要用输入法，而输入法正是这一块要接管的东西。
+          所以给了四个预置：<strong>纯中文</strong>对比 macOS 那次、<strong>中英混排</strong>
+          验英文段、<strong>含数字</strong>与<strong>半角标点</strong>验透传段——
+          后两种真输入法下是直接上屏（type1），TIP 收到词表里的透传标记就不吃那个键。
+        </p>
+
+        <LeadInField leadSec={lead.leadSec} setLeadSec={lead.setLeadSec} disabled={running} />
+      </ProbeZone>
+
+      <ProbeZone label="运行">
+        <div className="probe-run">
+          <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
+            {lead.left > 0
+              ? `切到 Chrome… ${lead.left}`
+              : running ? '打字中，别碰键盘、别切走 Chrome…' : '开始打字'}
           </button>
-        ))}
-        <small className={runes > OS_TYPE_MAX_RUNES ? 'sql-error' : 'probe-blocked'}>
-          {runes} / {OS_TYPE_MAX_RUNES} 字元
-        </small>
-      </div>
-      <p className="probe-note">
-        Windows 上你多半敲不进中文——敲中文要用输入法，而输入法正是这一块要接管的东西。
-        所以给了四个预置：<strong>纯中文</strong>对比 macOS 那次、<strong>中英混排</strong>
-        验英文段、<strong>含数字</strong>与<strong>半角标点</strong>验透传段——
-        后两种真输入法下是直接上屏（type1），TIP 收到词表里的透传标记就不吃那个键。
-      </p>
+          {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
+          {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
+        </div>
+      </ProbeZone>
 
-      <LeadInField leadSec={lead.leadSec} setLeadSec={lead.setLeadSec} disabled={running} />
-
-      <div className="sql-bar">
-        <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
-          {lead.left > 0
-            ? `切到 Chrome… ${lead.left}`
-            : running ? '打字中，别碰键盘、别切走 Chrome…' : '开始打字'}
-        </button>
-        {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
-        {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
-      </div>
-
-      <OsFailure result={result} transportError={transportError} />
-      {data ? (
-        <>
-          <p className={data.outcome === 'typed' ? 'sql-ok' : 'sql-error'}>{osTypeVerdict(data.outcome)}</p>
-          {data.outcome === 'typed' ? <MatchedVerdict matched={data.matched} /> : null}
-          <dl className="probe-readback">
-            <dt>发了几次按键</dt><dd className="mono">{data.keys}</dd>
-            <dt>排版重采</dt><dd className="mono">{data.tries} 次</dd>
-            <dt>排版耗时</dt><dd className="mono">{data.planMs} ms</dd>
-            <dt>播放滞后峰值</dt>
-            <dd className="mono">
-              {data.lagMaxUs} us
-              {data.lagMaxUs > 20000 ? '（偏大，本机当时可能在忙别的）' : ''}
-            </dd>
-            <dt>整条耗时</dt><dd className="mono">{data.elapsedMs} ms</dd>
-          </dl>
-          <OsDetail detail={data.detail} />
-        </>
-      ) : null}
-      {result?.msgId ? <p className="mono probe-msgid">msgId {result.msgId}</p> : null}
-    </section>
+      <ProbeZone label="结果" kind="result">
+        <OsFailure result={result} transportError={transportError} />
+        {data ? (
+          <>
+            <p className={data.outcome === 'typed' ? 'sql-ok' : 'sql-error'}>{osTypeVerdict(data.outcome)}</p>
+            {data.outcome === 'typed' ? <MatchedVerdict matched={data.matched} /> : null}
+            <dl className="probe-readback">
+              <dt>发了几次按键</dt><dd className="mono">{data.keys}</dd>
+              <dt>排版重采</dt><dd className="mono">{data.tries} 次</dd>
+              <dt>排版耗时</dt><dd className="mono">{data.planMs} ms</dd>
+              <dt>播放滞后峰值</dt>
+              <dd className="mono">
+                {data.lagMaxUs} us
+                {data.lagMaxUs > 20000 ? '（偏大，本机当时可能在忙别的）' : ''}
+              </dd>
+              <dt>整条耗时</dt><dd className="mono">{data.elapsedMs} ms</dd>
+            </dl>
+            <OsDetail detail={data.detail} />
+          </>
+        ) : null}
+        {result?.msgId ? <p className="mono probe-msgid">msgId {result.msgId}</p> : null}
+        {!result && !transportError
+          ? <ProbeIdle running={running} hint="还没跑。跑完后这里显示上屏结局、回读是否逐字相同与手侧流水。" />
+          : null}
+      </ProbeZone>
+    </ProbeCard>
   )
 }
 
@@ -757,12 +925,13 @@ function ImageOutcome({ image, note }: { image: NotifyProbeImage; note?: string 
   )
 }
 
-function ProbeOutcome({ result, transportError }: {
+function ProbeOutcome({ result, transportError, running }: {
   result: InterviewProbeResult | null
   transportError: string | null
+  running: boolean
 }) {
   if (transportError) return <p className="sql-error">连不上脑：{transportError}</p>
-  if (!result) return null
+  if (!result) return <ProbeIdle running={running} hint="还没跑。跑完后这里显示彩排结局与编辑器的回读值。" />
 
   const data = result.data
   const failed = result.status !== 'ok'

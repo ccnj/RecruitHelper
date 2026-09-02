@@ -1423,9 +1423,95 @@ h1, h2, h3, p { margin-top: 0; }
 
 .sql-table .sql-null { color: var(--txt-faint); font-style: italic; }
 
-/* 插件能力测试：一项能力一个区块，区块内是"填参数 → 跑 → 看回读"三段。 */
-.probe-block { display: flex; flex-direction: column; gap: 0.55rem; }
-.probe-block > p { margin: 0; }
+/* ── 插件能力测试 ───────────────────────────────────── */
+/* 页 → 组 → 卡三层。一项能力一张卡，卡与卡之间靠边框、标题栏和组头隔开；
+   卡内固定"说明 → 参数 → 运行 → 结果"四段，左侧段名、段间横线。 */
+.probe-page { display: flex; flex-direction: column; gap: 1.1rem; }
+.probe-page-lead { max-width: 72rem; color: var(--txt-dim); line-height: 1.6; }
+
+.probe-group { display: flex; flex-direction: column; gap: 0.7rem; }
+.probe-group-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--rule-hi);
+}
+.probe-group-head h2 { color: var(--txt); font-size: var(--fs-lg); letter-spacing: 0.03em; text-transform: none; }
+.probe-group-head p { color: var(--txt-dim); font-size: var(--fs-sm); line-height: 1.5; }
+
+/* OS 组的操作告诫：它决定那两块能不能跑出成功，在组头说一次，不进每张卡重复。 */
+.probe-group-caution {
+  padding: 0.45rem 0.6rem;
+  border-left: 2px solid var(--warn);
+  background: rgba(245, 167, 66, 0.07);
+  color: var(--txt);
+  line-height: 1.6;
+}
+.probe-group-caution strong { color: var(--warn); }
+
+.probe-card {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--rule-hi);
+  border-radius: 2px;
+  background: var(--bay);
+}
+/* 跑的时候整张卡左沿亮起：一屏里几张卡同时在，看得出是哪张在动。 */
+.probe-card.is-running { border-left-color: var(--beam); box-shadow: 0 0 0 1px rgba(77, 163, 255, 0.18); }
+
+.probe-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--rule);
+  background: linear-gradient(180deg, var(--bay-hi), transparent);
+}
+.probe-card-index { color: var(--txt-faint); letter-spacing: 0.08em; }
+.probe-card-head h3 { color: var(--txt); font-size: var(--fs-lg); letter-spacing: 0.02em; text-transform: none; }
+.probe-card-tags { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-left: auto; }
+.probe-card-tag {
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--rule-hi);
+  border-radius: 2px;
+  color: var(--txt-dim);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+.probe-card-tag.is-safe { color: var(--live); border-color: rgba(61, 220, 151, 0.4); }
+.probe-card-tag.is-real { color: var(--warn); border-color: rgba(245, 167, 66, 0.45); }
+.probe-card-tag.is-os { color: var(--beam); border-color: rgba(77, 163, 255, 0.45); }
+
+.probe-zone {
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr);
+  gap: 0 0.8rem;
+  padding: 0.6rem 0.75rem 0.7rem;
+  border-top: 1px solid var(--rule);
+}
+.probe-card-head + .probe-zone { border-top: 0; }
+.probe-zone-label { padding-top: 0.15rem; color: var(--txt-faint); font-size: var(--fs-sm); letter-spacing: 0.12em; }
+.probe-zone-body { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
+.probe-zone-body > p { line-height: 1.6; }
+/* 结果段底色略沉，与上面的操作面分开。 */
+.probe-zone.is-result { background: rgba(0, 0, 0, 0.16); }
+/* 参数段里凡不是"标签 + 控件"那一行的东西（说明、预置按钮、错误），一律缩进到
+   控件那一列，说明才跟着它解释的那个控件走。 */
+.probe-zone.is-form > .probe-zone-body > :not(.probe-field) { padding-left: 8.1rem; }
+
+/* 前提清单：手侧会拒、或者跑了也白跑的硬条件。成块、压低字重，与正文分开。 */
+.probe-prereq {
+  padding: 0.4rem 0.6rem;
+  border-left: 2px solid var(--warn);
+  background: rgba(245, 167, 66, 0.06);
+  color: var(--txt-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.probe-prereq > strong { display: block; margin-bottom: 0.15rem; color: var(--warn); font-size: var(--fs-sm); letter-spacing: 0.08em; }
+.probe-prereq ul { margin: 0; padding-left: 1.2rem; }
+.probe-prereq li { margin: 0.1rem 0; }
+.probe-prereq li strong { color: var(--txt); }
 
 /* 前置条件与"这一步不会发生什么"的说明，压低视觉重量但不可省略。 */
 .probe-note {
@@ -1435,6 +1521,8 @@ h1, h2, h3, p { margin-top: 0; }
   line-height: 1.5;
 }
 
+/* 一行参数：左边固定宽的标签，右边控件。文本框吃掉剩余宽度而不是换到下一行
+   ——全局 input 是 width:100%，在 wrap 的 flex 行里会整个掉下去。 */
 .probe-field {
   display: flex;
   align-items: center;
@@ -1442,14 +1530,12 @@ h1, h2, h3, p { margin-top: 0; }
   flex-wrap: wrap;
 }
 .probe-field > span:first-child {
-  min-width: 5rem;
+  flex: 0 0 7.5rem;
   color: var(--txt-faint);
   font-size: var(--fs-sm);
 }
-.probe-field select {
-  min-width: 18rem;
-  max-width: 100%;
-}
+.dc-shell .probe-field > input:not([type="radio"]) { flex: 1 1 14rem; width: auto; max-width: 100%; }
+.dc-shell .probe-field > select { flex: 0 1 auto; width: auto; min-width: 18rem; max-width: 100%; }
 .probe-radios { display: flex; gap: 1rem; flex-wrap: wrap; }
 .probe-radios label {
   display: flex;
@@ -1470,10 +1556,17 @@ h1, h2, h3, p { margin-top: 0; }
 }
 
 /* 时间输入不必占满整行。 */
-.dc-shell .probe-field input[type="datetime-local"] { width: auto; min-width: 13rem; }
+.dc-shell .probe-field > input[type="datetime-local"] { flex: 0 0 auto; width: auto; min-width: 13rem; }
+
+/* 运行段的一行：按钮 + 缺什么 + 耗时。键盘卡的预置文案按钮排也复用它。 */
+.probe-run { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.probe-run small { color: var(--txt-faint); font-size: var(--fs-sm); }
 
 /* 按钮禁用时把"缺什么"说在旁边，省得人对着灰按钮猜。 */
 .probe-blocked { color: var(--txt-faint); font-size: var(--fs-sm); }
+
+/* 结果段没跑之前的占位：卡的形状稳定，眼睛才记得住"结果在最下面"。 */
+.probe-idle { color: var(--txt-faint); font-size: var(--fs-sm); font-style: italic; }
 
 /* 回读值两列铺开：左边字段名，右边平台实际回读到的值。 */
 .probe-readback {
