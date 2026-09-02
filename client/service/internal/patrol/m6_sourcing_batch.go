@@ -125,10 +125,7 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		if err := a.setStage("selectingSourcingPosition"); err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
 		}
-		selected, err := invokePrimitive[protocol.CandidateSelectSourcingPositionData](
-			ctx, a, protocol.PrimCandidateSelectSourcingPosition,
-			protocol.CandidateSelectSourcingPositionArgs{PositionTitle: positionTitle},
-		)
+		selected, err := a.selectSourcingPositionWithOneRetry(ctx, batch.BatchID, positionTitle)
 		if err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
 		}
@@ -288,6 +285,49 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 // 重新通过同一派发门禁，不能把等待前的授权带到等待后。
 func (a *roundActor) waitSourcingPace(ctx context.Context) error {
 	return a.waitSourcingDelay(ctx, a.manager.config.SourcingPaceWait)
+}
+
+// selectSourcingPositionWithOneRetry 在 preparing 阶段、推荐流尚未绑定时切换
+// 职位:手报 CTX_NOT_READY 且自证瞬时(retryable=afterRecovery/yes)就等一个交互
+// 节奏后同轮再发一次同款命令——原语自己会重新导航到推荐页并再等一个条件等待
+// 上限。只多这一次,不加持久化计数;第二次仍失败按原路径拦停批次。
+// 立案:2026-09-02 尚虹02 真机切第二个职位时推荐页 9.8s 未就绪,整日计划因此
+// 少跑一个职位(47 份额);同款切换前一批 7.1s 成功。甲方 2026-09-02 裁决:这不是
+// AGENTS.md「批间接续失败……不自动重试」所指的自动重试,规格不改。本函数只服务
+// 职位尚未选定、推荐流尚未绑定的这一步,不得挪到之后任何会刷新推荐流的位置。
+func (a *roundActor) selectSourcingPositionWithOneRetry(
+	ctx context.Context,
+	batchID string,
+	positionTitle string,
+) (protocol.CandidateSelectSourcingPositionData, error) {
+	args := protocol.CandidateSelectSourcingPositionArgs{PositionTitle: positionTitle}
+	selected, err := invokePrimitive[protocol.CandidateSelectSourcingPositionData](
+		ctx, a, protocol.PrimCandidateSelectSourcingPosition, args,
+	)
+	if err == nil || !transientPageNotReady(err) {
+		return selected, err
+	}
+	// 留痕(「错误收敛必须留痕」):第一次的完整判定现场进日志,第二次的结果
+	// 走原有失败路径落批次原因。
+	slog.Warn("推荐页未就绪,切换职位同轮再试一次",
+		"batchId", batchID, "positionTitle", positionTitle, "err", err.Error())
+	if paceErr := a.waitSourcingInteractionPace(ctx); paceErr != nil {
+		return selected, paceErr
+	}
+	return invokePrimitive[protocol.CandidateSelectSourcingPositionData](
+		ctx, a, protocol.PrimCandidateSelectSourcingPosition, args,
+	)
+}
+
+// transientPageNotReady 只认手的协议级证词:CTX_NOT_READY 且 retryable 为
+// afterRecovery/yes 才算瞬时;no/manualOnly 与证词缺席都不算,不猜。
+func transientPageNotReady(err error) bool {
+	typed := runError(err)
+	if typed == nil || typed.Code != protocol.ErrCodeCtxNotReady {
+		return false
+	}
+	return typed.Retryable == protocol.RetryableAfterRecovery ||
+		typed.Retryable == protocol.RetryableYes
 }
 
 func (a *roundActor) waitSourcingInteractionPace(ctx context.Context) error {
