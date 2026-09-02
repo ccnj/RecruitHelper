@@ -58,6 +58,7 @@ func argsPlatform(args json.RawMessage) string {
 //  2. 期限同乘、不封顶——契约里 13 条原语的 deadline 不足 2×预算,手侧定时器取
 //     min(deadline, budget),只放预算不放期限会让手先报 expired;
 //  3. lease 不同比——它是活性心跳不是时长预算,脑侧本就钳到期限(08-26 先例)。
+//
 // 失效方向不变:系数只挪动"本轮未就绪"的时点,不产生第二次点击;取不到系数一律 1.0。
 var platformBudgetFactor = map[string]float64{
 	"boss": 2.0,
