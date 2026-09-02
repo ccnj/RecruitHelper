@@ -15552,15 +15552,18 @@ test('BOSS 判读:指纹上报算例行,其余码算命中,全局名差集单独
     items: [
       { action: 'device-action-report', p2: '800001', p6: 'foo|bar' },
       { action: 'device-action-report', p2: '550003' },
+      // 2026-09-02 Windows 真机导出:同一份指纹还会挂在心跳通道下重发,p6 是 UA-CH brands。
+      { action: 'web-action-heartbeat', p2: '800001', p6: 'Not=A?Brand=99|Google Chrome=151' },
       { action: 'web-event-input', p2: '0' },
       { action: 'web-event-input', p2: '30099' },
       { action: 'web-event-click', p2: '' },
     ],
   })
-  // 指纹上报每次页面加载无条件发,跟检测到什么无关 —— 算例行。
-  assert.deepEqual(c.routine.map((r) => r.code), ['800001', '0'])
+  // 指纹上报每次页面加载无条件发,跟检测到什么无关 —— 算例行;心跳重发的那份也是。
+  assert.deepEqual(c.routine.map((r) => r.code), ['800001', '800001', '0'])
   // 设备族里其它任何码才是探测命中。
   assert.deepEqual(c.hits.map((h) => h.code), ['550003', '30099'])
+  // 全局名差集只从 device-action-report 的 p6 取——心跳版的 p6 是 brands 串,切开是假名字。
   assert.deepEqual(c.unknownGlobals, ['foo', 'bar'], '这一栏就是"我们隐不隐形"的答案')
 
   // patas APM 通道:码藏在 action 的 JSON 字符串字段里,p2 是页面 URL。
