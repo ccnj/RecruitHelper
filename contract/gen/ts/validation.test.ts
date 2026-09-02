@@ -326,6 +326,29 @@ expectIssue(
   "witnessAdvertisement",
 );
 
+// hello.platforms:optional、must-ignore 的按平台能力面(2026-09-02 甲方裁决,规格 §4.1)。
+const platformsHello = {
+  ...validLocalHello,
+  caps: ["probe.platform@1", "chat.readThread@1"],
+  platforms: [
+    { id: "zhilian", caps: ["probe.platform@1", "chat.readThread@1"] },
+    { id: "boss", caps: ["probe.platform@1"] },
+  ],
+};
+expectValid("hello with per-platform caps", validateKindBody(Kind.Hello, platformsHello));
+expectIssue(
+  "hello platform id non-empty",
+  validateKindBody(Kind.Hello, { ...validLocalHello, platforms: [{ id: "", caps: [] }] }),
+  "$.platforms[0].id",
+  "minLength",
+);
+expectIssue(
+  "hello platform caps required",
+  validateKindBody(Kind.Hello, { ...validLocalHello, platforms: [{ id: "boss" }] }),
+  "$.platforms[0].caps",
+  "required",
+);
+
 const sendCommand = {
   name: "chat.sendMessage",
   ver: 1,

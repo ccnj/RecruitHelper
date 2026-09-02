@@ -40,6 +40,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
 
 const probePlatform: Primitive = {
   name: PrimitiveName.ProbePlatform,
+  capability: 'probePlatform',
   class: CmdClass.Readonly,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -56,6 +57,7 @@ const probePlatform: Primitive = {
 
 const ensureSurface: Primitive = {
   name: PrimitiveName.NavEnsureSurface,
+  capability: 'ensureSurface',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -74,6 +76,7 @@ const ensureSurface: Primitive = {
 
 const readList: Primitive = {
   name: PrimitiveName.ChatReadList,
+  capability: 'readList',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -91,6 +94,7 @@ const readList: Primitive = {
 
 const identifyCurrentConversation: Primitive = {
   name: PrimitiveName.ChatIdentifyCurrentConversation,
+  capability: 'identifyCurrentConversation',
   class: CmdClass.Readonly,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -106,6 +110,7 @@ const identifyCurrentConversation: Primitive = {
 
 const openConversation: Primitive = {
   name: PrimitiveName.ChatOpenConversation,
+  capability: 'openConversation',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -119,6 +124,7 @@ const openConversation: Primitive = {
 
 const readUnreadTotal: Primitive = {
   name: PrimitiveName.ChatReadUnreadTotal,
+  capability: 'readUnreadTotal',
   class: CmdClass.Readonly,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -132,6 +138,7 @@ const readUnreadTotal: Primitive = {
 
 const readThread: Primitive = {
   name: PrimitiveName.ChatReadThread,
+  capability: 'readThread',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {

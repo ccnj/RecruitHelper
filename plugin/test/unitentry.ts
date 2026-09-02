@@ -22,12 +22,13 @@ export { armRuntimeReload, acknowledgeRuntimeReloadResult, refreshPagesAfterRunt
 export { ContentSensor } from '../src/base/contentSensor'
 export { SensorBridge } from '../src/base/sensorBridge'
 export { CONTENT_MESSAGE } from '../src/base/contentMessages'
-export { capabilities, lookup, register } from '../src/program/registry'
+export { capabilities, capabilitiesByPlatform, lookup, register } from '../src/program/registry'
 export {
   callPlatform,
   callPlatformUnbound,
   lookupPlatform,
   registerPlatform,
+  hasCapability,
   registeredPlatforms,
   requireCapability,
   resolveAdapter,
@@ -127,3 +128,9 @@ export { classifyBossEntry, bossCodeLabel, bossCodeMeaning } from '../src/progra
 export { parseLedger as telemetryParseLedger } from '../src/base/telemetry/counters'
 export { BOSS_INPUT_COUNTERS, REPORT_EVERY as BOSS_REPORT_EVERY } from '../src/program/platform/bossInputCounters'
 export { stripNewlines } from '../src/program/platform/boss'
+export { registerM4Primitives } from '../src/program/primitives/m4'
+export { registerM5Primitives } from '../src/program/primitives/m5'
+export { registerM7Primitives } from '../src/program/primitives/m7'
+export { registerJobPublishPrimitives } from '../src/program/primitives/jobPublish'
+export { registerAccountPrimitives } from '../src/program/primitives/account'
+export { registerDebugPrimitives } from '../src/program/primitives/debug'

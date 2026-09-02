@@ -33,6 +33,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
 
 const captureThreadScreenshot: Primitive = {
   name: PrimitiveName.ChatCaptureThreadScreenshot,
+  capability: 'captureThreadScreenshot',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -48,6 +49,7 @@ const captureThreadScreenshot: Primitive = {
 
 const captureResumeScreenshot: Primitive = {
   name: PrimitiveName.CandidateCaptureResumeScreenshot,
+  capability: 'captureResumeScreenshot',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -63,6 +65,7 @@ const captureResumeScreenshot: Primitive = {
 
 const readPeerPhone: Primitive = {
   name: PrimitiveName.ChatReadPeerPhone,
+  capability: 'readPeerPhone',
   class: CmdClass.Readonly,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -76,6 +79,7 @@ const readPeerPhone: Primitive = {
 
 const revealPeerPhone: Primitive = {
   name: PrimitiveName.ChatRevealPeerPhone,
+  capability: 'revealPeerPhone',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {

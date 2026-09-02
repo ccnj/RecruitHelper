@@ -102,7 +102,15 @@ const {
   refreshPagesAfterRuntimeReload,
   registerM2Primitives,
   registerM3Primitives,
+  registerM4Primitives,
+  registerM5Primitives,
   registerM6Primitives,
+  registerM7Primitives,
+  registerJobPublishPrimitives,
+  registerAccountPrimitives,
+  registerDebugPrimitives,
+  capabilitiesByPlatform,
+  hasCapability,
   registerPlatform,
   registeredPlatforms,
   resetPlatformsForTest,
@@ -13438,6 +13446,14 @@ test('连接层协商 feature、发送 QoS0 event，并在完整 UTF-8 信封硬
   assert.equal(storage.infra.handId, hello.body.handId, 'hello 未使用已落盘的稳定 handId')
   assert.equal(Object.hasOwn(hello.body, 'auth'), false, 'hello 不得再携带 auth 字段')
   assert.equal(connection.hbTimer, null, 'welcome 前不得启动心跳')
+  // 按平台声明能力(2026-09-02 甲方裁决):platforms 无条件发,每张表 ⊆ caps 并集。
+  assert.deepEqual(hello.body.platforms.map((p) => p.id), registeredPlatforms().map((a) => a.id),
+    'hello.platforms 必须逐一对应已注册平台')
+  for (const platform of hello.body.platforms) {
+    for (const capability of platform.caps) {
+      assert.ok(hello.body.caps.includes(capability), `${platform.id} 表里的 ${capability} 不在并集里`)
+    }
+  }
 
   const envelope = (kind, msgId, session, body) => JSON.stringify({
     proto: PROTO_VERSION,
@@ -15738,6 +15754,40 @@ test('BOSS 适配器:MAIN world + os 通道,只声明三条探针能力,其余�
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'sendMessage'), /未实现原语能力/)
+})
+
+test('hello 平台能力表:智联表等于并集,BOSS 表恰为平台无关四条加探针三条', async () => {
+  // 原语的 capability 字段是与 handler 内 callPlatform 字面量并行的第二份声明;
+  // 这两条断言把它钉住:漏填一条,BOSS 表会多出一条(第二条红);填错名字,
+  // 智联表会少一条(第一条红)。
+  registerDebugPrimitives()
+  registerM2Primitives()
+  registerM3Primitives()
+  registerM4Primitives()
+  registerM5Primitives()
+  registerM6Primitives()
+  registerM7Primitives()
+  registerJobPublishPrimitives()
+  registerAccountPrimitives()
+  await withPlatforms([zhilianAdapter, bossAdapter], async () => {
+    const tables = capabilitiesByPlatform()
+    assert.deepEqual(tables.map((t) => t.id), ['zhilian', 'boss'])
+    const union = capabilities()
+    assert.equal(union.length, 42, '契约原语全集应为 42 条')
+    // 智联少的恰是 debug.osType@1:键盘线只在 BOSS 上有靶子(智联走页面内输入,没有
+    // 打字探针)。除此之外一条不少——少一条就是某原语的 capability 名填错了。
+    assert.deepEqual(tables[0].caps, union.filter((c) => c !== 'debug.osType@1'),
+      '智联表应等于并集减 debug.osType@1')
+    assert.deepEqual(tables[1].caps, [
+      'debug.osProbe@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
+      'debug.slowEcho@1', 'debug.switchWindow@1', 'probe.platform@1',
+    ], 'BOSS 表变了:要么适配器长了能力(先过出口),要么某条原语漏填 capability')
+    for (const capability of tables[1].caps) {
+      assert.ok(union.includes(capability), `BOSS 表 ⊆ 并集:${capability}`)
+    }
+    assert.equal(hasCapability(bossAdapter, 'osType'), true)
+    assert.equal(hasCapability(bossAdapter, 'sendMessage'), false)
+  })
 })
 
 

@@ -26,14 +26,40 @@ type mockSender struct {
 	onSend            func(string, protocol.Envelope)
 	beforeClose       func(handID, expectedSession string)
 	witness           map[string]HandWitness
+	platforms         map[string]map[string][]string // handID -> platform -> caps;缺席=手未声明该平台
 }
 
 func newMock() *mockSender {
 	return &mockSender{
 		online: map[string]bool{}, boot: map[string]string{}, session: map[string]string{},
 		caps: map[string][]string{}, features: map[string][]string{}, contractMatch: map[string]bool{},
-		witness: map[string]HandWitness{},
+		witness: map[string]HandWitness{}, platforms: map[string]map[string][]string{},
 	}
+}
+
+// declarePlatform 模拟手在 hello 里为某平台声明的能力表(2026-09-02 甲方裁决)。
+// 未调用过的手/平台按"未声明"处理——派发闸回落并集,与旧手逐字相同。
+func (m *mockSender) declarePlatform(handID, platform string, caps []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.platforms[handID] == nil {
+		m.platforms[handID] = map[string][]string{}
+	}
+	m.platforms[handID][platform] = append([]string(nil), caps...)
+}
+
+// HandPlatformCaps 实现 platformNegotiator(可选接口)。
+func (m *mockSender) HandPlatformCaps(handID, platform string) ([]string, bool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.online[handID] {
+		return nil, false, false
+	}
+	caps, declared := m.platforms[handID][platform]
+	if !declared {
+		return nil, false, true
+	}
+	return append([]string(nil), caps...), true, true
 }
 
 func (m *mockSender) HandWitness(handID string) (HandWitness, bool) {

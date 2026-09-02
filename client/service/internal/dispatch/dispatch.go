@@ -58,6 +58,13 @@ type witnessSender interface {
 	HandWitness(handID string) (HandWitness, bool)
 }
 
+// platformNegotiator 是 Sender 的可选扩展(与 witnessSender 同款型断言):手在 hello 里
+// 按平台声明能力时(2026-09-02 甲方裁决),派发闸按目标平台查表。hub 实现;测试桩不实现
+// 即回落并集——与手未声明 platforms 的行为逐字相同,失效方向只有少派。
+type platformNegotiator interface {
+	HandPlatformCaps(handID, platform string) (caps []string, declared, ok bool)
+}
+
 // domainOf:无业务 context 命令的串行域键。首次绑定前 probe.platform 尚无
 // accountRef，按手落独立探测域；debug 命令仍用每手 debug 域。有 context 的
 // [S/X] 命令会在结构化派发入口覆盖为 platform:accountRef。

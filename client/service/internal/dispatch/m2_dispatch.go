@@ -134,7 +134,7 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 		}
 	}
 	if !opts.legacyDebug {
-		if err := d.requireNegotiation(req.HandID, req.Name, meta); err != nil {
+		if err := d.requireNegotiation(req.HandID, req.Name, commandPlatform(req.Context, req.Args), meta); err != nil {
 			return dispatchResult{}, err
 		}
 	}
@@ -330,13 +330,28 @@ func (d *Dispatcher) voidGenerationBoundBeforeSend(handID, msgID string, sendErr
 	return nil
 }
 
-func (d *Dispatcher) requireNegotiation(handID, name string, meta protocol.PrimitiveMeta) error {
+// requireNegotiation 是派发前的能力/特性闸。platform 非空且手声明了含该平台的
+// platforms 时按该平台的 caps 判,否则按并集判(2026-09-02 甲方裁决;规格 §4.1)。
+// 判错的方向只有"该派的没派":平台表按构造 ⊆ 并集,不会放过并集拦下的命令。
+func (d *Dispatcher) requireNegotiation(handID, name, platform string, meta protocol.PrimitiveMeta) error {
 	if meta.Batch != protocol.BatchS && meta.Batch != protocol.BatchX {
 		return nil
 	}
 	caps, features, ok := d.sender.HandNegotiation(handID)
-	if !ok || !contains(caps, fmt.Sprintf("%s@%d", name, meta.Ver)) {
+	if !ok {
 		return fmt.Errorf("%w: %s@%d", ErrCapability, name, meta.Ver)
+	}
+	scope := "并集"
+	if platform != "" {
+		if negotiator, has := d.sender.(platformNegotiator); has {
+			if platformCaps, declared, capsOK := negotiator.HandPlatformCaps(handID, platform); capsOK && declared {
+				caps = platformCaps
+				scope = "platform=" + platform
+			}
+		}
+	}
+	if !contains(caps, fmt.Sprintf("%s@%d", name, meta.Ver)) {
+		return fmt.Errorf("%w: %s@%d (%s)", ErrCapability, name, meta.Ver, scope)
 	}
 	if meta.Batch == protocol.BatchX && meta.Class == protocol.ClassEffectful && !contains(features, string(protocol.FeatureWitness1)) {
 		return fmt.Errorf("%w: %s", ErrFeature, protocol.FeatureWitness1)

@@ -7,10 +7,10 @@
 //   原语注册表   name -> Primitive        base 分发器认的那张表,线上契约面
 //   平台注册表   platformId -> Adapter    同一条原语在不同平台上的实现
 //
-// 注意本表**不进 hello 的 caps**。协议今天的 caps 是扁平的 `name@ver`,说不出
-// 「这条原语只有智联有」;真要表达,得改契约(HelloBody 加按平台的能力声明)。
-// 本轮不改契约,所以下面的 `requireCapability` 是运行期兜底,不是能力协商的
-// 替代品——只装了一个平台时它永远不会触发。
+// 本表自 2026-09-02(甲方裁决,批 D)起**进 hello 的 platforms**:`caps` 仍是扁平并集,
+// `platforms[].caps` 按平台细分,数据来源是 `../registry.ts` 的 capabilitiesByPlatform,
+// 判据就是下面的 hasCapability(方法在不在)。脑按目标平台查表后,不该派的命令不再
+// 到手;下面的 `requireCapability` 仍是运行期兜底(旧脑、脑闸漏判时的最后一道)。
 import { PlatformError } from './types'
 import type { ErrorCode, Retryable } from '../../base/protocol'
 import type {
@@ -81,12 +81,17 @@ export function resolveAdapter(ctx: PrimitiveContext): PlatformAdapter {
  * 未实现即显式拒绝(反模式 18:未知原语默认分支必须是显式拒绝,不得默认回成功)。
  * `retryable=no` —— 平台没实现这条能力是部署事实,重试多少次都一样。
  */
+/** 「某原语在某平台有没有实现」的唯一判据:方法在不在。hello 平台表与运行期拒绝共用。 */
+export function hasCapability(adapter: PlatformAdapter, name: CapabilityName): boolean {
+  return typeof adapter[name] === 'function'
+}
+
 export function requireCapability<K extends CapabilityName>(
   adapter: PlatformAdapter,
   name: K,
 ): NonNullable<PlatformCapabilities[K]> {
   const method = adapter[name]
-  if (typeof method !== 'function') {
+  if (!hasCapability(adapter, name)) {
     throw new PlatformError(
       'PROTO_UNSUPPORTED_CMD',
       `平台 ${adapter.id} 未实现原语能力 ${name}`,

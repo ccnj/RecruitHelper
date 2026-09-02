@@ -86,7 +86,15 @@
           "features": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
           "witnessStoreId": { "type": "string", "optional": true, "minLength": 1, "maxLength": 128 },
           "outboxPending": { "type": "int", "optional": true, "minimum": 0, "maximum": 512 },
-          "journalOpen": { "type": "int", "optional": true, "minimum": 0, "maximum": 512 }
+          "journalOpen": { "type": "int", "optional": true, "minimum": 0, "maximum": 512 },
+          "platforms": { "type": "array", "optional": true, "maxItems": 8, "items": { "ref": "HelloPlatform" } }
+        }
+      },
+      "HelloPlatform": {
+        "type": "object",
+        "fields": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "caps": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 160 } }
         }
       },
       "HbParams": {
