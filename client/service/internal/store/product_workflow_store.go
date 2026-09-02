@@ -116,7 +116,7 @@ func (s *Store) LatestFullProductWorkflowRun(key AccountKey) (*ProductWorkflowRu
 	err := s.db.Where(
 		"platform = ? AND account_ref = ? AND mode = ?",
 		key.Platform, key.AccountRef, workflow.ModeFull,
-	).Order("started_at DESC").First(&run).Error
+	).Order("started_at DESC, rowid DESC").First(&run).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}

@@ -190,10 +190,14 @@ func TestDailyPlanSkippedLastEntryAutoStartsCommunication(t *testing.T) {
 	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
 		t.Fatalf("登记接续: %v", err)
 	}
+	// 条目二的 run 比条目一晚开(真机相差几十分钟);夹具时钟冻结时两者
+	// started_at 相同,"最近一次运行"会平局。
+	clock.now = clock.now.Add(time.Minute)
 	runB, err := manager.AdvanceOnce(context.Background())
 	if err != nil || runB == nil || runB.RunID == runA.RunID || runB.SourcingBatchID == nil {
 		t.Fatalf("接续未开新 run: %+v err=%v", runB, err)
 	}
+	clock.now = clock.now.Add(time.Minute)
 	enableBefore := actor.enableCalls
 
 	// 条目二开批时推荐页两次未就绪:批次 blocked(recommendPageNotReady)+留痕,
