@@ -14,6 +14,8 @@
 //      公理 7、反模式 3)。这里出现的全部是契约里已有的意图级类型。
 //   3. 未实现的能力必须显式拒绝,不得默认回成功(反模式 18)。
 import type {
+  AccountReadNoticesArgs,
+  AccountReadNoticesData,
   AccountReadWechatSettingArgs,
   AccountReadWechatSettingData,
   CandidateApplySourcingFiltersArgs,
@@ -201,6 +203,7 @@ export interface PlatformCapabilities {
   readWechatSetting(
     input: PrimitiveInput<AccountReadWechatSettingArgs>,
   ): Promise<AccountReadWechatSettingData>
+  readNotices(input: PrimitiveInput<AccountReadNoticesArgs>): Promise<AccountReadNoticesData>
 
   // —— 会话感知 ——
   readList(input: PrimitiveInput<ChatReadListArgs>): Promise<ChatReadListData>

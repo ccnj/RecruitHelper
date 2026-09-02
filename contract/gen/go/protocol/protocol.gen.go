@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:56331ef01eb39b5a19e6a1b863e2b62626d8e18b7b81d3c7a49c24dd83aaa6d0"
+	ContractHash       = "sha256:1408c116d879af63ae1ccfde3b19435a84f0a5580952e00c1368ee586dfc12c9"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -835,6 +835,7 @@ const (
 )
 
 const (
+	PrimAccountReadNotices                = "account.readNotices"
 	PrimAccountReadWechatSetting          = "account.readWechatSetting"
 	PrimCandidateApplySourcingFilters     = "candidate.applySourcingFilters"
 	PrimCandidateCaptureResumeScreenshot  = "candidate.captureResumeScreenshot"
@@ -898,6 +899,7 @@ type PrimitiveMeta struct {
 }
 
 var Primitives = map[string]PrimitiveMeta{
+	PrimAccountReadNotices:                {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "idempotentReadReceipt", ExecBudgetMs: 60000, DeadlineMs: 120000, LeaseMs: 30000, ArgsSchema: "AccountReadNoticesArgs", DataSchema: "AccountReadNoticesData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimAccountReadWechatSetting:          {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 60000, DeadlineMs: 120000, LeaseMs: 30000, ArgsSchema: "AccountReadWechatSettingArgs", DataSchema: "AccountReadWechatSettingData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimCandidateApplySourcingFilters:     {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 240000, DeadlineMs: 360000, LeaseMs: 30000, ArgsSchema: "CandidateApplySourcingFiltersArgs", DataSchema: "CandidateApplySourcingFiltersData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimCandidateCaptureResumeScreenshot:  {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 120000, DeadlineMs: 240000, LeaseMs: 30000, ArgsSchema: "CandidateCaptureResumeScreenshotArgs", DataSchema: "CaptureScreenshotData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet", "blob/1"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
