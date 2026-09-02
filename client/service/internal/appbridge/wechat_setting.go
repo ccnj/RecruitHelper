@@ -64,6 +64,10 @@ func (r WechatSettingReader) ReadWechatConfigured(
 		Args:                         args,
 	})
 	if err != nil {
+		if capabilityMissing(err) {
+			// 该平台的插件没有这条原语:开工闸按"跳过并留痕"处理,不是检查失败。
+			return false, fmt.Errorf("%w: %w", productapp.ErrHandCapabilityMissing, err)
+		}
 		return false, err
 	}
 	var data protocol.AccountReadWechatSettingData

@@ -47,6 +47,11 @@ func (r PatrolRunner) Start(ctx context.Context, req patrol.RunRequest) (patrol.
 		Name: req.Name, Args: req.Args, Context: cmdContext,
 	})
 	if err != nil {
+		if errors.Is(err, dispatch.ErrCapability) {
+			// 脑闸按平台表拒绝(2026-09-02 甲方裁决):翻成 patrol 哨兵而不是 RunError,
+			// 免得扰动 isAccountWideRunFailure/errorCode 那些基于 RunError 的既有判定。
+			return nil, fmt.Errorf("%w: %w", patrol.ErrHandCapabilityMissing, err)
+		}
 		return nil, err
 	}
 	return &patrolRunHandle{dispatcher: r.Dispatcher, logicalID: logicalID}, nil

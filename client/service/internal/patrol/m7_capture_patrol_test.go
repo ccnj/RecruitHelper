@@ -130,3 +130,67 @@ func TestCaptureNotificationEvidenceDegradesOnFailure(t *testing.T) {
 		t.Fatalf("失败后不得再次取证(缺图降级): %+v", needing)
 	}
 }
+
+// 该平台没有电话原语(2026-09-02 甲方裁决 2.2):不算失败、不重试,留审计行;
+// 取证照常完成(不重拍),通知照常少一行。两种信号(手侧 PROTO_UNSUPPORTED_CMD 与脑闸哨兵)同款。
+func TestCaptureNotificationEvidenceSkipsPhoneWhenCapabilityMissing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"hand rejects at runtime", &RunError{Code: protocol.ErrCodeProtoUnsupportedCmd, Retryable: protocol.RetryableNo}},
+		{"brain gate sentinel", ErrHandCapabilityMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			fixture := seedCommunicationV4PendingInterviewTransition(t, h, "capture-nophone", "accepted")
+			phoneCalls := 0
+			h.runner.handler = func(request RunRequest) (any, error) {
+				switch request.Name {
+				case protocol.PrimChatCaptureThreadScreenshot, protocol.PrimCandidateCaptureResumeScreenshot:
+					return protocol.CaptureScreenshotData{
+						ImageBlobRef: "sha256:" + strings.Repeat("e", 64), ByteSize: 10, Truncated: false,
+						CapturedAt: h.clock.Now().UnixMilli(),
+					}, nil
+				case protocol.PrimChatReadPeerPhone, protocol.PrimChatRevealPeerPhone:
+					phoneCalls++
+					return nil, tc.err
+				default:
+					return defaultHandler(request)
+				}
+			}
+			before, err := h.db.CommunicationV4AggregateByProfile(fixture.target.profileID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.manager.mu.Lock()
+			err = fixture.actor.processCommunicationV4CardTransition(context.Background(), fixture.pending, fixture.profile, *before)
+			h.manager.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.manager.mu.Lock()
+			err = fixture.actor.captureNotificationEvidence(context.Background(), fixture.target.profileID)
+			h.manager.mu.Unlock()
+			if err != nil {
+				t.Fatalf("能力缺失不得让巡检失败: %v", err)
+			}
+			if phoneCalls != 1 {
+				t.Fatalf("readPeerPhone 只派一次、不重试、不进 reveal: %d", phoneCalls)
+			}
+			if needing, _ := h.db.NotificationsNeedingCapture(fixture.target.profileID); len(needing) != 0 {
+				t.Fatalf("取证应照常完成、不重拍: %+v", needing)
+			}
+			entries, _ := h.db.AuditEntries(50)
+			found := false
+			for _, entry := range entries {
+				if entry.Category == "peer_phone_capability_skipped" && strings.Contains(entry.Detail, "chat.readPeerPhone@1") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("跳过必须留审计行: %+v", entries)
+			}
+		})
+	}
+}

@@ -61,7 +61,27 @@ var (
 	ErrCurrentConversationV4NotReady     = errors.New("浏览器当前会话没有可自动推进的 V4 根")
 	ErrCurrentConversationJobUnbound     = errors.New("浏览器当前会话候选人未绑定后台职位")
 	ErrCurrentConversationContextMissing = errors.New("浏览器当前会话职位没有最近成功同步配置")
+	// ErrHandCapabilityMissing:该平台的插件未声明这条原语,脑闸在记账前拒绝(2026-09-02
+	// 甲方裁决,hello 按平台声明能力)。Runner 适配器把 dispatch.ErrCapability 翻成它;
+	// 手侧运行期拒绝(PROTO_UNSUPPORTED_CMD)另经 RunError 到达,两者由 isCapabilityMissing 统一识别。
+	ErrHandCapabilityMissing = errors.New("该平台的插件未实现此能力")
 )
+
+// isCapabilityMissing 识别"该平台没这条能力"的两种信号:脑闸哨兵(无 cmd_record、无手侧
+// 往返)与手侧 result(failed, PROTO_UNSUPPORTED_CMD, retryable=no)。只认一种,升级过渡期
+// (旧手未声明 platforms)会出现同一台机上一天跳过、下一天当失败。
+func isCapabilityMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrHandCapabilityMissing) {
+		return true
+	}
+	if typed := runError(err); typed != nil && typed.Code == protocol.ErrCodeProtoUnsupportedCmd {
+		return true
+	}
+	return false
+}
 
 // RunRequest is the narrow seam between the actor and command delivery. The
 // dispatch adapter must preserve Args verbatim and put the account fields into

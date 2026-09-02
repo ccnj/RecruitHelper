@@ -27,6 +27,10 @@ var (
 	ErrLoginRequired        = errors.New("平台登录不可用")
 	ErrWechatNotConfigured  = errors.New("平台个人中心尚未配置微信号")
 	ErrWechatCheckFailed    = errors.New("微信号配置检查未完成")
+	// ErrHandCapabilityMissing:该平台的插件未声明/未实现这条原语(2026-09-02 甲方裁决,
+	// hello 按平台声明能力)。开工闸类与尽力而为类调用遇到它一律"跳过并留痕",不算失败、
+	// 不重试;由 appbridge 把脑闸 ErrCapability 与手侧 PROTO_UNSUPPORTED_CMD 两种信号翻成它。
+	ErrHandCapabilityMissing = errors.New("该平台的插件未实现此能力")
 )
 
 // AccountResolver 在"开始"时探测当前 Chrome 登录的平台主体,按指纹找回既有
@@ -294,6 +298,17 @@ func (c *Controller) gateWechatConfigured(ctx context.Context, key store.Account
 	}
 	configured, err := c.wechatReader.ReadWechatConfigured(ctx, key)
 	if err != nil {
+		// 该平台的插件没有这条原语(2026-09-02 甲方裁决 2.2):开工闸按"跳过并留痕"放行。
+		// 脑闸拒绝发生在记账之前、cmd_records 无痕,留痕只能在这里写。放行的方向由裁决定:
+		// BOSS 第一刀既无 readWechatSetting 也无换微信原语,跳过闸是安全的;将来 BOSS 补了
+		// 换微信而没补本原语,这道闸会被静默跳过——届时应先补能力再开换微信,不能靠闸。
+		if errors.Is(err, ErrHandCapabilityMissing) {
+			slog.Info("微信配置闸:该平台无此能力,跳过",
+				"errorCode", "wechatGateCapabilitySkipped", "platform", key.Platform, "err", err)
+			c.store.Audit("wechat_gate_capability_skipped", "", "",
+				fmt.Sprintf("platform=%s primitive=account.readWechatSetting@1 %v", key.Platform, err))
+			return nil
+		}
 		// 手离线/多手是既有哨兵,保持原文案;其余失败统一归"检查未完成"。
 		if errors.Is(err, ErrHandUnavailable) || errors.Is(err, ErrHandAmbiguous) {
 			return err
@@ -345,6 +360,14 @@ func (c *Controller) collectNoticesBestEffort(ctx context.Context, key store.Acc
 		return
 	}
 	if err := c.noticeCollector.CollectNotices(ctx, key); err != nil {
+		if errors.Is(err, ErrHandCapabilityMissing) {
+			// 不是失败,是该平台没这条原语(2026-09-02 甲方裁决 2.2):Info 级并留审计行。
+			slog.Info("平台通知读取:该平台无此能力,跳过",
+				"errorCode", "noticeCollectCapabilitySkipped", "platform", key.Platform, "err", err)
+			c.store.Audit("notice_collect_capability_skipped", "", "",
+				fmt.Sprintf("platform=%s primitive=account.readNotices@1 %v", key.Platform, err))
+			return
+		}
 		slog.Warn("平台通知读取失败,跳过本次(不影响开始)",
 			"errorCode", "noticeCollectFailed", "err", err)
 	}

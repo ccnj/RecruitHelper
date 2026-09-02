@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -765,6 +766,36 @@ func TestStartCollectsNoticesBestEffort(t *testing.T) {
 		}
 	})
 
+	t.Run("capability missing is skipped with an audit row, not counted as failure", func(t *testing.T) {
+		db, key := controllerFixture(t)
+		flow := &fakeWorkflow{}
+		collector := &fakeNoticeCollector{err: fmt.Errorf("%w: 手未声明原语能力", ErrHandCapabilityMissing)}
+		controller, err := New(
+			db, flow, &fakeSource{}, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(&fakeWechatReader{configured: true})
+		controller.SetNoticeCollector(collector)
+		if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+			t.Fatalf("能力缺失不得拦住开始: %v", err)
+		}
+		if flow.replyKey != key || collector.calls != 1 {
+			t.Fatalf("应读一次且照常开始: key=%+v calls=%d", flow.replyKey, collector.calls)
+		}
+		entries, _ := db.AuditEntries(20)
+		found := false
+		for _, entry := range entries {
+			if entry.Category == "notice_collect_capability_skipped" && strings.Contains(entry.Detail, "account.readNotices@1") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("跳过必须留审计行: %+v", entries)
+		}
+	})
+
 	t.Run("wechat gate rejection skips the read", func(t *testing.T) {
 		db, _ := controllerFixture(t)
 		collector := &fakeNoticeCollector{}
@@ -863,6 +894,40 @@ func TestStartGatedOnWechatConfiguration(t *testing.T) {
 		err = controller.Start(context.Background(), "replyOnly", "")
 		if !errors.Is(err, ErrHandUnavailable) || errors.Is(err, ErrWechatCheckFailed) {
 			t.Fatalf("手侧哨兵应原样透传: %v", err)
+		}
+	})
+
+	t.Run("capability missing skips the gate with an audit row", func(t *testing.T) {
+		// 2026-09-02 甲方裁决 2.2:该平台的插件没有 account.readWechatSetting 时,
+		// 开工闸"跳过并留痕"放行——它不是检查失败,BOSS 第一刀正是这条路。
+		db, key := controllerFixture(t)
+		flow := &fakeWorkflow{}
+		reader := &fakeWechatReader{err: fmt.Errorf("%w: 手未声明原语能力", ErrHandCapabilityMissing)}
+		collector := &fakeNoticeCollector{}
+		controller, err := New(
+			db, flow, &fakeSource{},
+			func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(reader)
+		controller.SetNoticeCollector(collector)
+		if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+			t.Fatalf("能力缺失应跳过闸放行: %v", err)
+		}
+		if flow.replyKey != key || reader.calls != 1 || collector.calls != 1 {
+			t.Fatalf("应读一次、放行并继续读通知: key=%+v reads=%d notices=%d", flow.replyKey, reader.calls, collector.calls)
+		}
+		entries, _ := db.AuditEntries(20)
+		found := false
+		for _, entry := range entries {
+			if entry.Category == "wechat_gate_capability_skipped" && strings.Contains(entry.Detail, "account.readWechatSetting@1") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("跳过必须留审计行(脑闸拒绝在记账前、cmd_records 无痕): %+v", entries)
 		}
 	})
 
