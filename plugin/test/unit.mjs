@@ -16054,6 +16054,18 @@ test('BOSS 行定位:按 data-id 唯一命中,带出选中态、气泡与是否�
   } finally { page.restore() }
 })
 
+test('BOSS 发送用换行处理:换成一个空格而不是删掉——脑侧 contentHash 把换行当空白折叠', () => {
+  const { newlinesToSpaces } = bossTestHooks
+  assert.deepEqual(newlinesToSpaces('你好\n方便聊聊吗'), { text: '你好 方便聊聊吗', removed: 1 })
+  assert.deepEqual(newlinesToSpaces('a\r\n\r\nb\rc'), { text: 'a b c', removed: 3 })
+  assert.deepEqual(newlinesToSpaces('无换行'), { text: '无换行', removed: 0 })
+  // 与脑侧规范化一致:发出去的文本经 NFC/空白折叠/trim 后,哈希输入逐字节相同。
+  const norm = (v) => v.normalize('NFC').replace(/ /gu, ' ').replace(/\s+/gu, ' ').trim()
+  for (const text of ['你好\n方便聊聊吗', ' 首行 \n\n 次行 ', 'a\r\nb']) {
+    assert.equal(norm(newlinesToSpaces(text).text), norm(text), `规范化后必须相同:${JSON.stringify(text)}`)
+  }
+})
+
 test('OS 注入的观测器装在 isolated world:落点/点击观测的每一次注入都不进 MAIN', async () => {
   const hand = osClickHarness({})
   const worlds = []

@@ -553,6 +553,19 @@ export function stripNewlines(text: string): { text: string; removed: number } {
   return { text: stripped, removed: text.length - stripped.length }
 }
 
+/**
+ * 发送用:把换行串换成**一个空格**,不是删掉。
+ *
+ * 脑侧 contentHash 按 §4.5 把换行当空白折叠成一个空格;删掉换行会让打出去的文本与
+ * 哈希对不上,发后正证必然零命中、每条都转人工(2026-09-03 出口审查 O3)。换成空格
+ * 之后再经同一套规范化,两边逐字节相同。debug.osType 仍按 2026-09-02 裁决删掉换行,
+ * 它不发送、没有哈希要对。
+ */
+export function newlinesToSpaces(text: string): { text: string; removed: number } {
+  const replaced = text.replace(/(?:\r\n|\r|\n)+/gu, ' ')
+  return { text: replaced, removed: (text.match(/\r\n|\r|\n/gu) ?? []).length }
+}
+
 function osTypeData(
   outcome: DebugOsTypeData['outcome'],
   started: number,
@@ -1810,8 +1823,8 @@ async function sendBossMessage(
   if (!beforeKeys.focused || beforeKeys.text !== '') {
     throw new PlatformError('USER_ACTIVE', '打字前输入框状态已变(焦点或内容),已取消', 'afterRecovery')
   }
-  const { text: typedText, removed } = stripNewlines(args.text)
-  if (removed > 0) trace.push(`去掉 ${removed} 个换行符`)
+  const { text: typedText, removed } = newlinesToSpaces(args.text)
+  if (removed > 0) trace.push(`${removed} 个换行符换成空格`)
   if (typedText === '') throw new PlatformError('GUARD_FAILED', '去掉换行之后没有内容可打', 'manualOnly')
   ctx.checkpoint()
   let composed
@@ -1833,7 +1846,9 @@ async function sendBossMessage(
   }
   trace.push(`发了 ${played.keys} 次按键${played.words ? ` | ${played.words}` : ''}`)
   const typed = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
-  if (typed.text !== typedText) {
+  // 两边都过规范化再比:contenteditable 会把连续/尾部空格渲染成 nbsp,逐字比较会把
+  // 这类假阴性判成"上屏不同"、留草稿转人工(出口审查 O3)。
+  if (normalizeBossMessageText(typed.text) !== normalizeBossMessageText(typedText)) {
     // 上屏的不是这句话,不发:候选人看到的必须是脑写的那句。草稿留给人清。
     throw new PlatformError('GUARD_FAILED',
       `上屏文本与文案不同,已停在草稿:期望 ${typedText.length} 字,实得「${typed.text.slice(0, 200)}」`, 'manualOnly')
@@ -1987,6 +2002,7 @@ export const bossTestHooks = Object.freeze({
   projectBossMessage,
   matchAnchorTail,
   summarizeBossListRow,
+  newlinesToSpaces,
   identityCacheUsable,
   domReadBossListState,
   domLocateBossRow,
