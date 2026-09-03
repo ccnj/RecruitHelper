@@ -104,6 +104,20 @@ const LANDING_SETTLE_MAX_MS = 800
 const LANDING_KEY = '__recruitHelperOsLanding'
 
 /**
+ * 观测器与落点读取一律在 **isolated world** 执行(2026-09-03 甲方裁决,取数通道文档 §十之二)。
+ *
+ * 观测器要跨两次注入活着,只能挂在某个 window 上;挂在 MAIN world 的 window 上时,
+ * 页面用 `getOwnPropertyNames` 能看见它(不可枚举只挡得住 `Object.keys`)。isolated world
+ * 有自己的 window,页面对它连属性名都够不着;DOM 事件照样派给它的监听器,`isTrusted`
+ * 与坐标照样能读。所以观测器搬到这边,MAIN world 的那点残余就没了。
+ *
+ * 适配器传进来的 `inject` 只借它的 label(失败文案里的平台名);world 在这里写死。
+ */
+function observerWorld(inject: InjectOptions): InjectOptions {
+  return { world: 'ISOLATED', label: inject.label }
+}
+
+/**
  * 一次点击的计划。**平台知识全在这里,编排层一个 selector 都不认识。**
  *
  * 靶子矩形、命中测试、后置状态三样都由适配器提供:前两样决定"这一下会打中谁",
@@ -358,7 +372,7 @@ export async function runOsProbe(
 
   let view: ViewportFacts
   try {
-    view = await runInPage(inject, tabId, pageInstallObserverAndReadViewport, [LANDING_KEY])
+    view = await runInPage(observerWorld(inject), tabId, pageInstallObserverAndReadViewport, [LANDING_KEY])
   } catch (error) {
     throw error instanceof PlatformError ? error : new PlatformError(
       'CTX_NOT_READY', `读视口失败:${String(error).slice(0, 120)}`, 'afterRecovery', 'contentScriptDead')
@@ -530,7 +544,7 @@ export async function runOsProbe(
   } finally {
     // 观测器只活在这条命令里:手不持久化业务状态,页面上也不留常驻监听。
     try {
-      await runInPage(inject, tabId, pageReadLandingAndDetach, [LANDING_KEY])
+      await runInPage(observerWorld(inject), tabId, pageReadLandingAndDetach, [LANDING_KEY])
     } catch {
       // 页面可能已经导航走了。摘不掉不是失败——它随页面一起没。
     }
@@ -882,10 +896,10 @@ async function readSettledLanding(
   tabId: number,
 ): Promise<{ x: number | null; y: number | null }> {
   const deadline = Date.now() + LANDING_SETTLE_MAX_MS
-  let last = await runInPage(inject, tabId, pageReadLanding, [LANDING_KEY])
+  let last = await runInPage(observerWorld(inject), tabId, pageReadLanding, [LANDING_KEY])
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, LANDING_SETTLE_POLL_MS))
-    const now = await runInPage(inject, tabId, pageReadLanding, [LANDING_KEY])
+    const now = await runInPage(observerWorld(inject), tabId, pageReadLanding, [LANDING_KEY])
     if (now.x === last.x && now.y === last.y) return now
     last = now
   }

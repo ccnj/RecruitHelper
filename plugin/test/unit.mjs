@@ -78,6 +78,11 @@ const {
   allSites,
   bossAdapter,
   bossSite,
+  tabNavigationGeneration,
+  noteMainFrameNavigation,
+  forgetTab,
+  resetTabGenerationsForTest,
+  registerTabGenerationTracking,
   requireCapability,
   resetSitesForTest,
   setSitesForTest,
@@ -15790,6 +15795,39 @@ test('hello 平台能力表:智联表等于并集,BOSS 表恰为平台无关四�
   })
 })
 
+
+// ---------------------------------------------------------------------------
+// 场景一(2026-09-03):七条会话原语的纯函数与页面函数。页面函数用假 document 跑,
+// 判据全是形状(uid/friendSource/newMsgCount/encryptUid、conversation$、list$+isToTop),
+// 不认组件名;夹具里没有任何真实候选人。
+
+test('标签页导航代数:只认主框架 commit,关闭即清,SPA 内路由推进不算', () => {
+  resetTabGenerationsForTest()
+  const listeners = {}
+  const saved = globalThis.chrome
+  globalThis.chrome = {
+    webNavigation: { onCommitted: { addListener(fn) { listeners.committed = fn } } },
+    tabs: { onRemoved: { addListener(fn) { listeners.removed = fn } } },
+  }
+  try {
+    registerTabGenerationTracking()
+    assert.equal(tabNavigationGeneration(7), 0, '没见过的标签页是 0')
+    listeners.committed({ tabId: 7, frameId: 0, url: 'https://www.zhipin.com/web/chat/index' })
+    assert.equal(tabNavigationGeneration(7), 1)
+    listeners.committed({ tabId: 7, frameId: 3, url: 'https://ad.example/iframe' })
+    assert.equal(tabNavigationGeneration(7), 1, '子框架导航与"页面换了"无关')
+    listeners.committed({ tabId: 7, frameId: 0, url: 'https://www.zhipin.com/web/user/?ka=bticket' })
+    assert.equal(tabNavigationGeneration(7), 2, '登出跳登录页是主框架导航,代数必须变')
+    assert.equal(tabNavigationGeneration(8), 0, '按标签页各算各的')
+    listeners.removed(7)
+    assert.equal(tabNavigationGeneration(7), 0)
+    noteMainFrameNavigation(9); forgetTab(9)
+    assert.equal(tabNavigationGeneration(9), 0)
+  } finally {
+    globalThis.chrome = saved
+    resetTabGenerationsForTest()
+  }
+})
 
 test('装上第二个平台之后,不带 context 的 probe.platform 一律被拒 —— 而账号绑定正走这条路', async () => {
   // 拒绝本身是对的:ProbePlatformData 没有平台身份字段,脑既无从指定探哪个、

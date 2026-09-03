@@ -16,6 +16,7 @@ import { installHandLogSink } from './handLog'
 import { registerNetGuard } from './netGuard'
 import { registerTelemetryCapture } from './telemetry'
 import { readCounters } from './telemetry/counters'
+import { registerTabGenerationTracking } from './tabGeneration'
 import { registerPlatform } from '../program/platform/registry'
 import { bossAdapter } from '../program/platform/boss'
 import { zhilianAdapter } from '../program/platform/zhilian'
@@ -48,6 +49,8 @@ registerNetGuard()
 // 平台自己的埋点上报,抄一份存本机。只读观测:不改页面、不改请求、不参与
 // 任何业务裁决,失败只记日志。
 registerTelemetryCapture()
+// 标签页导航代数:账号身份复核缓存的失效依据(协议规格 §12 第 9 条 2026-09-03 增补)。
+registerTabGenerationTracking()
 const reloadStartup = refreshPagesAfterRuntimeReload()
   .then((count) => {
     if (count > 0) console.log('[hand] 自重载后已刷新平台页', count)

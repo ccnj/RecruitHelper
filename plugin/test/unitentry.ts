@@ -128,6 +128,9 @@ export { classifyBossEntry, bossCodeLabel, bossCodeMeaning } from '../src/progra
 export { parseLedger as telemetryParseLedger } from '../src/base/telemetry/counters'
 export { BOSS_INPUT_COUNTERS, REPORT_EVERY as BOSS_REPORT_EVERY } from '../src/program/platform/bossInputCounters'
 export { stripNewlines } from '../src/program/platform/boss'
+export {
+  tabNavigationGeneration, noteMainFrameNavigation, forgetTab, resetTabGenerationsForTest, registerTabGenerationTracking,
+} from '../src/base/tabGeneration'
 export { registerM4Primitives } from '../src/program/primitives/m4'
 export { registerM5Primitives } from '../src/program/primitives/m5'
 export { registerM7Primitives } from '../src/program/primitives/m7'
