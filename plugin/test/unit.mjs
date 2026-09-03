@@ -15889,7 +15889,11 @@ test('BOSS 消息投影:只实现真机已见的 bizType,未见值归并 system 
   const wxReq = projectBossMessage({ ...base, bizType: 21050024, bodyType: 4, type: 'action', direction: 'out', text: '请求交换微信已发送', actionAid: 32 })
   assert.deepEqual([wxReq.kind, wxReq.cardType, wxReq.cardState, wxReq.hashInput], ['card', 'wechatExchange', 'pending', 'card\x1fwechatExchange'])
   const resumeReq = projectBossMessage({ ...base, bizType: 14, bodyType: 7, text: '对方请求发送附件简历' })
-  assert.deepEqual([resumeReq.kind, resumeReq.cardType, resumeReq.cardState], ['card', 'resumeAttachment', 'unknown'])
+  assert.deepEqual([resumeReq.kind, resumeReq.cardType, resumeReq.unrecognized], ['system', undefined, undefined],
+    '「请求发送附件简历」是候选人的请求对话框,不是契约的"已投递简历",先归 system 观测')
+  const jobCard = projectBossMessage({ ...base, bizType: 21050004, bodyType: 9, text: '9月3日 沟通的职位-销售经理' })
+  assert.deepEqual([jobCard.kind, jobCard.cardType, jobCard.text, jobCard.unrecognized], ['system', undefined, '9月3日 沟通的职位-销售经理', undefined],
+    '会话开头的职位卡投成 card/other 会让脑把每个候选人都判成 unknownPlatformEvent 转人工(2026-09-03 Mac 四跑实证)')
   const tip = projectBossMessage({ ...base, bizType: 21050060, bodyType: 12, direction: 'system', text: '平台提示' })
   assert.deepEqual([tip.kind, tip.unrecognized], ['system', undefined])
   const empty = projectBossMessage({ ...base, bizType: 21130010, bodyType: 4, direction: 'system', text: '' })
