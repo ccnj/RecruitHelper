@@ -65,6 +65,12 @@ type Injector interface {
 	SeedCalib(hint WindowHint) Calib
 
 	Platform() string
+	// Authorized 回答"操作系统会不会真的把我们发的事件投出去"。macOS 看辅助功能
+	// 授权(AXIsProcessTrusted),没授权时 CGEventPost 静默丢弃、屏幕上什么都不发生;
+	// Windows 的 SendInput 不需要授权。它和 Platform() 一样是环境事实,由 /state 带给
+	// 插件,让插件在移动之前就能拒绝并说清要授权哪个应用——2026-09-03 Mac 首跑就是
+	// 客户端拉起的脑没授权,整轮"没观测到 mousemove",查了一下午。
+	Authorized() bool
 	Close()
 }
 

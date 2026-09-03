@@ -8,6 +8,7 @@ import (
 // fakeInjector 记下每一次调用,并按一份**真实几何**回答光标位置——于是落点可以
 // 像真机一样算出来:我们按当前(可能错的)标定发出去,浏览器按真实几何看到别处。
 type fakeInjector struct {
+	unauthorized bool
 	truth  Calib
 	moves  [][2]float64
 	downs  int
@@ -74,6 +75,7 @@ func (f *fakeInjector) SeedCalib(h WindowHint) Calib {
 	return Calib{ScaleX: 1, ScaleY: 1, OffsetX: h.ScreenX, OffsetY: h.ScreenY}
 }
 func (f *fakeInjector) Platform() string { return "fake" }
+func (f *fakeInjector) Authorized() bool { return !f.unauthorized }
 func (f *fakeInjector) Close()           {}
 
 var errFake = &fakeErr{}
@@ -311,5 +313,18 @@ func TestReseedDropsEverythingAndGoesCold(t *testing.T) {
 	}
 	if got := f.moves[len(f.moves)-1]; got[0] != 2560 {
 		t.Fatalf("新种子没按新窗口位置播:视口原点应当映到 x=2560,实际 %v", got)
+	}
+}
+
+// 2026-09-03:客户端拉起的脑没有 macOS 辅助功能授权,CGEventPost 静默丢事件,整轮"没观测到
+// mousemove"。授权状态必须随 /state 带给插件,让它移动前就拒并说清原因。
+func TestStateCarriesInjectAuthorization(t *testing.T) {
+	ok := NewService(&fakeInjector{})
+	if !ok.State().InjectAuthorized {
+		t.Fatal("已授权的注入器必须报 injectAuthorized=true")
+	}
+	denied := NewService(&fakeInjector{unauthorized: true})
+	if denied.State().InjectAuthorized {
+		t.Fatal("未授权的注入器必须报 injectAuthorized=false")
 	}
 }

@@ -268,6 +268,10 @@ interface HandState {
   calibrated: boolean
   clickArmed: boolean
   samples: number
+  /** 操作系统会不会真的投递我们的事件(macOS 辅助功能授权)。旧脑没有这个字段,按未知放行。 */
+  injectAuthorized?: boolean
+  /** 注入平台的人话描述,未授权时带着"要授权哪个应用"。 */
+  platform?: string
 }
 
 interface PlayResponse {
@@ -497,6 +501,17 @@ export async function runOsProbe(
     }
   }
   const frontSummary = describeFront(front)
+
+  // 系统授权:macOS 没给辅助功能权限时 CGEventPost 静默丢事件,光标一动不动、页面永远
+  // "没观测到 mousemove"(2026-09-03 Mac 首跑,客户端拉起的脑没授权,查了一下午)。
+  // 手服务把授权状态随 /state 带出来,这里移动之前就拒,并把"要授权哪个应用"原话带回去。
+  const seedState = await callHand<HandState>('/state', { hint: { screenX: view.screenX, screenY: view.screenY, dpr: view.dpr } })
+  if (seedState.injectAuthorized === false) {
+    try { await runInPage(observerWorld(inject), tabId, pageReadLandingAndDetach, [LANDING_KEY]) } catch { /* 页面可能已导航走 */ }
+    return { outcome: 'refusedByGate', attempts: 0, calibStatus, unreachableFrames: 0,
+      planMs: 0, elapsedMs: Date.now() - started, lagMaxUs: 0,
+      detail: `系统没有给鼠标注入授权,一步不动:${seedState.platform ?? '手服务未说明平台'}` }
+  }
 
   // 靶子:视口里几个**散开**的点,按趟轮换。它们不需要任何平台 DOM 知识。
   //

@@ -42,6 +42,8 @@ type PlayResult struct {
 // State 是插件在生成计划之前要问的那几件事。
 type State struct {
 	Platform string `json:"platform"`
+	// InjectAuthorized:操作系统会不会真的投递我们的事件(macOS 辅助功能授权)。false 时插件移动前就拒。
+	InjectAuthorized bool `json:"injectAuthorized"`
 	// CursorCSSX/Y 是光标此刻所在,已按当前标定反算成视口 CSS 坐标。
 	// **还没有任何标定(连粗估都没播)时是 nil,不是 0**:那时我们是真不知道,
 	// 而 0 会被编排层当成"光标在视口左上角"照着算一条轨迹出来。
@@ -110,7 +112,7 @@ func NewService(inj Injector) *Service {
 func (s *Service) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := State{Platform: s.inj.Platform(), ClockSource: clockSourceName(),
+	st := State{Platform: s.inj.Platform(), InjectAuthorized: s.inj.Authorized(), ClockSource: clockSourceName(),
 		ClickArmed: s.armed, Samples: s.pb.N(), ResidualPx: finiteOrNil(s.pb.Residual())}
 	c, ready := s.pb.Calib()
 	st.Calibrated = ready

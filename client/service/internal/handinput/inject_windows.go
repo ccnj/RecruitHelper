@@ -208,6 +208,9 @@ func (w *windowsInjector) SeedCalib(h WindowHint) Calib {
 func (w *windowsInjector) Close()           { w.closeTip() }
 func (w *windowsInjector) Platform() string { return "windows/SendInput" }
 
+// SendInput 不需要任何系统授权。
+func (w *windowsInjector) Authorized() bool { return true }
+
 func sendMouse(flags uint32, dx, dy int32) error {
 	in := winMouseInput{typ: inputMouse, mi: mouseInput{dx: dx, dy: dy, dwFlags: flags}}
 	n, _, err := procSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
