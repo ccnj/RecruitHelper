@@ -1903,12 +1903,17 @@ async function sendBossMessage(
   // 发后正证:验证读窗口里出现一条方向 out、文本哈希相等、不在基线里、时间不早于派发的行。
   const deadline = Date.now() + READY_WAIT_MS
   let lastSeen = ''
+  // 首轮前让一拍:点击后页面先插乐观本地行,服务端确认要一个来回(出口审查 O1)。
+  await sleep(500)
   while (Date.now() < deadline) {
     ctx.checkpoint()
     try {
       const after = await runInPage(BOSS_INJECT, tabId, mainReadBossThread, [parsed.uid, parsed.friendSource])
       if (after.status === 'ready') {
-        const fresh = after.rows.filter((row) => !baselineMids.has(row.mid) && row.direction === 'out')
+        // status 1=已送达未读 / 2=已读(平台事实 §二,真机已见)才是服务端确认;乐观渲染行与
+        // 在途行不算——§4.5 明文"乐观渲染或只有平台本地临时 ID 的缓存记录都不算"。
+        const fresh = after.rows.filter((row) => !baselineMids.has(row.mid) && row.direction === 'out' &&
+          (row.status === 1 || row.status === 2))
         const hits: Array<{ mid: string; time: number | null }> = []
         for (const row of fresh) {
           const projected = projectBossMessage(row)
