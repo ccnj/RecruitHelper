@@ -15840,7 +15840,7 @@ test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话
   assert.throws(() => requireCapability(bossAdapter, 'sendWechatInvite'), /未实现原语能力/)
 })
 
-test('hello 平台能力表:智联表等于并集,BOSS 表恰为平台无关四条加探针三条加场景一七条', async () => {
+test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表恰为平台无关四条加探针五条加场景一七条', async () => {
   // 原语的 capability 字段是与 handler 内 callPlatform 字面量并行的第二份声明;
   // 这两条断言把它钉住:漏填一条,BOSS 表会多出一条(第二条红);填错名字,
   // 智联表会少一条(第一条红)。
