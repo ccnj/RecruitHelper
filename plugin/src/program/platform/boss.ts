@@ -1784,8 +1784,14 @@ async function locateRow(tabId: number, conversationRef: string): Promise<DomRow
  * 把目标会话点开(已开就不点)。返回有没有真点。后置只看 DOM:目标行带 selected
  * (2026-09-03 实测三层后置里 DOM 这一层);未读气泡消失由 openConversation 自己再看。
  */
+/**
+ * 把目标会话点到前台。armSideEffect=false 供 effectful 原语(sendMessage)用:那条命令的
+ * beforeSideEffect 必须紧贴发送键那一次点击(证词 attempting 只能写一次),打开会话这一下
+ * 是列表行点击、无候选人可见副作用,不能提前消耗它。
+ */
 async function ensureBossThreadOpen(
   tab: chrome.tabs.Tab, ctx: PrimitiveContext, fingerprint: string, conversationRef: string,
+  armSideEffect = true,
 ): Promise<boolean> {
   const tabId = tab.id!
   const before = await locateRow(tabId, conversationRef)
@@ -1795,7 +1801,7 @@ async function ensureBossThreadOpen(
   // 上一条命令可能刚点过页签;相邻可见交互再留 1s+抖动(runOsProbe 靠近阶段另有一次)。
   await sleep(1_000 + Math.floor(Math.random() * 401))
   await verifiedBossChatTab(fingerprint)
-  await ctx.beforeSideEffect()
+  if (armSideEffect) await ctx.beforeSideEffect()
   await osClickOnce(tabId, ctx, plan, '打开会话')
   const settled = await pollUntil(ctx, () => locateRow(tabId, conversationRef),
     (row) => row.count === 1 && row.selected)
@@ -1993,11 +1999,19 @@ async function sendBossMessage(
   const tab = await verifiedBossChatTab(fingerprint)
   const tabId = tab.id!
 
-  // 目标绑定:当前会话必须就是目标。不定位、不切换——发送原语不做打开这件事。
-  const current = await runInPage(BOSS_INJECT, tabId, mainReadBossCurrentConversation, [])
-  const currentRef = current.status === 'ready' ? bossConversationRef(current.uid, current.friendSource) : ''
-  if (currentRef !== args.conversationRef) {
-    throw new PlatformError('GUARD_FAILED', '当前打开的会话不是发送目标,已取消', 'manualOnly')
+  // 目标绑定:当前会话必须就是目标。不是就自己把它点到前台——与智联 ensureThreadRoute 同款,
+  // 发送原语负责路由(2026-09-03 Mac 真机:轮内没有别的命令打开过目标,这里原来直接拒绝,
+  // 一轮白跑、意图白铸)。打开是一次列表行点击,不产生候选人可见副作用;点开后再核对一次,
+  // 仍不是目标就拒,后面的 composer.empty、发送前最后一道闸(选中行=目标)照旧。
+  const readCurrentRef = async (): Promise<string> => {
+    const current = await runInPage(BOSS_INJECT, tabId, mainReadBossCurrentConversation, [])
+    return current.status === 'ready' ? bossConversationRef(current.uid, current.friendSource) : ''
+  }
+  if ((await readCurrentRef()) !== args.conversationRef) {
+    await ensureBossThreadOpen(tab, ctx, fingerprint, args.conversationRef, false)
+    if ((await readCurrentRef()) !== args.conversationRef) {
+      throw new PlatformError('GUARD_FAILED', '点开目标后当前会话仍不是发送目标,已取消', 'manualOnly')
+    }
   }
   // composer.empty 是硬前置:覆盖用户草稿是三条红线之一。
   const composerBefore = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
