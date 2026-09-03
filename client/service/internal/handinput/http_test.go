@@ -161,3 +161,45 @@ func TestHTTPStateOnColdStartReturnsBodyNotJustStatus(t *testing.T) {
 		t.Fatalf("样本不足时残差必须是 nil 而不是 0——0 的意思是拟合完美,那是撒谎;得到 %v", *st.ResidualPx)
 	}
 }
+
+// /handinput/scroll 的三种收场要分得开:光标不在我们放它的地方是 409(闸在说话,
+// 插件按原因收场不重试),计划排错是 500,滚成了 200——而滚不需要 armed,只需要光标还在。
+func TestHTTPScrollSeparatesRefusalFromFailure(t *testing.T) {
+	s, f := newReadyService(t)
+	mux := http.NewServeMux()
+	s.Routes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	post := func(body any) (int, ScrollResult) {
+		t.Helper()
+		b, _ := json.Marshal(body)
+		resp, err := http.Post(srv.URL+"/handinput/scroll", "application/json", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out ScrollResult
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+
+	moved := [2]float64{9_000, 9_000}
+	f.cursorAt = &moved
+	if code, res := post(ScrollPlan{Ticks: []ScrollTick{{At: 0, Dy: 1}}}); code != http.StatusConflict || res.Status == "" {
+		t.Fatalf("光标被挪走应回 409 并带原因,得到 %d %+v", code, res)
+	}
+	f.cursorAt = nil
+
+	if code, res := post(ScrollPlan{Ticks: []ScrollTick{{At: 0, Dy: 0}}}); code != http.StatusInternalServerError || res.Status == "" {
+		t.Fatalf("排错的计划应回 500 并带原因,得到 %d %+v", code, res)
+	}
+	if len(f.wheels) != 0 {
+		t.Fatalf("前两次都不该发出滚轮:%v", f.wheels)
+	}
+
+	code, res := post(ScrollPlan{Ticks: []ScrollTick{{At: 0, Dy: -1}, {At: 15, Dy: -1}}})
+	if code != http.StatusOK || res.Ticks != 2 || res.Status != "ok" {
+		t.Fatalf("光标还在原处应当滚成,得到 %d %+v", code, res)
+	}
+}

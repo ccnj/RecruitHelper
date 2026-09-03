@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:98b686a00a449f5ce1f6f44524fef36f1aa672e6452dee7e4a3ff983c7f5f32c"
+	ContractHash       = "sha256:45f8208222e97cda792fc769dd6718dc3aa905d2bfe362b6a7bbdcb6476eb40c"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -307,6 +307,18 @@ var NotReadyReasonValues = []NotReadyReason{
 	NotReadyReasonUnknown,
 }
 
+type OsClickMode string
+
+const (
+	OsClickModeMove  OsClickMode = "move"
+	OsClickModeClick OsClickMode = "click"
+)
+
+var OsClickModeValues = []OsClickMode{
+	OsClickModeMove,
+	OsClickModeClick,
+}
+
 type OsProbeOutcome string
 
 const (
@@ -333,6 +345,36 @@ const (
 var OsProbeTargetValues = []OsProbeTarget{
 	OsProbeTargetViewportSpread,
 	OsProbeTargetReversibleToggle,
+}
+
+type OsScrollDirection string
+
+const (
+	OsScrollDirectionDown OsScrollDirection = "down"
+	OsScrollDirectionUp   OsScrollDirection = "up"
+)
+
+var OsScrollDirectionValues = []OsScrollDirection{
+	OsScrollDirectionDown,
+	OsScrollDirectionUp,
+}
+
+type OsScrollOutcome string
+
+const (
+	OsScrollOutcomeScrolled               OsScrollOutcome = "scrolled"
+	OsScrollOutcomeEdge                   OsScrollOutcome = "edge"
+	OsScrollOutcomeStuck                  OsScrollOutcome = "stuck"
+	OsScrollOutcomeRefusedByGate          OsScrollOutcome = "refusedByGate"
+	OsScrollOutcomeHandServiceUnavailable OsScrollOutcome = "handServiceUnavailable"
+)
+
+var OsScrollOutcomeValues = []OsScrollOutcome{
+	OsScrollOutcomeScrolled,
+	OsScrollOutcomeEdge,
+	OsScrollOutcomeStuck,
+	OsScrollOutcomeRefusedByGate,
+	OsScrollOutcomeHandServiceUnavailable,
 }
 
 type OsTypeOutcome string
@@ -862,7 +904,9 @@ const (
 	PrimChatSendWechatInvite              = "chat.sendWechatInvite"
 	PrimDebugCapturePage                  = "debug.capturePage"
 	PrimDebugInspectSendSurface           = "debug.inspectSendSurface"
+	PrimDebugOsClick                      = "debug.osClick"
 	PrimDebugOsProbe                      = "debug.osProbe"
+	PrimDebugOsScroll                     = "debug.osScroll"
 	PrimDebugOsType                       = "debug.osType"
 	PrimDebugPing                         = "debug.ping"
 	PrimDebugProbeInterviewEditor         = "debug.probeInterviewEditor"
@@ -926,7 +970,9 @@ var Primitives = map[string]PrimitiveMeta{
 	PrimChatSendWechatInvite:              {Ver: 1, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 120000, DeadlineMs: 600000, LeaseMs: 30000, ArgsSchema: "ChatSendWechatInviteArgs", DataSchema: "ChatSendWechatInviteData", GuardsSchema: "ChatSendMessageGuards", EvidenceSchema: "ChatSendWechatInviteEvidence", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "conversation.tracked", "witness/1"}, VerificationPrimitive: "chat.readThread", VerificationVer: 1, VerificationMaxRounds: 3, ContextOptionalBeforeBinding: false},
 	PrimDebugCapturePage:                  {Ver: 1, Class: ClassReadonly, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 15000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugCapturePageArgs", DataSchema: "CaptureScreenshotData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"blob/1"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugInspectSendSurface:           {Ver: 1, Class: ClassReadonly, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugInspectSendSurfaceArgs", DataSchema: "DebugInspectSendSurfaceData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimDebugOsClick:                      {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 180000, DeadlineMs: 300000, LeaseMs: 60000, ArgsSchema: "DebugOsClickArgs", DataSchema: "DebugOsClickData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugOsProbe:                      {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 180000, DeadlineMs: 300000, LeaseMs: 60000, ArgsSchema: "DebugOsProbeArgs", DataSchema: "DebugOsProbeData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimDebugOsScroll:                     {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 180000, DeadlineMs: 300000, LeaseMs: 60000, ArgsSchema: "DebugOsScrollArgs", DataSchema: "DebugOsScrollData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugOsType:                       {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 180000, DeadlineMs: 300000, LeaseMs: 60000, ArgsSchema: "DebugOsTypeArgs", DataSchema: "DebugOsTypeData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugPing:                         {Ver: 1, Class: ClassReadonly, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugPingArgs", DataSchema: "DebugPingData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugProbeInterviewEditor:         {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 180000, DeadlineMs: 240000, LeaseMs: 0, ArgsSchema: "DebugProbeInterviewEditorArgs", DataSchema: "DebugProbeInterviewEditorData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},

@@ -629,7 +629,7 @@ const batchFailureFriendlyLabels: Record<string, string> = {
   jobNotOnline: '当前职位未在智联上线(可能已下线或正在审核),已停止工作;请在智联恢复职位上线后重新点击开始',
   jobStatusReadFailed: '开始采集前未能确认智联职位在线状态,已停止工作;请稍后重新点击开始',
   // 2026-09-02 甲方裁决:切职位失败按手报类别拆开提示,不再笼统写"找不到职位"。
-  recommendPageNotReady: '智联推荐页加载超时(已自动重试一次),已停止工作;请稍后重新点击开始',
+  recommendPageNotReady: '智联推荐页加载超时(已自动重试 5 次),已停止工作;请稍后重新点击开始',
   positionSelectFailed: '智联推荐页的职位列表里找不到该职位或无法唯一确定,已停止工作;请核对智联上的职位名后重新点击开始',
 }
 

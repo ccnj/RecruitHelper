@@ -16,8 +16,10 @@
 // 直接要求。
 import { contentScriptHealthy, runInPage } from './inject'
 import { tabNavigationGeneration } from '../../base/tabGeneration'
-import { composeClearKeys, isHandServiceDown, osProbeContractData, playKeys, playTypePlan, readHandOS, runOsProbe, seedFrom } from './osinput'
+import { composeClearKeys, isHandServiceDown, osClickContractData, osProbeContractData, playKeys, playTypePlan, readHandOS, runOsProbe, seedFrom } from './osinput'
 import { planType } from '../osengine/plan'
+import { osScrollContractData, runOsScroll } from './osscroll'
+import type { ScrollTarget } from './osscroll'
 import type { ClickObservation, ClickPlan } from './osinput'
 import { PlatformError } from './types'
 import { BOSS_MATCH, BOSS_PLATFORM, bossSite } from './bossSite'
@@ -46,7 +48,11 @@ import type {
   ChatSendMessageData,
   ChatSendMessageGuards,
   ConversationSummary,
+  DebugOsClickArgs,
+  DebugOsClickData,
   DebugOsProbeArgs,
+  DebugOsScrollArgs,
+  DebugOsScrollData,
   DebugOsTypeArgs,
   DebugOsTypeData,
   DebugOsProbeData,
@@ -1552,6 +1558,161 @@ async function dismissBossOverlaysBestEffort(tab: chrome.tabs.Tab, ctx: Primitiv
   }
 }
 
+// ── 考古探针:任意 selector 的定位与滚动指标(isolated world)────────────────────
+//
+// 这两个页面函数只服务 debug.osScroll / debug.osClick——selector 由调用方给,是 debug.*
+// 命名空间的显式例外(契约 note)。生产原语的定位各有自己的常量与页面函数,不走这里。
+
+type DomLocated =
+  | { status: 'ok'; count: number; index: number; rect: DomRect4; clip: DomRect4; text: string; signature: string }
+  | { status: 'bad_selector' | 'none' | 'ambiguous' | 'out_of_range' | 'offscreen'; count: number; detail: string }
+
+/**
+ * 按 selector(+index)定位一个元素。index<0 表示"没给":命中不唯一即拒,不猜第一个。
+ * 返回它的整矩形与**可见部分**矩形(与视口相交);可见部分太小算 offscreen,光标没处落。
+ */
+function domLocateBySelector(selector: string, index: number): DomLocated {
+  let all: Element[]
+  try {
+    all = Array.from(document.querySelectorAll(selector))
+  } catch (error) {
+    return { status: 'bad_selector', count: 0, detail: `选择器无效:${String(error).slice(0, 120)}` }
+  }
+  if (all.length === 0) return { status: 'none', count: 0, detail: '选择器没有命中任何元素' }
+  if (index < 0 && all.length > 1) {
+    return { status: 'ambiguous', count: all.length, detail: `命中 ${all.length} 个元素,请给 index` }
+  }
+  const i = index < 0 ? 0 : index
+  const el = all[i]
+  if (!el) return { status: 'out_of_range', count: all.length, detail: `index ${i} 越界,只命中 ${all.length} 个` }
+  const r = el.getBoundingClientRect()
+  const left = Math.max(0, r.left)
+  const top = Math.max(0, r.top)
+  const right = Math.min(window.innerWidth, r.right)
+  const bottom = Math.min(window.innerHeight, r.bottom)
+  const clip = { x: left, y: top, w: Math.max(0, right - left), h: Math.max(0, bottom - top) }
+  const parts: string[] = []
+  let cursor: Element | null = el
+  for (let depth = 0; cursor && cursor !== document.body && depth < 4; depth += 1) {
+    const cls = typeof cursor.className === 'string' ? cursor.className.trim().split(/\s+/u).slice(0, 2).join('.') : ''
+    parts.push(cursor.tagName.toLowerCase() + (cls ? '.' + cls : ''))
+    cursor = cursor.parentElement
+  }
+  const text = (el.textContent ?? '').trim()
+  const signature = `${parts.join('<')}[${Math.round(r.width)}x${Math.round(r.height)}]「${text.slice(0, 8)}」`
+  if (!(clip.w >= 24 && clip.h >= 24)) {
+    return { status: 'offscreen', count: all.length, detail: `${signature} 可见部分只有 ${Math.round(clip.w)}x${Math.round(clip.h)},光标没处落` }
+  }
+  return { status: 'ok', count: all.length, index: i, rect: { x: r.x, y: r.y, w: r.width, h: r.height }, clip, text, signature }
+}
+
+/** 容器的滚动指标。找不到就 found=false,不抛。 */
+function domReadScrollMetrics(selector: string, index: number): { found: boolean; scrollTop: number; scrollHeight: number; clientHeight: number } {
+  let el: Element | undefined
+  try {
+    el = Array.from(document.querySelectorAll(selector))[index]
+  } catch {
+    el = undefined
+  }
+  if (!el) return { found: false, scrollTop: 0, scrollHeight: 0, clientHeight: 0 }
+  return { found: true, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }
+}
+
+/**
+ * 考古点击的命中测试:落点上是 selector[index] 或其后代,**且**给了 expectText 时元素此刻的
+ * 文本仍逐字相等——这是点击前的最后一次读。列表重排后同一个 index 可能指到另一行,
+ * 只看 index 会点错人;文本是那一行的身份。
+ */
+function domHitTestExpected(
+  selector: string, index: number, expectText: string | null, x: number, y: number,
+): { onTarget: boolean; found: string } {
+  let target: Element | undefined
+  try {
+    target = Array.from(document.querySelectorAll(selector))[index]
+  } catch {
+    target = undefined
+  }
+  const at = document.elementFromPoint(x, y)
+  if (!target) return { onTarget: false, found: '靶子已经不在原来的位置上' }
+  if (!at) return { onTarget: false, found: '落点上什么都没有' }
+  if (!(at === target || target.contains(at))) {
+    return { onTarget: false, found: `落点上是别的元素 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 8)}」` }
+  }
+  if (expectText !== null) {
+    const now = (target.textContent ?? '').trim()
+    if (now !== expectText) return { onTarget: false, found: `靶子文本已变:「${now.slice(0, 16)}」≠「${expectText.slice(0, 16)}」` }
+  }
+  return { onTarget: true, found: `靶子(${at.tagName.toLowerCase()})` }
+}
+
+async function bossOsClick(
+  args: DebugOsClickArgs,
+  ctx: PrimitiveContext,
+  fingerprint: string | undefined,
+): Promise<DebugOsClickData> {
+  const tab = await verifiedBossTab(fingerprint)
+  const tabId = tab.id!
+  const started = Date.now()
+  const refused = (detail: string): DebugOsClickData => osClickContractData(args.mode, {
+    outcome: 'refusedByGate', attempts: 0, calibStatus: '未知', unreachableFrames: 0, planMs: 0,
+    elapsedMs: Date.now() - started, lagMaxUs: 0, detail,
+  }, Date.now())
+  // 靶子在**移动之前**就要定位好:定不到、不唯一、看不见、文本不符,一步都不动。
+  const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [args.selector, args.index ?? -1])
+  if (located.status !== 'ok') return refused(`靶子定位失败(${located.status}):${located.detail}`)
+  const expectText = args.expectText === undefined ? null : args.expectText.trim()
+  if (expectText !== null && located.text !== expectText) {
+    return refused(`靶子文本不符:页面是「${located.text.slice(0, 16)}」,期望「${expectText.slice(0, 16)}」(${located.signature})`)
+  }
+  const plan: ClickPlan = {
+    label: located.signature,
+    rect: located.clip,
+    action: args.mode === 'move' ? 'land' : 'click',
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [args.selector, located.index, expectText, x, y]),
+    observe: async (): Promise<ClickObservation> => {
+      const after = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [args.selector, located.index])
+      return { trusted: null, onTarget: null, eventDriftPx: null,
+        after: after.status === 'ok' ? `靶子仍在:${after.signature}` : `靶子已不在(${after.status})` }
+    },
+  }
+  const probe = await runOsProbe(BOSS_INJECT, tabId, ctx, plan)
+  return osClickContractData(args.mode, probe, Date.now())
+}
+
+async function bossOsScroll(
+  args: DebugOsScrollArgs,
+  ctx: PrimitiveContext,
+  fingerprint: string | undefined,
+): Promise<DebugOsScrollData> {
+  const tab = await verifiedBossTab(fingerprint)
+  const tabId = tab.id!
+  const started = Date.now()
+  const zero = { scrollTopBefore: 0, scrollTopAfter: 0, scrolledPx: 0, ticks: 0, bursts: 0, attempts: 0, lagMaxUs: 0 }
+  // 定位在**移动之前**:定不到、不唯一、看不见,一步都不动。
+  const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [args.selector, args.index ?? -1])
+  if (located.status !== 'ok') {
+    return osScrollContractData({ ...zero, outcome: 'refusedByGate', elapsedMs: Date.now() - started,
+      detail: `容器定位失败(${located.status}):${located.detail}` }, Date.now())
+  }
+  const metrics = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [args.selector, located.index])
+  if (metrics.scrollHeight <= metrics.clientHeight + 1) {
+    return osScrollContractData({ ...zero, outcome: 'edge', scrollTopBefore: metrics.scrollTop, scrollTopAfter: metrics.scrollTop,
+      elapsedMs: Date.now() - started,
+      detail: `${located.signature} 没有可滚内容(scrollHeight ${metrics.scrollHeight} ≤ clientHeight ${metrics.clientHeight}),一格没滚` }, Date.now())
+  }
+  const target: ScrollTarget = {
+    label: `容器 ${located.signature}`,
+    rect: located.clip,
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestIndexed, [args.selector, located.index, x, y]),
+    readMetrics: async () => {
+      const m = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [args.selector, located.index])
+      return m.found ? { scrollTop: m.scrollTop, scrollHeight: m.scrollHeight, clientHeight: m.clientHeight } : null
+    },
+  }
+  const res = await runOsScroll(BOSS_INJECT, tabId, ctx, target, args.direction, args.distancePx)
+  return osScrollContractData(res, Date.now())
+}
+
 // ── OS 点击的编排 ─────────────────────────────────────────────────────────────
 
 /** 点一下,不成就按闸的原因失败。至多一次点击是 runOsProbe 的内核,这里不重试。 */
@@ -2420,6 +2581,9 @@ export const bossTestHooks = Object.freeze({
   domReadBossOverlays,
   domHitTestOverlayCloser,
   domHitTestIndexed,
+  domLocateBySelector,
+  domReadScrollMetrics,
+  domHitTestExpected,
   mainReadBossResume,
   projectBossResume,
   bossConversationRef,
@@ -2450,6 +2614,9 @@ export const bossAdapter = {
   probePlatform: () => probeBoss(),
   osProbe: ({ args, ctx, fingerprint }) => bossOsProbe(args, ctx, fingerprint),
   osType: ({ args, ctx, fingerprint }) => bossOsType(args, ctx, fingerprint),
+  // 考古探针(2026-09-03):滚轮,selector 由调用方给。
+  osScroll: ({ args, ctx, fingerprint }) => bossOsScroll(args, ctx, fingerprint),
+  osClick: ({ args, ctx, fingerprint }) => bossOsClick(args, ctx, fingerprint),
 
   // 场景一的七条(2026-09-03 开工):会话感知与回复。
   readList: ({ args, ctx, fingerprint }) => readBossList(args, ctx, fingerprint),

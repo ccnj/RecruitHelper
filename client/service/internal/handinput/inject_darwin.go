@@ -44,7 +44,17 @@ const (
 	cgMouseButtonLeft   = 0
 	cgMouseButtonRight  = 1
 	cgMouseButtonCenter = 2
+
+	// 滚轮以「行」为单位(kCGScrollEventUnitLine)。真实鼠标的滚轮就是这种非连续事件,
+	// Chrome 据此把它当普通滚轮(hasPreciseScrollingDeltas=false),不当触控板。
+	cgScrollEventUnitLine = 1
 )
+
+// darwinLinesPerNotch:一个刻度折成几行。
+//
+// macOS 只是开发机,这个数只求闭环能走(插件按回读的 scrollTop 自己量一格值多少像素),
+// 不追求与哪款鼠标一致;真机判据是 Windows 的 WHEEL_DELTA。
+const darwinLinesPerNotch = 3
 
 // cgPoint 与 CGPoint 二进制等价(两个 float64)。arm64 上按 HFA 走浮点寄存器传参,
 // purego 直接支持结构体传值与结构体返回。
@@ -59,9 +69,12 @@ var (
 	cgEventCreateMouseEvent    func(src uintptr, typ int32, pos cgPoint, button int32) uintptr
 	cgEventCreateKeyboardEvent func(src uintptr, vk uint16, down bool) uintptr
 	cgEventGetLocation         func(uintptr) cgPoint
-	cgEventPost                func(tap int32, event uintptr)
-	cfRelease                  func(uintptr)
-	axIsProcessTrusted         func() bool
+	// 用带 2 的非变参版本:变参函数在 arm64 上的传参规则与普通函数不同,purego 走不了。
+	cgEventCreateScrollWheelEvent2 func(src uintptr, units uint32, wheelCount uint32, wheel1, wheel2, wheel3 int32) uintptr
+	cgEventSetLocation             func(event uintptr, p cgPoint)
+	cgEventPost                    func(tap int32, event uintptr)
+	cfRelease                      func(uintptr)
+	axIsProcessTrusted             func() bool
 )
 
 func loadCoreGraphics() {
@@ -84,6 +97,8 @@ func loadCoreGraphics() {
 	purego.RegisterLibFunc(&cgEventCreateMouseEvent, cg, "CGEventCreateMouseEvent")
 	purego.RegisterLibFunc(&cgEventCreateKeyboardEvent, cg, "CGEventCreateKeyboardEvent")
 	purego.RegisterLibFunc(&cgEventGetLocation, cg, "CGEventGetLocation")
+	purego.RegisterLibFunc(&cgEventCreateScrollWheelEvent2, cg, "CGEventCreateScrollWheelEvent2")
+	purego.RegisterLibFunc(&cgEventSetLocation, cg, "CGEventSetLocation")
 	purego.RegisterLibFunc(&cgEventPost, cg, "CGEventPost")
 	purego.RegisterLibFunc(&cfRelease, cg, "CFRelease")
 	purego.RegisterLibFunc(&axIsProcessTrusted, as, "AXIsProcessTrusted")
@@ -137,6 +152,32 @@ func (d *darwinInjector) button(button int, down bool) error {
 		return err
 	}
 	return d.post(typ, cgPoint{X: float64(x), Y: float64(y)}, btn)
+}
+
+// Wheel 发一格滚轮,落在光标现在所在的点上。
+//
+// 符号:CoreGraphics 的 wheel1 按常见用法正=向上,与 deltaY 口径相反,所以取负。
+// **这一条尚未经真机回读钉死**(2026-09-03):方向反了改这里的负号,判据是插件
+// 滚完回读 scrollTop 的增减——那是本接口唯一的闭环。
+//
+// 位置显式写成光标当前点:滚轮事件投给它落点下面那个窗口,不写的话就赌
+// CoreGraphics 自己填的默认值。
+func (d *darwinInjector) Wheel(notches int) error {
+	if notches == 0 {
+		return fmt.Errorf("滚轮刻度为 0")
+	}
+	x, y, err := d.CursorPos()
+	if err != nil {
+		return err
+	}
+	e := cgEventCreateScrollWheelEvent2(d.src, cgScrollEventUnitLine, 1, int32(-notches*darwinLinesPerNotch), 0, 0)
+	if e == 0 {
+		return fmt.Errorf("CGEventCreateScrollWheelEvent2 返回空(notches=%d)", notches)
+	}
+	cgEventSetLocation(e, cgPoint{X: float64(x), Y: float64(y)})
+	cgEventPost(cgHIDEventTap, e)
+	cfRelease(e)
+	return nil
 }
 
 func (d *darwinInjector) KnowsKey(code string) error {

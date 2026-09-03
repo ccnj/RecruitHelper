@@ -5,7 +5,9 @@ import {
   CmdClass,
   DebugCapturePageArgs,
   DebugInspectSendSurfaceArgs,
+  DebugOsClickArgs,
   DebugOsProbeArgs,
+  DebugOsScrollArgs,
   DebugOsTypeArgs,
   DebugProbeInterviewEditorArgs,
   Primitive as PrimName,
@@ -191,11 +193,48 @@ const osTypePrim: Primitive = {
   },
 }
 
+// debug.osScroll:开发期 OS 滚轮探针。与 osProbe 同族——独立原语,不碰任何生产原语。
+//
+// 它把光标落到 selector 指着的容器上,以真实滚轮滚一段距离,然后停手:不点击、不输入。
+// 滚动只改页面本地视口;页面因此自行拉历史,那是页面自己的请求与节奏(手对平台零出站)。
+const osScrollPrim: Primitive = {
+  name: PrimName.DebugOsScroll,
+  capability: 'osScroll',
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      const data = await callPlatform(ctx, 'osScroll', rawArgs as DebugOsScrollArgs)
+      return { status: 'ok', data }
+    } catch (error) {
+      // 与 osProbe 同款:不接住的话平台失败会逃成 INTERNAL_HAND / sideEffect=possible。
+      return platformFailure(error)
+    }
+  },
+}
+
+// debug.osClick:开发期 OS 点击探针。靶子由 selector 指定(debug.* 的显式例外),两种模式:
+// move 只落到元素上、绝不点;click 复用 osProbe 至多一次点击的内核,不重试。
+const osClickPrim: Primitive = {
+  name: PrimName.DebugOsClick,
+  capability: 'osClick',
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      const data = await callPlatform(ctx, 'osClick', rawArgs as DebugOsClickArgs)
+      return { status: 'ok', data }
+    } catch (error) {
+      return platformFailure(error)
+    }
+  },
+}
+
 export function registerDebugPrimitives(): void {
   register(pingPrim)
   register(inspectSendSurfacePrim)
   register(osProbePrim)
   register(osTypePrim)
+  register(osScrollPrim)
+  register(osClickPrim)
   register(reloadPrim)
   register(switchWindowPrim)
   register(slowEchoPrim)

@@ -20,8 +20,9 @@ import { getWsUrl } from '../../base/config'
 import { planMove, mulberry32, DEFAULT_MAX_DWELL_MS } from '../osengine/plan'
 import { runInPage } from './inject'
 import { PlatformError } from './types'
-import type { DebugOsProbeData, OsProbeTarget } from '../../base/protocol'
+import type { DebugOsClickData, DebugOsProbeData, OsClickMode, OsProbeTarget } from '../../base/protocol'
 import type { InjectOptions } from './inject'
+import type { ScrollTick } from './osscroll'
 import type { PrimitiveContext } from '../registry'
 
 /** 冷启动粗估必然打偏,所以要允许重来几趟。上游实测两趟就追上。 */
@@ -144,6 +145,12 @@ export interface ClickPlan {
   hitTest(clientX: number, clientY: number): Promise<{ onTarget: boolean; found: string }>
   /** 点击之后:页面观测到的 click 事件 + 平台的可见后置状态。 */
   observe(): Promise<ClickObservation>
+  /**
+   * 缺省 `click`。`land` 表示**只落不点**:走完靠近、落点确认与命中测试就停,收场是 landed——
+   * 滚轮(先把光标放到容器上)与 debug.osClick 的仅移动模式用它。三道闸里的前两道照过,
+   * 第三道(光标此刻还在原处)由手服务在下一步的 /scroll 或 /click 里各自再核。
+   */
+  readonly action?: 'click' | 'land'
 }
 
 export interface ClickObservation {
@@ -892,6 +899,10 @@ async function approachAndClick(
       lastRefusal = `落点上不是靶子,而是 ${hit.found}`
       continue
     }
+    if (plan.action === 'land') {
+      // 只落不点。光标此刻停在靶子上,后面要滚要点由调用方另起一步,各自再过手服务那道光标核对。
+      return { outcome: 'landed', landingDriftPx: drift, unreachable, lagMaxUs, detail: trace.join(' | ') }
+    }
 
     // 三道闸齐,按下去。至多这一次。
     const clicked = await callHand<{ clicked?: boolean; refused?: string }>(
@@ -939,6 +950,27 @@ export function osProbeContractData(
     target,
     outcome: probe.outcome,
     attempts: Math.round(probe.attempts),
+    ...(probe.landingDriftPx === undefined ? {} : { landingDriftPx: Math.ceil(probe.landingDriftPx) }),
+    calibStatus: probe.calibStatus,
+    unreachableFrames: Math.round(probe.unreachableFrames),
+    planMs: Math.round(probe.planMs),
+    elapsedMs: Math.round(probe.elapsedMs),
+    lagMaxUs: Math.round(probe.lagMaxUs),
+    ...(probe.detail === undefined ? {} : { detail: probe.detail.slice(0, 2048) }),
+    observedAt,
+  }
+}
+
+/** debug.osClick 的装配,与 osProbeContractData 同形(mode 替代 target),取整同样收在这里。 */
+export function osClickContractData(
+  mode: OsClickMode,
+  probe: OsProbeResult,
+  observedAt: number,
+): DebugOsClickData {
+  return {
+    mode,
+    outcome: probe.outcome,
+    attempts: Math.min(16, Math.round(probe.attempts)),
     ...(probe.landingDriftPx === undefined ? {} : { landingDriftPx: Math.ceil(probe.landingDriftPx) }),
     calibStatus: probe.calibStatus,
     unreachableFrames: Math.round(probe.unreachableFrames),
@@ -1019,6 +1051,25 @@ export function composeClearKeys(os: string | undefined, jitter: () => number = 
 /** 播一段裸按键(不经上屏机制)。回包与 /type 同形。 */
 export async function playKeys(keys: KeyPress[]): Promise<TypePlayResult> {
   return await callHand<TypePlayResult>('/keys', { keys })
+}
+
+/** 一簇滚轮的回执,与手服务 ScrollResult 同形。**不含页面滚到了哪**——那要回读 DOM,是调用方的事。 */
+export interface ScrollPlayResult {
+  ticks: number
+  notches: number
+  lagMeanUs: number
+  lagMaxUs: number
+  status: string
+}
+
+/**
+ * 把一簇滚轮交给手服务播出去。**光标必须已经落在目标容器上**(先 runOsProbe 到 landed):
+ * 滚轮投给光标下面那个窗口,手服务核对光标仍在最后注入的落点,不在就拒——
+ * 拒是 409,`callHand` 不抛、原因在 `status` 里,调用方按 `status !== 'ok'` 收场,不重试。
+ * 排错(500)与手服务不可达照旧抛。
+ */
+export async function playScroll(ticks: ScrollTick[]): Promise<ScrollPlayResult> {
+  return await callHand<ScrollPlayResult>('/scroll', { ticks })
 }
 
 /** 手服务所在的操作系统(runtime.GOOS);旧脑没有该字段时为 undefined。 */
