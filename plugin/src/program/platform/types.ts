@@ -66,6 +66,8 @@ import type {
   DebugOsProbeArgs,
   DebugOsTypeArgs,
   DebugOsTypeData,
+  DebugOsScrollArgs,
+  DebugOsScrollData,
   DebugOsProbeData,
   DebugInspectSendSurfaceArgs,
   DebugInspectSendSurfaceData,
@@ -318,6 +320,13 @@ export interface PlatformCapabilities {
    * composer.empty),与发送原语同一条清空路径。
    */
   osType(input: PrimitiveInput<DebugOsTypeArgs>): Promise<DebugOsTypeData>
+
+  /**
+   * 开发期 OS 滚轮探针(2026-09-03)。把光标落到 selector 指着的容器上,以真实滚轮朝一个
+   * 方向滚 distancePx,每簇回读 scrollTop 闭环。不点击、不输入。args 带 selector 是
+   * debug.* 命名空间的显式例外(契约 note),生产原语不得照抄。
+   */
+  osScroll(input: PrimitiveInput<DebugOsScrollArgs>): Promise<DebugOsScrollData>
 }
 
 /** 能力名。`requireCapability` 用它做键。 */

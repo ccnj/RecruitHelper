@@ -145,6 +145,12 @@ export interface ClickPlan {
   hitTest(clientX: number, clientY: number): Promise<{ onTarget: boolean; found: string }>
   /** 点击之后:页面观测到的 click 事件 + 平台的可见后置状态。 */
   observe(): Promise<ClickObservation>
+  /**
+   * 缺省 `click`。`land` 表示**只落不点**:走完靠近、落点确认与命中测试就停,收场是 landed——
+   * 滚轮(先把光标放到容器上)与 debug.osClick 的仅移动模式用它。三道闸里的前两道照过,
+   * 第三道(光标此刻还在原处)由手服务在下一步的 /scroll 或 /click 里各自再核。
+   */
+  readonly action?: 'click' | 'land'
 }
 
 export interface ClickObservation {
@@ -892,6 +898,10 @@ async function approachAndClick(
     if (!hit.onTarget) {
       lastRefusal = `落点上不是靶子,而是 ${hit.found}`
       continue
+    }
+    if (plan.action === 'land') {
+      // 只落不点。光标此刻停在靶子上,后面要滚要点由调用方另起一步,各自再过手服务那道光标核对。
+      return { outcome: 'landed', landingDriftPx: drift, unreachable, lagMaxUs, detail: trace.join(' | ') }
     }
 
     // 三道闸齐,按下去。至多这一次。

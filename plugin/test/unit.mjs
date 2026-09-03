@@ -158,6 +158,8 @@ const {
   composeScrollBurst,
   composeScrollPause,
   SCROLL_BURST,
+  runOsScroll,
+  osScrollContractData,
   DEFAULT_MAX_DWELL_MS,
   OSENGINE_SOURCE,
 } = await import(unitBundleURL + `?t=${Date.now()}`)
@@ -15828,9 +15830,9 @@ test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话
   // 换微信、邀面卡、采集、招呼一条都没有:场景二、三与第二刀各自另过出口。
   assert.deepEqual(declared, [
     'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
-    'osProbe', 'osType', 'probePlatform',
+    'osProbe', 'osScroll', 'osType', 'probePlatform',
     'readList', 'readResume', 'readThread', 'readUnreadTotal', 'sendMessage',
-  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B,建档后补采是场景一的硬前置)')
+  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B,建档后补采是场景一的硬前置;osScroll:2026-09-03 滚轮/点击探针战役出口)')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'sendGreeting'), /未实现原语能力/)
@@ -15854,16 +15856,16 @@ test('hello 平台能力表:智联表等于并集,BOSS 表恰为平台无关四�
     const tables = capabilitiesByPlatform()
     assert.deepEqual(tables.map((t) => t.id), ['zhilian', 'boss'])
     const union = capabilities()
-    assert.equal(union.length, 42, '契约原语全集应为 42 条')
-    // 智联少的恰是 debug.osType@1:键盘线只在 BOSS 上有靶子(智联走页面内输入,没有
-    // 打字探针)。除此之外一条不少——少一条就是某原语的 capability 名填错了。
-    assert.deepEqual(tables[0].caps, union.filter((c) => c !== 'debug.osType@1'),
-      '智联表应等于并集减 debug.osType@1')
+    assert.equal(union.length, 43, '契约原语全集应为 43 条')
+    // 智联少的是 debug.osType@1 与 debug.osScroll@1:键盘线与滚轮线只在 BOSS 上有靶子
+    // (智联走页面内输入与程序化滚动)。除此之外一条不少——少一条就是某原语的 capability 名填错了。
+    assert.deepEqual(tables[0].caps, union.filter((c) => c !== 'debug.osType@1' && c !== 'debug.osScroll@1'),
+      '智联表应等于并集减 debug.osType@1、debug.osScroll@1')
     assert.deepEqual(tables[1].caps, [
       'candidate.readResume@1',
       'chat.captureThreadScreenshot@1', 'chat.identifyCurrentConversation@1', 'chat.openConversation@1',
       'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.sendMessage@1',
-      'debug.osProbe@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
+      'debug.osProbe@1', 'debug.osScroll@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
       'debug.slowEcho@1', 'debug.switchWindow@1', 'probe.platform@1',
     ], 'BOSS 表变了:要么适配器长了能力(先过出口),要么某条原语漏填 capability')
     for (const capability of tables[1].caps) {
@@ -16164,6 +16166,149 @@ test('滚轮排版器:一簇 3~8 格同向、首格在 0、间隔在量程内且
   }
 })
 
+/** 一个假滚动容器:每格 pxPerNotch 像素,钳在 [0, max];flip 为真时方向反着动(模拟注入器符号不符)。 */
+function fakeScrollBox({ top = 0, scrollHeight = 5000, clientHeight = 700, pxPerNotch = 100, flip = false } = {}) {
+  const box = { top, scrollHeight, clientHeight }
+  const max = scrollHeight - clientHeight
+  return {
+    box,
+    onScroll(ticks) {
+      for (const t of ticks) {
+        const d = (flip ? -t.dy : t.dy) * pxPerNotch
+        box.top = Math.max(0, Math.min(max, box.top + d))
+      }
+      return null
+    },
+    target: {
+      label: '假容器',
+      rect: { x: 600, y: 120, w: 500, h: 600 },
+      async hitTest() { return { onTarget: true, found: '靶子(div)' } },
+      async readMetrics() { return { scrollTop: box.top, scrollHeight, clientHeight } },
+    },
+  }
+}
+
+test('滚轮闭环:落到容器上再一簇簇滚,回读 scrollTop 滚够即停;最后一簇按剩余像素收短、绝不点击', async () => {
+  const fake = fakeScrollBox()
+  const hand = osClickHarness({ calibrated: true, onScroll: fake.onScroll })
+  try {
+    const out = await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), fake.target, 'down', 650)
+    assert.equal(out.outcome, 'scrolled', out.detail)
+    assert.ok(out.scrolledPx >= 650 && out.scrolledPx <= 650 + 800, `滚了 ${out.scrolledPx}px`)
+    assert.equal(out.scrollTopBefore, 0)
+    assert.equal(out.scrollTopAfter, fake.box.top)
+    assert.ok(out.bursts >= 1 && out.ticks >= 7, `簇 ${out.bursts} 格 ${out.ticks}`)
+    assert.equal(hand.clicks(), 0, '滚轮探针绝不点击')
+    assert.ok(hand.plays() >= 1, '要先经鼠标线落到容器上')
+    assert.equal(hand.scrolls(), out.bursts)
+    assert.match(out.detail, /簇#1/)
+    // 契约装配:全整数、attempts 封顶
+    const data = osScrollContractData(out, 1700000000000)
+    for (const k of ['scrollTopBefore', 'scrollTopAfter', 'scrolledPx', 'ticks', 'bursts', 'attempts', 'elapsedMs', 'lagMaxUs']) {
+      assert.ok(Number.isInteger(data[k]), `${k} 应为整数`)
+    }
+  } finally { hand.restore() }
+})
+
+test('滚轮闭环:剩余像素不足一簇时只排够用的格数——不为凑数多滚', async () => {
+  const fake = fakeScrollBox()
+  const hand = osClickHarness({ calibrated: true, onScroll: fake.onScroll })
+  try {
+    const out = await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), fake.target, 'down', 150)
+    assert.equal(out.outcome, 'scrolled', out.detail)
+    assert.ok(out.ticks <= 2, `150px 按每格 100px 估只该排 2 格,实际 ${out.ticks}`)
+  } finally { hand.restore() }
+})
+
+test('滚轮闭环:已在顶上就是 edge,一格不发;滚到底也是 edge', async () => {
+  const atTop = fakeScrollBox({ top: 0 })
+  let hand = osClickHarness({ calibrated: true, onScroll: atTop.onScroll })
+  try {
+    const out = await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), atTop.target, 'up', 500)
+    assert.equal(out.outcome, 'edge')
+    assert.equal(hand.scrolls(), 0, '已在顶上不该发滚轮')
+    assert.equal(out.ticks, 0)
+  } finally { hand.restore() }
+  const nearBottom = fakeScrollBox({ top: 4200 }) // max=4300,只剩 100px
+  hand = osClickHarness({ calibrated: true, onScroll: nearBottom.onScroll })
+  try {
+    const out = await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), nearBottom.target, 'down', 2000)
+    assert.equal(out.outcome, 'edge', out.detail)
+    assert.equal(out.scrollTopAfter, 4300)
+    assert.ok(out.scrolledPx < 2000)
+  } finally { hand.restore() }
+})
+
+test('滚轮闭环:一簇下去纹丝不动是 stuck,方向反了也是 stuck——如实报,不换方向重试', async () => {
+  const dead = fakeScrollBox({ pxPerNotch: 0 })
+  let hand = osClickHarness({ calibrated: true, onScroll: dead.onScroll })
+  try {
+    const out = await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), dead.target, 'down', 500)
+    assert.equal(out.outcome, 'stuck')
+    assert.equal(hand.scrolls(), 1, '纹丝不动就停,不再发第二簇')
+    assert.match(out.detail, /纹丝不动/)
+  } finally { hand.restore() }
+  const flipped = fakeScrollBox({ top: 2000, flip: true })
+  hand = osClickHarness({ calibrated: true, onScroll: flipped.onScroll })
+  try {
+    const out = await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), flipped.target, 'down', 500)
+    assert.equal(out.outcome, 'stuck')
+    assert.equal(hand.scrolls(), 1, '方向反了就停,不换方向再试')
+    assert.match(out.detail, /方向反了/)
+    assert.ok(out.scrollTopAfter < 2000, '页面确实反着动了,如实带出')
+  } finally { hand.restore() }
+})
+
+test('滚轮闭环:落点闸没过就一格不滚;手服务拒绝(光标被动过)按未放行收场', async () => {
+  const fake = fakeScrollBox()
+  let hand = osClickHarness({ armed: false, onScroll: fake.onScroll })
+  try {
+    const out = await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), fake.target, 'down', 500)
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(hand.scrolls(), 0, '没落到容器上不得发滚轮')
+    assert.match(out.detail, /没落到容器上/)
+  } finally { hand.restore() }
+  hand = osClickHarness({ calibrated: true, onScroll: () => 'refuse' })
+  try {
+    const out = await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), fake.target, 'down', 500)
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.match(out.detail, /手服务拒绝滚轮/)
+    assert.equal(hand.scrolls(), 1)
+  } finally { hand.restore() }
+})
+
+test('考古定位:selector 命中不唯一且没给 index 即拒,越界即拒,可见部分太小即拒;命中给出可见矩形与签名', () => {
+  const el = (rect, text = '', cls = 'chat-message-list') => ({
+    tagName: 'DIV', className: cls, textContent: text, parentElement: null,
+    getBoundingClientRect() { return { x: rect.x, y: rect.y, width: rect.w, height: rect.h, left: rect.x, top: rect.y, right: rect.x + rect.w, bottom: rect.y + rect.h } },
+    scrollTop: 40, scrollHeight: 3000, clientHeight: 600,
+  })
+  const saved = { document: globalThis.document, window: globalThis.window }
+  globalThis.window = { innerWidth: 1470, innerHeight: 746 }
+  const nodes = {
+    '.one': [el({ x: 600, y: 100, w: 500, h: 600 }, '你好')],
+    '.many': [el({ x: 0, y: 0, w: 100, h: 100 }), el({ x: 200, y: 0, w: 100, h: 100 }, '第二个')],
+    '.off': [el({ x: 1460, y: 100, w: 500, h: 600 })],
+    '.none': [],
+  }
+  globalThis.document = { body: {}, querySelectorAll(sel) { if (sel === ':bad(') throw new SyntaxError('bad'); return nodes[sel] ?? [] } }
+  try {
+    const { domLocateBySelector, domReadScrollMetrics } = bossTestHooks
+    assert.equal(domLocateBySelector('.none', -1).status, 'none')
+    assert.equal(domLocateBySelector(':bad(', -1).status, 'bad_selector')
+    assert.equal(domLocateBySelector('.many', -1).status, 'ambiguous', '不唯一不猜第一个')
+    assert.equal(domLocateBySelector('.many', 1).status, 'ok', '给了 index 就按 index')
+    assert.equal(domLocateBySelector('.many', 5).status, 'out_of_range')
+    assert.equal(domLocateBySelector('.off', -1).status, 'offscreen', '只露 10px 光标没处落')
+    const ok = domLocateBySelector('.one', -1)
+    assert.equal(ok.status, 'ok')
+    assert.deepEqual(ok.clip, { x: 600, y: 100, w: 500, h: 600 })
+    assert.match(ok.signature, /^div\.chat-message-list\[500x600\]「你好」$/)
+    assert.deepEqual(domReadScrollMetrics('.one', 0), { found: true, scrollTop: 40, scrollHeight: 3000, clientHeight: 600 })
+    assert.equal(domReadScrollMetrics('.none', 0).found, false)
+  } finally { globalThis.document = saved.document; globalThis.window = saved.window }
+})
+
 test('BOSS 消息数组就绪判据:空数组不算就绪继续等,身份缺失立即收束', () => {
   const { bossThreadReadSettled } = bossTestHooks
   assert.equal(bossThreadReadSettled({ status: 'ready', rows: [], isToTop: true, peerName: '' }), false,
@@ -16433,7 +16578,7 @@ test('args.platform 解开死结:双平台下脑说探谁就探谁,说不出或�
  * 假手服务 + 假页面。落点恒等于最后一次 /play 的终点(标定完美),于是
  * 判据只剩「闸放不放行」这一件事,不掺几何噪声。
  */
-function osClickHarness({ armed = true, refuseClick = null, calibrated = true, observeLanding = true, windowFocused = true, tabActive = true, windowState = 'normal', injectAuthorized = true } = {}) {
+function osClickHarness({ armed = true, refuseClick = null, calibrated = true, observeLanding = true, windowFocused = true, tabActive = true, windowState = 'normal', injectAuthorized = true, onScroll = null } = {}) {
   const posts = []
   const methods = []
   const targets = []
@@ -16485,6 +16630,14 @@ function osClickHarness({ armed = true, refuseClick = null, calibrated = true, o
       if (refuseClick) return { ok: false, status: 409, async json() { return { refused: refuseClick } } }
       return { ok: true, status: 200, async json() { return { clicked: true } } }
     }
+    if (path === '/handinput/scroll') {
+      // onScroll(ticks) 由用例决定页面怎么动;返回 'refuse' 模拟 409(光标已不在落点,一格没发)。
+      const verdict = onScroll ? onScroll(body.ticks) : null
+      if (verdict === 'refuse') {
+        return { ok: false, status: 409, async json() { return { ticks: 0, notches: 0, lagMeanUs: 0, lagMaxUs: 0, status: '未放行:落点确认之后光标被动过(偏 900 像素)' } } }
+      }
+      return { ok: true, status: 200, async json() { return { ticks: body.ticks.length, notches: body.ticks.reduce((a, t) => a + Math.abs(t.dy), 0), lagMeanUs: 3, lagMaxUs: 9, status: 'ok' } } }
+    }
     throw new Error(`假手服务不认识 ${path}`)
   }
   return {
@@ -16492,6 +16645,7 @@ function osClickHarness({ armed = true, refuseClick = null, calibrated = true, o
     /** 手服务四个端点全是 POST-only:发成 GET 就是 405,而那会在闸都放行了之后才炸。 */
     nonPost: () => methods.filter((m) => m !== 'POST'),
     clicks: () => posts.filter((p) => p === '/handinput/click').length,
+    scrolls: () => posts.filter((p) => p === '/handinput/scroll').length,
     plays: () => posts.filter((p) => p === '/handinput/play').length,
     reseeds: () => posts.filter((p) => p === '/handinput/reseed').length,
     playTargets: () => targets.slice(),
