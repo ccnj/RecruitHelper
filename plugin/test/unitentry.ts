@@ -111,7 +111,7 @@ export {
 export { planMove, planType, mulberry32, DEFAULT_MAX_DWELL_MS, OSENGINE_SOURCE } from '../src/program/osengine/plan'
 // 只为门禁导出:钉住上游标点键集合,它变了 Go 侧的键码表就得跟着补。
 export { PUNCT_KEY, tokenize, keyFor } from '../src/program/osengine/vendor/compose/pinyin.mjs'
-export { refuseBeforeMoving, osProbeContractData, runOsProbe, clickAimPoint, SPREAD_FRACTIONS } from '../src/program/platform/osinput'
+export { refuseBeforeMoving, refuseWhenNotInFront, describeFront, osProbeContractData, runOsProbe, clickAimPoint, SPREAD_FRACTIONS } from '../src/program/platform/osinput'
 export {
   append as telemetryAppend,
   readAll as telemetryReadAll,

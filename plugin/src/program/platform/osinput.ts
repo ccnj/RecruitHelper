@@ -189,6 +189,65 @@ export interface ViewportFacts {
   // **只作诊断,不参与放行判断** —— 见 refuseBeforeMoving 里那段墓碑。
   availLeft: number
   availTop: number
+  /** 文档是不是系统活动窗口里的焦点文档(`document.hasFocus()`)。只作诊断:地址栏有焦点时它为假,鼠标事件照样到页面。 */
+  docFocused: boolean
+  /** `document.visibilityState`。 */
+  visibility: string
+}
+
+/**
+ * Chrome 窗口在不在最前面。三样都是扩展/浏览器的公开语义,在后台进程里读,不碰页面:
+ * 窗口焦点(`chrome.windows.get().focused`)、窗口状态(minimized 等)、标签是否激活。
+ * 读不到(测试环境没有 chrome.windows)记 null,按未知处理、不拒绝。
+ */
+export interface FrontFacts {
+  windowFocused: boolean | null
+  windowState: string | null
+  tabActive: boolean | null
+  docFocused: boolean | null
+  visibility: string | null
+}
+
+async function readFrontFacts(tabId: number, view: ViewportFacts): Promise<FrontFacts> {
+  const facts: FrontFacts = {
+    windowFocused: null, windowState: null, tabActive: null,
+    docFocused: view.docFocused ?? null, visibility: view.visibility ?? null,
+  }
+  try {
+    const api = (globalThis as { chrome?: { tabs?: { get?: unknown }; windows?: { get?: unknown } } }).chrome
+    if (!api?.tabs?.get || !api?.windows?.get) return facts
+    const tab = await chrome.tabs.get(tabId)
+    facts.tabActive = typeof tab.active === 'boolean' ? tab.active : null
+    if (tab.windowId !== undefined) {
+      const win = await chrome.windows.get(tab.windowId)
+      facts.windowFocused = typeof win.focused === 'boolean' ? win.focused : null
+      facts.windowState = typeof win.state === 'string' ? win.state : null
+    }
+  } catch {
+    // 读不到就是未知。判据缺席不拒绝——拒绝要有正面证词。
+  }
+  return facts
+}
+
+export function describeFront(facts: FrontFacts): string {
+  const yn = (value: boolean | null): string => (value === null ? '未知' : value ? '是' : '否')
+  return `窗口焦点=${yn(facts.windowFocused)} 窗口状态=${facts.windowState ?? '未知'} 标签激活=${yn(facts.tabActive)}` +
+    ` 页面可见=${facts.visibility ?? '未知'} 文档焦点=${yn(facts.docFocused)}`
+}
+
+/**
+ * 移动之前的前台判据。**有正面证词说 Chrome 不在最前面才拒**:窗口没焦点、最小化、标签
+ * 未激活、页面不可见,任一成立就一步不动——飞一圈再发现"没观测到 mousemove"是白飞,
+ * 而且光标会在别的应用上划过。文档焦点不参与判据(地址栏有焦点时鼠标照样到页面)。
+ */
+export function refuseWhenNotInFront(facts: FrontFacts): string | null {
+  const reasons: string[] = []
+  if (facts.windowFocused === false) reasons.push('系统焦点在别的窗口')
+  if (facts.windowState === 'minimized') reasons.push('Chrome 窗口已最小化')
+  if (facts.tabActive === false) reasons.push('平台页不是当前激活标签')
+  if (facts.visibility !== null && facts.visibility !== 'visible') reasons.push('页面不可见')
+  if (reasons.length === 0) return null
+  return `Chrome 窗口不在最前面(${reasons.join(';')}):请把 Chrome 切到最前、别被其他窗口盖住,鼠标放在页面上 | ${describeFront(facts)}`
 }
 
 interface HandState {
@@ -310,6 +369,8 @@ function pageInstallObserverAndReadViewport(key: string): ViewportFacts {
     dpr: window.devicePixelRatio,
     availLeft: (window.screen as unknown as { availLeft?: number }).availLeft ?? 0,
     availTop: (window.screen as unknown as { availTop?: number }).availTop ?? 0,
+    docFocused: document.hasFocus(),
+    visibility: document.visibilityState,
   }
 }
 
@@ -392,6 +453,16 @@ export async function runOsProbe(
     return { outcome: 'refusedByGate', attempts: 0, calibStatus, unreachableFrames: 0,
       planMs: 0, elapsedMs: Date.now() - started, lagMaxUs: 0, detail: refusal }
   }
+  // Chrome 不在最前面就一步不动(2026-09-03 Mac 首跑:客户端窗口盖着 Chrome,一整轮每次
+  // 都是飞一圈再报"没观测到 mousemove")。有正面证词才拒;读不到按未知放行。
+  const front = await readFrontFacts(tabId, view)
+  const frontRefusal = refuseWhenNotInFront(front)
+  if (frontRefusal !== null) {
+    try { await runInPage(observerWorld(inject), tabId, pageReadLandingAndDetach, [LANDING_KEY]) } catch { /* 页面可能已导航走 */ }
+    return { outcome: 'refusedByGate', attempts: 0, calibStatus, unreachableFrames: 0,
+      planMs: 0, elapsedMs: Date.now() - started, lagMaxUs: 0, detail: frontRefusal }
+  }
+  const frontSummary = describeFront(front)
 
   // 靶子:视口里几个**散开**的点,按趟轮换。它们不需要任何平台 DOM 知识。
   //
@@ -434,7 +505,7 @@ export async function runOsProbe(
       const warm = await callHand<HandState>('/state', { hint })
       if (warm.calibrated) {
         attempts = 1
-        const approach = await approachAndClick(inject, tabId, ctx, click, trace, hint)
+        const approach = await approachAndClick(inject, tabId, ctx, click, trace, hint, frontSummary)
         return {
           outcome: approach.outcome, attempts, calibStatus: '就绪(热路径)', planMs,
           ...(approach.landingDriftPx === undefined ? {} : { landingDriftPx: approach.landingDriftPx }),
@@ -491,7 +562,7 @@ export async function runOsProbe(
         // 没有样本标定就学不到东西。2026-08-28 副屏那 34 秒里,六趟重试
         // 每一趟都是这个形态。失效方向是不动。
         detail = `页面没有观测到任何 mousemove——光标多半不在页面上,停手` +
-          `${await reseed(hint)} | 靶(${target.x},${target.y}) 视口${view.innerW}x${view.innerH}`
+          `${await reseed(hint)} | 靶(${target.x},${target.y}) 视口${view.innerW}x${view.innerH} | 移动前 ${frontSummary}`
         calibStatus = '无观测'
         break
       }
@@ -523,7 +594,7 @@ export async function runOsProbe(
           return { outcome: 'landed', attempts, landingDriftPx: drift, calibStatus,
             unreachableFrames: unreachable, planMs, elapsedMs: Date.now() - started, lagMaxUs }
         }
-        const approach = await approachAndClick(inject, tabId, ctx, click, trace, hint)
+        const approach = await approachAndClick(inject, tabId, ctx, click, trace, hint, frontSummary)
         return {
           outcome: approach.outcome, attempts, calibStatus, planMs,
           landingDriftPx: approach.landingDriftPx ?? drift,
@@ -699,6 +770,7 @@ async function approachAndClick(
   plan: ClickPlan,
   trace: string[],
   hint: WindowHint,
+  frontSummary = '',
 ): Promise<ApproachOutcome> {
   // 瞄的是矩形里一个抖动过的点,不是中心(见 clickAimPoint)。随机流独立派生,
   // 与引擎那两条流分开 —— 共用会把整条轨迹的随机序列错开一位。
@@ -747,7 +819,7 @@ async function approachAndClick(
       return {
         outcome: 'refusedByGate', unreachable, lagMaxUs,
         detail: `靠近后页面没观测到 mousemove,光标多半不在页面上${await reseed(hint)}` +
-          ` | ${trace.join(' | ')}`,
+          `${frontSummary ? ` | 移动前 ${frontSummary}` : ''} | ${trace.join(' | ')}`,
       }
     }
     drift = Math.ceil(Math.hypot(landed.x - center.x, landed.y - center.y))
