@@ -16300,7 +16300,7 @@ test('args.platform 解开死结:双平台下脑说探谁就探谁,说不出或�
  * 假手服务 + 假页面。落点恒等于最后一次 /play 的终点(标定完美),于是
  * 判据只剩「闸放不放行」这一件事,不掺几何噪声。
  */
-function osClickHarness({ armed = true, refuseClick = null, calibrated = true, observeLanding = true, windowFocused = true, tabActive = true, windowState = 'normal' } = {}) {
+function osClickHarness({ armed = true, refuseClick = null, calibrated = true, observeLanding = true, windowFocused = true, tabActive = true, windowState = 'normal', injectAuthorized = true } = {}) {
   const posts = []
   const methods = []
   const targets = []
@@ -16334,7 +16334,7 @@ function osClickHarness({ armed = true, refuseClick = null, calibrated = true, o
     posts.push(path)
     methods.push((init && init.method) || 'GET')
     if (path === '/handinput/state') {
-      return { ok: true, status: 200, async json() { return { cursorCssX: 700, cursorCssY: 300, calibrated, clickArmed: false, samples: calibrated ? 4 : 0 } } }
+      return { ok: true, status: 200, async json() { return { cursorCssX: 700, cursorCssY: 300, calibrated, clickArmed: false, samples: calibrated ? 4 : 0, injectAuthorized, platform: injectAuthorized ? 'fake' : 'darwin/CGEventPost 开发机专用 未授权(要授权的是**启动本进程的那个应用**)' } } }
     }
     if (path === '/handinput/play') {
       const last = body.points[body.points.length - 1]
@@ -16472,6 +16472,21 @@ test('人在 20 秒内把 Chrome 切过来,命令照常往下走——点「开�
     assert.ok(asks >= 3, '等的时候在复查前台状态')
     assert.ok(progress.includes('等待 Chrome 切到最前'), '等待要向脑汇报进度,人才知道它在等什么')
   } finally { hand.restore() }
+})
+
+test('系统没给鼠标注入授权就一步不动,拒绝里带"要授权哪个应用";旧脑没这个字段按未知放行', async () => {
+  const denied = osClickHarness({ injectAuthorized: false })
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), togglePlan({ onTarget: true, observed: null }))
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(denied.plays(), 0, '没授权时事件会被系统丢掉,飞一圈只是白飞')
+    assert.match(out.detail, /系统没有给鼠标注入授权.*要授权的是/)
+  } finally { denied.restore() }
+  const legacy = osClickHarness({ injectAuthorized: undefined })
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx())
+    assert.equal(out.outcome, 'landed', '字段缺席是未知,不拒')
+  } finally { legacy.restore() }
 })
 
 test('前台判据通过后,零观测的拒绝里仍带移动前的前台状态——好分清"没在前台"和"飞到屏幕外"', async () => {

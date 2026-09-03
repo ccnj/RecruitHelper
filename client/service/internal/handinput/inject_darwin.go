@@ -218,6 +218,8 @@ func (d *darwinInjector) Close() {
 	}
 }
 
+func (d *darwinInjector) Authorized() bool { return axIsProcessTrusted() }
+
 func (d *darwinInjector) Platform() string {
 	auth := "已授权"
 	if !axIsProcessTrusted() {
