@@ -121,6 +121,20 @@ export interface BossCodeMeaning {
    * 任何一台机器上都会亮,判据本身有问题。
    */
   readonly nearUniversal?: boolean
+  /**
+   * 一亮就说明平台掌握了自动化或工具痕迹的证据,值得抬头。
+   *
+   * 「新东西」那行只问码表里有没有;一个码补进码表后就从那行消失,只剩明细里一条
+   * (2026-09-03 的 700051 正是这样),结论区因此三个绿勾。第四行「踩雷」看的是这一位。
+   * 名单由甲方 2026-09-03 裁定:工具痕迹、真探到的本机端口(不是"1 秒内有反应"那族)、
+   * 绕开 isTrusted 的点击行为族(含平台自己豁免不计聚合的 700009/700001/005/007/013——
+   * 我方 OS 注入的点击 isTrusted 为真,它们若亮就是 CDP 或调试路径漏出来了)、
+   * 点击时帧率两条、559999。
+   * 明确不列:559991(干净机器照发)、550094(第三方扩展)、99003(与「隐形」同源)、
+   * 700028(真人首次点击也会)、910013/910015(反映环境不是行为,平台自己也豁免)。
+   * 与 nearUniversal 互斥,测试钉死。
+   */
+  readonly severe?: boolean
 }
 
 /**
@@ -143,59 +157,59 @@ const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code' | 'known'>> = {
 
   // 本机端口 / 伴随进程探测。整族都受 si() 那个判据缺陷影响。
   '550237': { label: '探本机 18789 端口(openGateway),1 秒内有反应', nearUniversal: true },
-  '550238': { label: '探本机 18789 的 /__openclaw__/ping' },
+  '550238': { label: '探本机 18789 的 /__openclaw__/ping', severe: true },
   '550239': { label: '探本机 9222 端口(Chrome 默认远程调试口),1 秒内有反应', nearUniversal: true },
-  '550241': { label: '探本机 8642 端口(hermes)' },
-  '550243': { label: '探本机 opencli' },
+  '550241': { label: '探本机 8642 端口(hermes)', severe: true },
+  '550243': { label: '探本机 opencli', severe: true },
   '550245': { label: '探本机 10086 端口(kimi),1 秒内有反应(含连接被拒)', nearUniversal: true },
-  '550247': { label: '本机 10086 WebSocket 真正握手成功(kimi)' },
+  '550247': { label: '本机 10086 WebSocket 真正握手成功(kimi)', severe: true },
   '910013': { label: '探本机 35600 端口,五秒内毫无反应(不是拒绝,是没声音);p3 带 CDP 状态' },
-  '900067': { label: '探到 AdsPower(20725)' },
-  '900073': { label: '探到花漾(47326)' },
-  '900075': { label: '探到 VMLogin(5100)' },
+  '900067': { label: '探到 AdsPower(20725)', severe: true },
+  '900073': { label: '探到花漾(47326)', severe: true },
+  '900075': { label: '探到 VMLogin(5100)', severe: true },
 
   // 扩展与自动化痕迹。
-  '550091': { label: '页面上 chrome.runtime 可用,且被探的那个扩展 ID 确实装着' },
+  '550091': { label: '页面上 chrome.runtime 可用,且被探的那个扩展 ID 确实装着', severe: true },
   // 2026-08-28 对照实验坐实:关掉 MetaMask 后这条当场消失。MetaMask 的
   // externally_connectable 写的是 `http://*/*` + `https://*/*`(对全互联网开放),
   // 所以任何装了它的机器都会触发这条。实测干净 Chrome 148 上
   // window.chrome 是 object 而 window.chrome.runtime 是 undefined,可见它确实
   // 只在有扩展对该域声明了 externally_connectable 时才出现。
   '550094': { label: '页面上 chrome.runtime 竟然可用——有扩展对该域声明了 externally_connectable(实测:MetaMask 对全站声明,装了就报)' },
-  '550003': { label: 'CDP / Playwright 痕迹' },
-  '800015': { label: 'devtools/CDP 探测命中(不可配置的 stack getter 被读)' },
-  '800025': { label: 'navigator 原型链上有非原生实现' },
-  '550013': { label: 'navigator 指纹串命中(userAgent,userAgent,sendBeacon)' },
+  '550003': { label: 'CDP / Playwright 痕迹', severe: true },
+  '800015': { label: 'devtools/CDP 探测命中(不可配置的 stack getter 被读)', severe: true },
+  '800025': { label: 'navigator 原型链上有非原生实现', severe: true },
+  '550013': { label: 'navigator 指纹串命中(userAgent,userAgent,sendBeacon)', severe: true },
   '99003': { label: 'Object.keys(window) 与白名单的差集(未知全局名)' },
 
   // 点击与轨迹的行为层(sec-370 `ou()` 与同一个 click 监听里的几条支线)。
   // **这一族绕开 `isTrusted`** —— 分支条件是 `!1 !== isTrusted`,只有显式 false 才跳过,
   // 所以我们经操作系统注入的点击(isTrusted 为真)照样走进来。合成点击真正会踩的就是它们。
-  '700009': { label: 'isTrusted 检查' },
-  '700001': { label: '点击的 pageX 或 pageY 为 0' },
-  '700005': { label: '点击的 clientX 或 clientY <= 0' },
-  '700007': { label: '点击的 pageX 或 pageY 为负' },
-  '700013': { label: '点击目标的 DOM 路径就是 "html"(没落在任何具体元素上)' },
+  '700009': { label: 'isTrusted 检查', severe: true },
+  '700001': { label: '点击的 pageX 或 pageY 为 0', severe: true },
+  '700005': { label: '点击的 clientX 或 clientY <= 0', severe: true },
+  '700007': { label: '点击的 pageX 或 pageY 为负', severe: true },
+  '700013': { label: '点击目标的 DOM 路径就是 "html"(没落在任何具体元素上)', severe: true },
   '700028': { label: '页面加载后第一次点击:既没有上次落点,轨迹也是空的' },
-  '700030': { label: '700009 二次升级:落在聊天区/牛人列表区(无节流)' },
-  '700031': { label: '700009 二次升级:同上,50ms 节流版' },
-  '700033': { label: '700009 二次升级:落在 menu-list' },
-  '700035': { label: '700009 二次升级:落在 records-center' },
-  '700044': { label: '累计 click 次数比累计 mousedown 多出 50 次以上,且落在聊天区' },
+  '700030': { label: '700009 二次升级:落在聊天区/牛人列表区(无节流)', severe: true },
+  '700031': { label: '700009 二次升级:同上,50ms 节流版', severe: true },
+  '700033': { label: '700009 二次升级:落在 menu-list', severe: true },
+  '700035': { label: '700009 二次升级:落在 records-center', severe: true },
+  '700044': { label: '累计 click 次数比累计 mousedown 多出 50 次以上,且落在聊天区', severe: true },
   // 2026-09-03 本机唯一一次命中(10:35:33,会话条目→消息筛选页签,跨 109x287、零采样、间隔
   // 3.17 秒),经甲方确认是 Chrome 插件的 CDP 点的,不是鼠标线。同日下午鼠标线的 60 余次
   // 点击零命中——每次几十到几百个轨迹点,`y=Σ|dx|` 非零,分支直接关掉。
-  '700051': { label: '两次点击间光标横竖都跨过 54px 却零 mousemove,且落在聊天区(受限浏览器)' },
-  '700052': { label: '同 700051,非受限浏览器' },
-  '700053': { label: '跨距过线,且两次点击间的非零位移采样不足 2 个' },
-  '700057': { label: '两次点击间光标横竖都跨过 54px 却零 mousemove(不要求聊天区与零耗时)' },
-  '700061': { label: '匀速直线轨迹(样本>70、macOS UA 被排除);700053 分支里检出 CDP/Playwright 痕迹时也发这个码' },
-  '700071': { label: '连续 10 次 700053,CLAW 未写入' },
-  '700073': { label: '连续 10 次 700053,CLAW 已写入(18789 端口探测的产物)' },
-  '761005': { label: '700051/052/057/053 累计每满 10 次追加一条(p4=累计数)' },
-  '761011': { label: '同 761005,CDPSTATUS 为真' },
-  '700017': { label: '点击时的帧率序列:低于 20 的样本超过 20 个且全部低于 20' },
-  '700019': { label: '点击时的帧率序列:低于 20 的样本超过 20 个且全部低于 10' },
+  '700051': { label: '两次点击间光标横竖都跨过 54px 却零 mousemove,且落在聊天区(受限浏览器)', severe: true },
+  '700052': { label: '同 700051,非受限浏览器', severe: true },
+  '700053': { label: '跨距过线,且两次点击间的非零位移采样不足 2 个', severe: true },
+  '700057': { label: '两次点击间光标横竖都跨过 54px 却零 mousemove(不要求聊天区与零耗时)', severe: true },
+  '700061': { label: '匀速直线轨迹(样本>70、macOS UA 被排除);700053 分支里检出 CDP/Playwright 痕迹时也发这个码', severe: true },
+  '700071': { label: '连续 10 次 700053,CLAW 未写入', severe: true },
+  '700073': { label: '连续 10 次 700053,CLAW 已写入(18789 端口探测的产物)', severe: true },
+  '761005': { label: '700051/052/057/053 累计每满 10 次追加一条(p4=累计数)', severe: true },
+  '761011': { label: '同 761005,CDPSTATUS 为真', severe: true },
+  '700017': { label: '点击时的帧率序列:低于 20 的样本超过 20 个且全部低于 20', severe: true },
+  '700019': { label: '点击时的帧率序列:低于 20 的样本超过 20 个且全部低于 10', severe: true },
   '910015': { label: '帧率序列里落在 (20,40) 的样本超过 50 个' },
 
   // 首页(C 端)是另一套 SDK 与码表:sec-370 不在首页加载,首页走 zpAegis polyfill
@@ -204,15 +218,15 @@ const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code' | 'known'>> = {
   '410001': { label: 'C 端:ws 127.0.0.1:18789,1 秒内有反应(同 550237)', nearUniversal: true },
   '410003': { label: 'C 端:9222 端口,1 秒内有反应(同 550239)', nearUniversal: true },
   '410005': { label: 'C 端:ws://127.0.0.1:10086/ws,1 秒内有反应(同 550245)', nearUniversal: true },
-  '410007': { label: 'C 端:10086 真正握手成功(同 550247);本机未见' },
-  '410009': { label: 'C 端:fetch 127.0.0.1:8642/v1/health(同 550241);本机未见' },
-  '400001': { label: 'C 端:探某个扩展的 options.js(WAR 探测);本机未见' },
+  '410007': { label: 'C 端:10086 真正握手成功(同 550247);本机未见', severe: true },
+  '410009': { label: 'C 端:fetch 127.0.0.1:8642/v1/health(同 550241);本机未见', severe: true },
+  '400001': { label: 'C 端:探某个扩展的 options.js(WAR 探测);本机未见', severe: true },
   '470000': { label: 'C 端每次点击的基线码(p2 恒为 47e4,带坐标/xpath/轨迹),等价于 B 端 click 的 p2=0' },
-  '470001': { label: 'C 端点击:isTrusted 为假;本机未见' },
-  '470003': { label: 'C 端点击:零坐标;本机未见' },
-  '470005': { label: 'C 端点击:负坐标;本机未见' },
-  '470007': { label: 'C 端点击:轨迹是直线;本机未见' },
-  '470009': { label: 'C 端点击:轨迹点太少;本机未见' },
+  '470001': { label: 'C 端点击:isTrusted 为假;本机未见', severe: true },
+  '470003': { label: 'C 端点击:零坐标;本机未见', severe: true },
+  '470005': { label: 'C 端点击:负坐标;本机未见', severe: true },
+  '470007': { label: 'C 端点击:轨迹是直线;本机未见', severe: true },
+  '470009': { label: 'C 端点击:轨迹点太少;本机未见', severe: true },
 
   // 聚合补报。
   // 2026-08-28 两次真机 + 一次对照实验。第一次聚合的是
@@ -225,7 +239,7 @@ const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code' | 'known'>> = {
   // 的读法对不上:两次都是普通浏览,无任何封禁迹象。要么该标志在正常会话里也为真、
   // 根本不是封禁位,要么那条前置读得不全 —— 待查。按文档信任边界,以我方真机为准。
   '559991': { label: '聚合补报:累计命中 >2 个不同的非豁免码(p3=码列表、p4=数量)。真机首验:普通会话即会触发' },
-  '559999': { label: '聚合补报:命中 Sa 表' },
+  '559999': { label: '聚合补报:命中 Sa 表', severe: true },
 }
 
 export function bossCodeMeaning(code: string): BossCodeMeaning {
@@ -233,6 +247,33 @@ export function bossCodeMeaning(code: string): BossCodeMeaning {
   return found
     ? { code, ...found, known: true }
     : { code, label: '未知码(hiBoss 的码表里没有,原样记下)', known: false }
+}
+
+/** 码表里的全部码。给测试钉不变量用(severe 与 nearUniversal 互斥),不参与判读。 */
+export function bossKnownCodes(): readonly string[] {
+  return Object.keys(CODE_MEANINGS)
+}
+
+export interface BossSevereHit {
+  readonly code: string
+  readonly n: number
+  readonly label: string
+}
+
+/**
+ * hits 里的高风险码,按码聚合、次数多的在前。结论区「踩雷」那行只看这个。
+ *
+ * 只认 `severe`,不管 known:码表里没有的码归「新东西」那行,两行各答各的,
+ * 一个码不会同时出现在两行。
+ */
+export function bossSevereHits(hits: readonly { code: string }[]): BossSevereHit[] {
+  const counts = new Map<string, number>()
+  for (const h of hits) {
+    if (bossCodeMeaning(h.code).severe) counts.set(h.code, (counts.get(h.code) ?? 0) + 1)
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([code, n]) => ({ code, n, label: bossCodeMeaning(code).label }))
 }
 
 export function bossCodeLabel(code: string): string {

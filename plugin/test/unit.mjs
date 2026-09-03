@@ -38,6 +38,8 @@ const {
   classifyBossEntry,
   bossCodeLabel,
   bossCodeMeaning,
+  bossKnownCodes,
+  bossSevereHits,
   TELEMETRY_CHUNK,
   TELEMETRY_KIND_CLICK,
   TELEMETRY_KIND_UPLOAD,
@@ -15637,6 +15639,48 @@ test('BOSS 判读:指纹上报算例行,其余码算命中,全局名差集单独
   })
   assert.deepEqual(geek.routine.map((r) => r.code), ['470000'])
   assert.deepEqual(geek.hits.map((h) => h.code), ['470001'], 'isTrusted 为假那条仍是命中')
+})
+
+test('BOSS 高风险码:补进码表不等于从结论区消失,「踩雷」那行只看 severe', () => {
+  // 2026-09-03 的教训:700051 补进码表后从「新东西」那行掉下去,结论区三个绿勾,
+  // 可它是平台抓到合成点击的实锤。第四行「踩雷」就是为它立的。
+  assert.equal(bossCodeMeaning('700051').severe, true)
+  assert.equal(bossCodeMeaning('700051').known, true, '已知且高风险,两个位互不遮盖')
+
+  // 甲方 2026-09-03 裁定的名单:平台自己豁免不计聚合的这五条照样列高风险——
+  // 我方 OS 注入的点击 isTrusted 为真,它们若亮就是 CDP 或调试路径漏出来了。
+  for (const code of ['700009', '700001', '700005', '700007', '700013']) {
+    assert.equal(bossCodeMeaning(code).severe, true, `${code} 该是高风险`)
+  }
+  for (const code of ['550003', '800015', '700061', '761005', '700019', '559999', '470001', '550247']) {
+    assert.equal(bossCodeMeaning(code).severe, true, `${code} 该是高风险`)
+  }
+  // 明确不列:干净机器照发的聚合、第三方扩展、与「隐形」同源的差集、真人也会的首次点击、
+  // 反映环境而非行为的两条。列进去每台机器都红,那行就没人看了。
+  for (const code of ['559991', '550094', '99003', '700028', '910013', '910015', '800001', '0', '30004']) {
+    assert.notEqual(bossCodeMeaning(code).severe, true, `${code} 不该是高风险`)
+  }
+  assert.equal(bossCodeMeaning('99999').severe, undefined, '码表里没有的归「新东西」,不归这里')
+
+  // 不变量:坏判据噪音与高风险互斥,一个码不能既"每台机器都亮"又"一亮就被看穿"。
+  for (const code of bossKnownCodes()) {
+    const m = bossCodeMeaning(code)
+    assert.ok(!(m.nearUniversal && m.severe), `${code} 同时标了 nearUniversal 与 severe`)
+  }
+
+  // 聚合:按码计数、多的在前、同数按码排;非高风险与未知码一律不进。
+  const hits = [
+    { code: '700051', action: 'web-event-click' },
+    { code: '700009', action: 'web-event-click' },
+    { code: '700009', action: 'web-event-click' },
+    { code: '559991', action: 'device-action-report' },
+    { code: '550239', action: 'device-action-report' },
+    { code: '99999', action: 'device-action-report' },
+  ]
+  assert.deepEqual(bossSevereHits(hits).map((h) => [h.code, h.n]), [['700009', 2], ['700051', 1]])
+  assert.match(bossSevereHits(hits)[0].label, /isTrusted/)
+  assert.deepEqual(bossSevereHits([]), [])
+  assert.deepEqual(bossSevereHits([{ code: '559991', action: 'x' }]), [], '干净机器照发的聚合不算踩雷')
 })
 
 // ---- 平台输入行为账本的解析 ----

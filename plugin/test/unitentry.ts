@@ -124,7 +124,7 @@ export {
 } from '../src/base/telemetry/store'
 export { bodyText, deepFind, recordUpload } from '../src/base/telemetry/capture'
 export { bossTelemetrySite, telemetrySites } from '../src/program/platform/telemetrySites'
-export { classifyBossEntry, bossCodeLabel, bossCodeMeaning } from '../src/program/platform/telemetrySites'
+export { classifyBossEntry, bossCodeLabel, bossCodeMeaning, bossKnownCodes, bossSevereHits } from '../src/program/platform/telemetrySites'
 export { parseLedger as telemetryParseLedger } from '../src/base/telemetry/counters'
 export { BOSS_INPUT_COUNTERS, REPORT_EVERY as BOSS_REPORT_EVERY } from '../src/program/platform/bossInputCounters'
 export { stripNewlines, bossTestHooks, identityCacheUsable, resetBossIdentityCacheForTest, BOSS_DISMISS_WHITELIST } from '../src/program/platform/boss'
