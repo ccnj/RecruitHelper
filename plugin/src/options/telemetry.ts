@@ -9,7 +9,7 @@
 
 import { KIND_CLICK, KIND_UPLOAD, TelemetryStorage, clear, readAll } from '../base/telemetry/store'
 import { TelemetryEntry } from '../base/telemetry/capture'
-import { bossCodeMeaning, classifyBossEntry } from '../program/platform/telemetrySites'
+import { BossSevereHit, bossCodeMeaning, bossSevereHits, classifyBossEntry } from '../program/platform/telemetrySites'
 import { BOSS_INPUT_COUNTERS, REPORT_EVERY } from '../program/platform/bossInputCounters'
 import { CounterSnapshot, clearBaseline, readBaseline, setBaseline } from '../base/telemetry/counters'
 
@@ -53,16 +53,23 @@ function renderHits(hits: readonly { code: string; action: string }[]): string {
   const counts = new Map<string, number>()
   for (const h of hits) counts.set(h.code, (counts.get(h.code) ?? 0) + 1)
 
+  // 三档:高风险排最前、红行(与结论区「踩雷」那行说的是同一件事);其余已知命中
+  // 与码表里没有的码随后;坏判据噪音折叠在最下。
+  const severe: string[] = []
   const real: string[] = []
   const noisy: string[] = []
   for (const [code, n] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
     const meaning = bossCodeMeaning(code)
     const line = `<b>${escapeHTML(code)}</b> x${n} — ${escapeHTML(meaning.label)}`
-    ;(meaning.nearUniversal ? noisy : real).push(line)
+    ;(meaning.nearUniversal ? noisy : meaning.severe ? severe : real).push(line)
   }
 
-  let html = real.length
-    ? `<ul>${real.map((l) => `<li>${l}</li>`).join('')}</ul>`
+  const shown = [
+    ...severe.map((l) => `<li class="bad-row">${l}</li>`),
+    ...real.map((l) => `<li>${l}</li>`),
+  ]
+  let html = shown.length
+    ? `<ul>${shown.join('')}</ul>`
     : '<span class="muted">没有值得看的命中。</span>'
 
   if (noisy.length) {
@@ -198,19 +205,25 @@ function verdictLine(ok: boolean | null, name: string, detail: string): string {
 }
 
 /**
- * 一屏之内回答三个问题。**这三条是本页存在的理由**,其余都是给它们做证。
+ * 一屏之内回答四个问题。**这四条是本页存在的理由**,其余都是给它们做证。
  *
  * 第三条问的是"有没有码表里没有的码",不是"踩雷了吗"——800001 这族指纹上报
  * 每台机器每次加载都发,算例行;真正值得抬头的是出现了我们没见过的东西。
+ *
+ * 第四条问的是"已知的码里,有没有一亮就等于被看穿的"。它和第三条互补:一个码补进
+ * 码表后就从第三条消失,2026-09-03 的 700051 就是这样从结论区掉下去的——它是平台
+ * 抓到合成点击的实锤,不能因为我们认识它就三个绿勾。
  */
 function renderVerdict(
   hasData: boolean, ours: readonly string[], platformGlobals: number,
   shots: number, over: number, unknownCodes: readonly string[],
+  severe: readonly BossSevereHit[],
 ): string {
   if (!hasData) {
     return verdictLine(null, '隐形', '还没抓到载荷')
       + verdictLine(null, '像人', '还没抓到点击')
       + verdictLine(null, '新东西', '还没抓到载荷')
+      + verdictLine(null, '踩雷', '还没抓到载荷')
   }
   return verdictLine(ours.length === 0, '隐形',
     ours.length === 0
@@ -223,6 +236,11 @@ function renderVerdict(
     + verdictLine(unknownCodes.length === 0, '新东西',
       unknownCodes.length === 0 ? '所有事件码都在 hiBoss 的码表里'
         : `<b>${unknownCodes.length} 个码表里没有的码</b>:<code>${escapeHTML(unknownCodes.join('、'))}</code>`)
+    + verdictLine(severe.length === 0, '踩雷',
+      severe.length === 0 ? '已知的高风险码一个没亮'
+        : `<b>命中 ${severe.length} 类高风险码</b>:` + severe.map((s) =>
+          `<code title="${escapeHTML(s.label)}">${escapeHTML(s.code)}</code> x${s.n}`).join('、')
+          + ',释义见下方「探测命中」')
 }
 
 function renderGlobals(names: readonly string[]): string {
@@ -322,6 +340,7 @@ async function render(): Promise<void> {
   const ours = names.filter((n) => n.startsWith(OUR_GLOBAL_PREFIX))
   const unknownCodes = [...new Set(hits.map((h) => h.code))].filter((c) => !bossCodeMeaning(c).known).sort()
   const over = overLineCount(shots)
+  const severe = bossSevereHits(hits)
 
   const first = entries[0]?.at
   const last = entries[entries.length - 1]?.at
@@ -333,7 +352,7 @@ async function render(): Promise<void> {
     : '<span class="muted">还没抓到任何载荷。打开平台页面走一走,再回来刷新。</span>'
 
   el('verdict').innerHTML = renderVerdict(
-    entries.length > 0, ours, names.length - ours.length, shots.length, over, unknownCodes)
+    entries.length > 0, ours, names.length - ours.length, shots.length, over, unknownCodes, severe)
   el('clicks').innerHTML = renderClicks(shots)
   el('globals').innerHTML = renderGlobals(names)
   el('hits').innerHTML = renderHits(hits)
