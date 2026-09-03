@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -261,17 +262,13 @@ func importBundle(bundle legacyJobBundle, now time.Time, sourceKind string) (Con
 	if !replyOK || !intentOK || !factsOK || strings.TrimSpace(replyPrompt) == "" || strings.TrimSpace(intentPrompt) == "" {
 		return ContextRevision{}, errors.New("缺少多轮沟通、意向判断或客户事实库原文")
 	}
-	if _, err := ValidatePromptTokens("多轮沟通", replyPrompt); err != nil {
-		return ContextRevision{}, err
-	}
-	if _, err := ValidatePromptTokens("意向判断", intentPrompt); err != nil {
-		return ContextRevision{}, err
-	}
-	if err := requireInputTokens("多轮沟通", replyPrompt, "简历", "推荐时段", "对话历史"); err != nil {
-		return ContextRevision{}, err
-	}
-	if err := requireInputTokens("意向判断", intentPrompt, "回复", "招呼语"); err != nil {
-		return ContextRevision{}, err
+	// 占位符不再是导入门(2026-09-03 甲方裁决):白名单外的占位符原样保留、照常导入,
+	// 必填缺引用也不拒——模板问题不得让职位停下来。这里只留痕,让运营知道去后台改哪份。
+	for _, docType := range []string{"打分", "招呼语", "多轮沟通", "意向判断", "沉默追问"} {
+		if unknown := UnknownPromptTokens(docType, bundle.Documents[docType]); len(unknown) > 0 {
+			slog.Warn("职位配置含白名单外占位符,原样保留照常导入",
+				"backendJobId", bundle.Job.ID.String(), "docType", docType, "tokens", unknown)
+		}
 	}
 
 	documents := make([]JobConfigDocument, 0, len(bundle.Documents))

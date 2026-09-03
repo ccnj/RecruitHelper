@@ -4,11 +4,11 @@
   "containsProductionContent": false,
   "containsCredentialOrIdentity": false,
   "formatVersions": {
-    "tokenScanner": 1,
+    "tokenScanner": 2,
     "resumeDTO": 1,
     "history": 1,
-    "schedule": 1,
-    "providerAssembly": 1,
+    "schedule": 2,
+    "providerAssembly": 2,
     "replyParser": 2,
     "intentParser": 1,
     "intentEnvelope": 1,
@@ -22,12 +22,15 @@
     "historyTruncationSuffix": "…(超长消息已截断)",
     "sendTextMaxUtf8Bytes": 2048,
     "resumeDataMaxUtf8BytesInclusive": 65536,
-    "slotPointerText": "可约面时间(见【可约面时间】)",
+    "inputSectionHeading": "【输入参数】",
+    "inputBlockHeadingFormat": "【输入参数-显示名】",
+    "inputPointerFormat": "显示名(见下方输入参数-显示名)",
+    "displayNames": {
+      "resume_json": "简历",
+      "resume_summary_json": "简历摘要",
+      "career_state": "求职状态"
+    },
     "slotFormatGuard": "话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。",
-    "resumePointerText": "简历(见【简历】)",
-    "resumeHeading": "【简历】",
-    "historyPointerText": "完整对话(见【完整对话】)",
-    "historyHeading": "【完整对话】",
     "historyGuard": "以下是已经发生的对话，只供你了解上下文。你这一轮要写的是新的话——凡是“我(消息)”开头的句子都已经发过了，一句都不许再发一遍。",
     "intentEnvelopeHeading": "【对话数据信封/v1】",
     "providerRoles": [
@@ -40,7 +43,8 @@
       "communicationActiveInputs": [
         "简历",
         "推荐时段",
-        "对话历史"
+        "对话历史",
+        "事实库"
       ],
       "intentActiveInputs": [
         "回复",
@@ -110,14 +114,17 @@
           }
         },
         {
-          "id": "unknown_live_token_fails",
+          "id": "unknown_live_token_kept_verbatim",
           "input": {
             "docType": "多轮沟通",
             "text": "未知={未知字段}"
           },
           "expected": {
-            "status": "rejected",
-            "errorClass": "unknownTemplateToken"
+            "status": "ok",
+            "activeInputTokens": [],
+            "unknownTokens": [
+              "未知字段"
+            ]
           }
         }
       ]
@@ -382,7 +389,7 @@
           },
           "expected": {
             "status": "ok",
-            "renderedPrompt": "上下文\n可约面时间(见【可约面时间】)\n再次:可约面时间(见【可约面时间】)\n\n【可约面时间】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点",
+            "renderedPrompt": "上下文\n推荐时段(见下方输入参数-推荐时段)\n再次:推荐时段(见下方输入参数-推荐时段)\n\n【输入参数】\n\n【输入参数-推荐时段】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点",
             "fullBlockCount": 1
           }
         },
@@ -399,8 +406,8 @@
           },
           "expected": {
             "status": "ok",
-            "renderedPrompt": "外部:可约面时间(见【可约面时间】)\n【可约面时间】\n内部:现在是2026年7月10日(周五)14:23。话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点\n再次:可约面时间(见【可约面时间】)",
-            "inlinePayloadCount": 1
+            "renderedPrompt": "外部:推荐时段(见下方输入参数-推荐时段)\n【可约面时间】\n内部:推荐时段(见下方输入参数-推荐时段)\n再次:推荐时段(见下方输入参数-推荐时段)\n\n【输入参数】\n\n【输入参数-推荐时段】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点",
+            "fullBlockCount": 1
           }
         },
         {
@@ -413,7 +420,7 @@
           },
           "expected": {
             "status": "ok",
-            "renderedPrompt": "时段:可约面时间(见【可约面时间】)\n\n【可约面时间】\n现在是2026年7月10日(周五)14:23。当前未配置可面试时间，不要主动承诺具体面试时间。",
+            "renderedPrompt": "时段:推荐时段(见下方输入参数-推荐时段)\n\n【输入参数】\n\n【输入参数-推荐时段】\n现在是2026年7月10日(周五)14:23。当前未配置可面试时间，不要主动承诺具体面试时间。",
             "fullBlockCount": 1
           }
         },
@@ -444,11 +451,12 @@
           "input": {
             "purpose": "reply",
             "frozenNow": "2026-07-10T14:23:00+08:00",
-            "sourcePrompt": "简历={简历}\n历史={对话历史}\n时段={推荐时段}",
+            "sourcePrompt": "简历={简历}\n历史={对话历史}\n时段={推荐时段}\n事实={事实库}",
             "templateValues": {
               "简历": "{\"basic\":[]}",
               "对话历史": "候选人(消息):你好"
             },
+            "customerFacts": "fixture://facts",
             "selectedSlots": [
               "2026-07-13 09:00:00",
               "2026-07-13 10:00:00"
@@ -459,10 +467,10 @@
             "providerMessages": [
               {
                 "role": "user",
-                "content": "简历=简历(见【简历】)\n历史=完整对话(见【完整对话】)\n时段=可约面时间(见【可约面时间】)\n\n【可约面时间】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点\n\n【简历】\n{\"basic\":[]}\n\n【完整对话】\n以下是已经发生的对话，只供你了解上下文。你这一轮要写的是新的话——凡是“我(消息)”开头的句子都已经发过了，一句都不许再发一遍。\n候选人(消息):你好"
+                "content": "简历=简历(见下方输入参数-简历)\n历史=对话历史(见下方输入参数-对话历史)\n时段=推荐时段(见下方输入参数-推荐时段)\n事实=事实库(见下方输入参数-事实库)\n\n【输入参数】\n\n【输入参数-推荐时段】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点\n\n【输入参数-简历】\n{\"basic\":[]}\n\n【输入参数-对话历史】\n以下是已经发生的对话，只供你了解上下文。你这一轮要写的是新的话——凡是“我(消息)”开头的句子都已经发过了，一句都不许再发一遍。\n候选人(消息):你好\n\n【输入参数-事实库】\nfixture://facts"
               }
             ],
-            "dataBlockCount": 3,
+            "dataBlockCount": 4,
             "extraLocalInstructionCount": 0
           }
         },
@@ -482,12 +490,12 @@
           },
           "expected": {
             "status": "ok",
-            "renderedPrompt": "请判断。招呼=你好；回复=明天下午方便",
+            "renderedPrompt": "请判断。招呼=招呼语(见下方输入参数-招呼语)；回复=回复(见下方输入参数-回复)\n\n【输入参数】\n\n【输入参数-招呼语】\n你好\n\n【输入参数-回复】\n明天下午方便",
             "envelopeJSON": "{\"historyBeforeTurn\":[{\"seq\":1,\"direction\":\"outbound\",\"kind\":\"greeting\",\"text\":\"你好\"}],\"currentTurn\":[{\"seq\":2,\"direction\":\"inbound\",\"kind\":\"text\",\"text\":\"可以聊聊\"},{\"seq\":3,\"direction\":\"inbound\",\"kind\":\"text\",\"text\":\"明天下午方便\"}]}",
             "providerMessages": [
               {
                 "role": "user",
-                "content": "请判断。招呼=你好；回复=明天下午方便\n\n【对话数据信封/v1】\n{\"historyBeforeTurn\":[{\"seq\":1,\"direction\":\"outbound\",\"kind\":\"greeting\",\"text\":\"你好\"}],\"currentTurn\":[{\"seq\":2,\"direction\":\"inbound\",\"kind\":\"text\",\"text\":\"可以聊聊\"},{\"seq\":3,\"direction\":\"inbound\",\"kind\":\"text\",\"text\":\"明天下午方便\"}]}"
+                "content": "请判断。招呼=招呼语(见下方输入参数-招呼语)；回复=回复(见下方输入参数-回复)\n\n【输入参数】\n\n【输入参数-招呼语】\n你好\n\n【输入参数-回复】\n明天下午方便\n\n【对话数据信封/v1】\n{\"historyBeforeTurn\":[{\"seq\":1,\"direction\":\"outbound\",\"kind\":\"greeting\",\"text\":\"你好\"}],\"currentTurn\":[{\"seq\":2,\"direction\":\"inbound\",\"kind\":\"text\",\"text\":\"可以聊聊\"},{\"seq\":3,\"direction\":\"inbound\",\"kind\":\"text\",\"text\":\"明天下午方便\"}]}"
               }
             ],
             "extraLocalInstructionCount": 0
@@ -506,15 +514,15 @@
           }
         },
         {
-          "id": "assembly_unknown_token_fails",
+          "id": "assembly_unknown_token_kept_verbatim",
           "input": {
             "purpose": "reply",
             "sourcePrompt": "未知={未知字段}"
           },
           "expected": {
-            "status": "rejected",
-            "errorClass": "unknownTemplateToken",
-            "providerRequestCreated": false
+            "status": "ok",
+            "renderedPrefix": "未知={未知字段}\n\n【输入参数】\n\n【输入参数-推荐时段】\n",
+            "providerRequestCreated": true
           }
         },
         {

@@ -16,13 +16,7 @@ import (
 )
 
 const (
-	slotPointerText       = "可约面时间(见【可约面时间】)"
-	slotHeading           = "【可约面时间】"
-	slotFormatGuard       = "话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。"
-	resumePointerText     = "简历(见【简历】)"
-	resumeHeading         = "【简历】"
-	historyPointerText    = "完整对话(见【完整对话】)"
-	historyHeading        = "【完整对话】"
+	slotFormatGuard = "话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。"
 	// historyGuard 压的是模型复读自己上一轮话术的倾向:候选人只回"好的""我尽量快"
 	// 这类没有新信息的短句时,历史末尾就摆着我方刚发的几句,模型顺手照抄一遍——
 	// 2026-08-05 真机上侯先生就连收了两条一字不差的消息。
@@ -37,59 +31,13 @@ const (
 	historyGuard = `以下是已经发生的对话，只供你了解上下文。你这一轮要写的是新的话——` +
 		`凡是“我(消息)”开头的句子都已经发过了，一句都不许再发一遍。`
 	intentEnvelopeHeading = "【对话数据信封/v1】"
-	historyTruncateSuffix = "…(超长消息已截断)"
+	// legacySlotBlockHeading 是 2026-09-03 之前冻结进轮行 block 段开头的旧块标题,
+	// 只用于渲染时剥离;新载荷不再带标题,外壳由统一渲染器套。
+	legacySlotBlockHeading = "【可约面时间】"
+	historyTruncateSuffix  = "…(超长消息已截断)"
 )
 
 var activeTokenPattern = regexp.MustCompile(`\{([\p{L}_][\p{L}\p{N}_]*)\}`)
-
-var allowedTokens = map[string]map[string]string{
-	"多轮沟通": {
-		"简历": "input", "推荐时段": "input", "对话历史": "input", "话术_序列": "output",
-	},
-	"意向判断": {"回复": "input", "招呼语": "input"},
-	"沉默追问": {"姓名": "input", "年龄": "input", "性别": "input", "简历": "input"},
-}
-
-func ValidatePromptTokens(docType, prompt string) ([]string, error) {
-	allowed, ok := allowedTokens[docType]
-	if !ok {
-		return nil, fmt.Errorf("未知模板类型: %s", docType)
-	}
-	seen := make(map[string]struct{})
-	for _, match := range activeTokenPattern.FindAllStringSubmatch(prompt, -1) {
-		name := match[1]
-		class, exists := allowed[name]
-		if !exists {
-			return nil, fmt.Errorf("unknownTemplateToken: %s", name)
-		}
-		if class == "input" {
-			seen[name] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for name := range seen {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-func requireInputTokens(docType, prompt string, required ...string) error {
-	found, err := ValidatePromptTokens(docType, prompt)
-	if err != nil {
-		return err
-	}
-	seen := make(map[string]struct{}, len(found))
-	for _, name := range found {
-		seen[name] = struct{}{}
-	}
-	for _, name := range required {
-		if _, ok := seen[name]; !ok {
-			return fmt.Errorf("missingTemplateToken: %s", name)
-		}
-	}
-	return nil
-}
 
 type resumeLabelValue struct {
 	Label string `json:"label"`
@@ -454,13 +402,13 @@ func slotsInlinePayload(frozenNow time.Time, slots []string) (string, error) {
 func slotsBlock(frozenNow time.Time, slots []string) (string, error) {
 	dateLine := slotDateLine(frozenNow)
 	if len(slots) == 0 {
-		return slotHeading + "\n" + dateLine + "当前未配置可面试时间，不要主动承诺具体面试时间。", nil
+		return dateLine + "当前未配置可面试时间，不要主动承诺具体面试时间。", nil
 	}
 	overview, err := slotsOverview(slots)
 	if err != nil {
 		return "", err
 	}
-	return slotHeading + "\n" + dateLine +
+	return dateLine +
 		"约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n" +
 		slotFormatGuard + "\n" + overview, nil
 }
@@ -471,10 +419,10 @@ type frozenRecommendedTimeText struct {
 	Slots  []string `json:"slots,omitempty"`
 }
 
-// FreezeRecommendedTimeText freezes both approved schedule placements because
-// the imported prompt may already contain its own 【可约面时间】 block. The
-// canonical JSON is an internal representation of the exact text fragments;
-// DialogueTurn persists it once and later rendering never consults wall clock.
+// FreezeRecommendedTimeText 把本轮时段文本冻结进轮行。载荷仍是 inline/block/slots
+// 三段:inline 自 2026-09-03 统一渲染后不再被读取,只为与存量载荷同形而继续写;
+// block 是尾部子块正文(不带标题,标题由统一渲染器套)。DialogueTurn 持久化一次,
+// 之后的渲染不再看墙上时钟。
 func FreezeRecommendedTimeText(frozenNow time.Time, slots []string) (string, error) {
 	inline, err := slotsInlinePayload(frozenNow, slots)
 	if err != nil {
@@ -572,156 +520,58 @@ func MatchFrozenRecommendedMeetingTime(slots []string, raw string) (int64, bool)
 	return matchedAt, true
 }
 
-// replyDataBlock 描述一块"大段输入数据"在提示词里的两种安放方式。模板里同一
-// 个 token 常出现多次,其中大多数是名词性指代("从 {推荐时段} 里取"),只有一处
-// 是真正的数据入口;无条件把每一处都替换成完整数据,等于把简历和整段对话在一份
-// 提示词里塞进去两遍。
-//
-// 2026-08-05 甲方裁决:三个数据 token 共用同一套安放规则,不再各行其是。此前只有
-// 推荐时段做了指代→指针的转换,简历与对话历史走无条件替换,真机上每次调用因此
-// 多送约 1900 字符。
-type replyDataBlock struct {
-	token   string
-	heading string
-	pointer string
-	inline  string // 模板自带块标题时,就地渲染进标题后的第一个占位符
-	block   string // 模板不带块标题时,作为独立块追加到正文末尾(自带标题)
+// 推荐时段子块正文取冻结载荷的 block 段。2026-09-03 之前的载荷把旧块标题
+// 「【可约面时间】」一并冻结在 block 开头,这里剥掉——外壳由统一渲染器按新名字
+// 套上,数据本身仍是冻结那一刻的字节。
+func frozenSlotBlockBody(frozen frozenRecommendedTimeText) string {
+	return strings.TrimPrefix(frozen.Block, legacySlotBlockHeading+"\n")
 }
 
-// replyDataBlocks 的切片顺序即末尾追加顺序。
-func replyDataBlocks(resumeJSON, history string, frozen frozenRecommendedTimeText) []replyDataBlock {
-	return []replyDataBlock{
-		{token: "推荐时段", heading: slotHeading, pointer: slotPointerText,
-			inline: frozen.Inline, block: frozen.Block},
-		{token: "简历", heading: resumeHeading, pointer: resumePointerText,
-			inline: resumeJSON, block: resumeHeading + "\n" + resumeJSON},
-		// 与推荐时段同构:inline 与 block 都是"说明 + 数据",说明恒在数据之前。
-		{token: "对话历史", heading: historyHeading, pointer: historyPointerText,
-			inline: historyGuard + "\n" + history,
-			block:  historyHeading + "\n" + historyGuard + "\n" + history},
+// customerFactsMissingText 是 {事实库} 被模板引用、而职位的客户事实库原文为空时的
+// 子块正文:对真实缺席事实的中性描述,照常调用,不因配置缺失停下候选人。
+const customerFactsMissingText = "（客户事实库未配置）"
+
+func renderReplyTemplateFrozen(prompt, resumeJSON, history, customerFacts string, frozen frozenRecommendedTimeText) (string, error) {
+	if resumeJSON == "" {
+		return "", errors.New("missingTemplateValue: 简历")
 	}
+	facts := strings.TrimSpace(customerFacts)
+	if facts == "" {
+		facts = customerFactsMissingText
+	}
+	historyBlock := historyGuard
+	if history != "" {
+		historyBlock += "\n" + history
+	}
+	return renderPromptWithInputs("多轮沟通", prompt, map[string]string{
+		"推荐时段": frozenSlotBlockBody(frozen),
+		"简历":   resumeJSON,
+		"对话历史": historyBlock,
+		"事实库":  facts,
+	})
 }
 
-func renderReplyTemplateFrozen(prompt, resumeJSON, history string, frozen frozenRecommendedTimeText) (string, error) {
-	blocks := replyDataBlocks(resumeJSON, history, frozen)
-	matches := activeTokenPattern.FindAllStringSubmatchIndex(prompt, -1)
-
-	// present 表示模板里引用过该 token:块的唯一意义是给指针提供落脚点,模板没
-	// 引用就什么都不安排,不凭空塞一段数据进去。
-	// anchor < 0 表示模板不带该块标题;dataStart < 0 表示标题在、但标题之后没有
-	// 对应占位符。delta 累计"该标题之前"的替换带来的长度变化,用于把标题在渲染后
-	// 文本里的位置算准——不能事后用 strings.Index 找标题,那会撞上指针文字里的
-	// "(见【可约面时间】)"。
-	type blockPlacement struct {
-		present   bool
-		anchor    int
-		dataStart int
-		delta     int
-	}
-	placements := make(map[string]*blockPlacement, len(blocks))
-	byToken := make(map[string]replyDataBlock, len(blocks))
-	for _, block := range blocks {
-		byToken[block.token] = block
-		placement := &blockPlacement{anchor: -1, dataStart: -1}
-		if index := strings.Index(prompt, block.heading); index >= 0 {
-			placement.anchor = index
-		}
-		for _, match := range matches {
-			if prompt[match[2]:match[3]] != block.token {
-				continue
-			}
-			placement.present = true
-			if placement.dataStart < 0 && match[0] > placement.anchor && placement.anchor >= 0 {
-				placement.dataStart = match[0]
-			}
-		}
-		placements[block.token] = placement
-	}
-
-	var builder strings.Builder
-	cursor := 0
-	for _, match := range matches {
-		start, end := match[0], match[1]
-		name := prompt[match[2]:match[3]]
-		replacement := prompt[start:end]
-		if block, found := byToken[name]; found {
-			replacement = block.pointer
-			if placements[name].dataStart == start {
-				replacement = block.inline
-			}
-		} else if name != "话术_序列" {
-			// 话术_序列 is the frozen output-example key, not an input token.
-			return "", fmt.Errorf("unknownTemplateToken: %s", name)
-		}
-		builder.WriteString(prompt[cursor:start])
-		builder.WriteString(replacement)
-		cursor = end
-		for _, placement := range placements {
-			if start < placement.anchor {
-				placement.delta += len(replacement) - (end - start)
-			}
-		}
-	}
-	builder.WriteString(prompt[cursor:])
-	rendered := builder.String()
-
-	// 标题在、占位符不在:把数据插到标题正下方。多块时从后往前插,先插入的文本
-	// 才不会推移还没插的那些块的落点。
-	type blockInsert struct {
-		at   int
-		text string
-	}
-	inserts := make([]blockInsert, 0, len(blocks))
-	for _, block := range blocks {
-		placement := placements[block.token]
-		if placement.present && placement.anchor >= 0 && placement.dataStart < 0 {
-			inserts = append(inserts, blockInsert{
-				at:   placement.anchor + placement.delta + len(block.heading),
-				text: "\n" + block.inline,
-			})
-		}
-	}
-	sort.Slice(inserts, func(i, j int) bool { return inserts[i].at > inserts[j].at })
-	for _, insert := range inserts {
-		rendered = rendered[:insert.at] + insert.text + rendered[insert.at:]
-	}
-
-	for _, block := range blocks {
-		if placement := placements[block.token]; placement.present && placement.anchor < 0 {
-			rendered = strings.TrimRight(rendered, " \t\r\n") + "\n\n" + block.block
-		}
-	}
-	return rendered, nil
-}
-
-func RenderReplyPrompt(prompt, resumeJSON, history string, frozenNow time.Time, slots []string) (string, error) {
+func RenderReplyPrompt(prompt, resumeJSON, history, customerFacts string, frozenNow time.Time, slots []string) (string, error) {
 	frozen, err := FreezeRecommendedTimeText(frozenNow, slots)
 	if err != nil {
 		return "", err
 	}
-	return RenderReplyPromptFrozen(prompt, resumeJSON, history, frozen)
+	return RenderReplyPromptFrozen(prompt, resumeJSON, history, frozen, customerFacts)
 }
 
-// RenderReplyPromptFrozen assembles a reply from a DialogueTurn's persisted
-// schedule text. It intentionally accepts no time.Time, so restart or delay
-// cannot silently move the recommendation window.
+// RenderReplyPromptFrozen 用轮行里持久化的时段文本组装回复提示词。刻意不收
+// time.Time:重启或延迟都不能悄悄移动推荐窗口。
 //
-// 客户事实库不再进提示词(2026-08-05 甲方裁决):职位配置的 replyPrompt 自己就带
-// 一整段事实库,追加的 customerFacts 是同一批事实的另一个版本——真机那份 6399 字,
-// 其中 23 条数字事实模板里一条不缺。字段本身仍从旧后台导入、仍存进
-// job_ai_context_revisions 并参与导入一致性校验,只是不再渲染进提示词。
-func RenderReplyPromptFrozen(prompt, resumeJSON, history, recommendedTimeText string) (string, error) {
-	if err := requireInputTokens("多轮沟通", prompt, "简历", "推荐时段", "对话历史"); err != nil {
-		return "", err
-	}
-	if resumeJSON == "" {
-		return "", errors.New("missingTemplateValue: 简历")
-	}
+// 客户事实库(2026-09-03 甲方裁决恢复):模板引用 {事实库} 时,以同职位客户事实库
+// 原文作为尾部子块;未引用不追加。2026-08-05 曾停用,因为当时职位配置正文自带
+// 整段事实库、再追加是重复渲染;后台新版模板已把事实库从正文搬走改以占位符引用,
+// 前提反转。
+func RenderReplyPromptFrozen(prompt, resumeJSON, history, recommendedTimeText, customerFacts string) (string, error) {
 	frozen, err := decodeFrozenRecommendedTimeText(recommendedTimeText)
 	if err != nil {
 		return "", err
 	}
-	return renderReplyTemplateFrozen(prompt, resumeJSON, history, frozen)
+	return renderReplyTemplateFrozen(prompt, resumeJSON, history, customerFacts, frozen)
 }
 
 const replyActionMenuHeading = "【本轮可选动作】"
@@ -778,7 +628,7 @@ func replyActionMenuBlock(menu ReplyActionMenu) string {
 	}
 	if menu.AllowStartMeeting {
 		lines = append(lines,
-			"话术里的时间一律写成「8月3日10:00」这种具体日期，不要用「明天」「后天」；【可约面时间】以外的时间一律不得出现。")
+			"话术里的时间一律写成「8月3日10:00」这种具体日期，不要用「明天」「后天」；【输入参数-推荐时段】以外的时间一律不得出现。")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -794,13 +644,13 @@ func replyActionMenuBlock(menu ReplyActionMenu) string {
 const realityBoundaryPolicy = `【现实边界】
 你在线上跟他打字，人不在任何现场：看不见他、接不了他，现场也没有人等他。本块盖过其余一切要求（包括“像本人在聊天”）；对话历史里你自己说过的话若与本块冲突，不许接着圆，按本块收场。
 · 不许承诺或描述你的到场与动作：“下来接你”“我在前台”“我马上到”“在公司等你”这类话一个字不许出现。
-· 地址、楼座、楼层、门牌只许逐字照抄【事实库】写了的，没写的不许自己补，也不许说“发你定位”。
+· 地址、楼座、楼层、门牌只许逐字照抄【输入参数-事实库】写了的，没写的不许自己补，也不许说“发你定位”。
 · 没发生过的见面不许说成发生过。
-· 他要当面聊：回“当面聊也可以，需要提前约个时间”，时间从【可约面时间】给二选一；他定下具体时间才填「发起线下面试」，不许答应“现在/今天就见”。
+· 他要当面聊：回“当面聊也可以，需要提前约个时间”，时间从【输入参数-推荐时段】给二选一；他定下具体时间才填「发起线下面试」，不许答应“现在/今天就见”。
 · 他说已经出发或已经到了，而今天并没有约好的见面：只道歉——“实在抱歉，让你白跑了，是我这边没安排好，今天见不了”——错认在自己身上，不许暗示他记错；这一轮不再约时间、不再讲卖点、不发任何邀请，动作填「无」。`
 
 // realityBoundaryCompactPolicy 是招呼语与沉默追问出口的紧凑版:这两个提示词
-// 没有【事实库】【可约面时间】与动作枚举,完整版的引用在那里落空反而添乱;
+// 没有事实库、推荐时段子块与动作枚举,完整版的引用在那里落空反而添乱;
 // 也没有会话上下文,"他说到了"类场景不可达,只保留三条通用禁令。
 const realityBoundaryCompactPolicy = `【现实边界】
 你在线上跟他打字，人不在任何现场。不许承诺或描述你的到场与动作（“下来接你”“我在前台”“我马上到”这类）；提示词里没写的地址、楼座、楼层、门牌不许自己编；没发生过的见面不许说成发生过。`
@@ -830,9 +680,6 @@ func appendV4ReplyPolicy(rendered, policy string) (string, error) {
 }
 
 func RenderIntentPrompt(prompt, sentGreeting string, history, current []AdviceMessage) (string, string, error) {
-	if err := requireInputTokens("意向判断", prompt, "回复", "招呼语"); err != nil {
-		return "", "", err
-	}
 	turn, err := activeMessages(current)
 	if err != nil {
 		return "", "", err
@@ -849,21 +696,12 @@ func RenderIntentPrompt(prompt, sentGreeting string, history, current []AdviceMe
 		}
 	}
 	lastReply := turn[len(turn)-1].Text
-	values := map[string]string{"招呼语": sentGreeting, "回复": lastReply}
-	var builder strings.Builder
-	cursor := 0
-	for _, match := range activeTokenPattern.FindAllStringSubmatchIndex(prompt, -1) {
-		name := prompt[match[2]:match[3]]
-		value, ok := values[name]
-		if !ok {
-			return "", "", fmt.Errorf("unknownTemplateToken: %s", name)
-		}
-		builder.WriteString(prompt[cursor:match[0]])
-		builder.WriteString(value)
-		cursor = match[1]
+	rendered, err := renderPromptWithInputs("意向判断", prompt, map[string]string{
+		"招呼语": sentGreeting, "回复": lastReply,
+	})
+	if err != nil {
+		return "", "", err
 	}
-	builder.WriteString(prompt[cursor:])
-	rendered := builder.String()
 	envelope, err := BuildIntentEnvelope(history, turn)
 	if err != nil {
 		return "", "", err
