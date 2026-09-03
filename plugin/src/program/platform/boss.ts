@@ -945,6 +945,36 @@ function domHitTestRow(
   return { onTarget, found: onTarget ? `目标行(${tag})` : `${tag}「${(at.textContent ?? '').trim().slice(0, 12)}」` }
 }
 
+/**
+ * 发送前最后一道闸,在 /click 之前的最后一次读里执行(approachAndClick 的 hitTest 时点)。
+ * 三件事一次注入答完:落点上是发送钮、带 selected 的行仍是目标会话、输入框里仍是
+ * 我们打进去的那句话。任一不成立就 onTarget=false,不点(出口审查 B1:契约要求
+ * "输入事件后且唯一标准动作前核对账号、目标、编辑器期望值")。
+ */
+function domSendGate(
+  buttonSelector: string, x: number, y: number,
+  rowSelector: string, conversationRef: string, selectedClass: string,
+  composerId: string, expectedText: string,
+): { onTarget: boolean; found: string } {
+  const normalize = (value: string): string =>
+    value.normalize('NFC').replace(/\u00a0/gu, ' ').replace(/\s+/gu, ' ').trim()
+  const buttons = Array.from(document.querySelectorAll(buttonSelector))
+  const button = buttons.length === 1 ? buttons[0] : undefined
+  const at = document.elementFromPoint(x, y)
+  const onButton = !!button && !!at && (at === button || button.contains(at))
+  const selectedRows = Array.from(document.querySelectorAll(rowSelector))
+    .filter((el) => el.classList.contains(selectedClass))
+  const rowOk = selectedRows.length === 1 && selectedRows[0]!.getAttribute('data-id') === conversationRef
+  const composer = document.getElementById(composerId)
+  const composerText = composer ? (composer.textContent ?? '') : ''
+  const textOk = !!composer && normalize(composerText) === normalize(expectedText)
+  const problems: string[] = []
+  if (!onButton) problems.push(at ? `落点是 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 12)}」` : '落点上什么都没有')
+  if (!rowOk) problems.push(`当前选中行 ${selectedRows.length === 1 ? '不是目标' : `数量 ${selectedRows.length}`}`)
+  if (!textOk) problems.push(composer ? `输入框内容与文案不同(${composerText.length} 字)` : '输入框不见了')
+  return { onTarget: onButton && rowOk && textOk, found: problems.length ? problems.join(';') : '发送钮' }
+}
+
 function domReadBossSendButton(selector: string): { found: boolean; count: number; text: string; rect: DomRect4 } {
   const nodes = Array.from(document.querySelectorAll(selector))
   const el = nodes[0]
@@ -1753,7 +1783,7 @@ async function readBossThread(
 
 // ── chat.sendMessage ────────────────────────────────────────────────────────
 
-async function sendButtonClickPlan(tabId: number): Promise<ClickPlan> {
+async function sendButtonClickPlan(tabId: number, conversationRef: string, expectedText: string): Promise<ClickPlan> {
   const button = await runInPage(BOSS_DOM, tabId, domReadBossSendButton, [SEND_BUTTON_SELECTOR])
   if (!button.found) {
     throw new PlatformError('ELEMENT_UNRESOLVED', `发送钮认不出(命中 ${button.count} 个)`, 'manualOnly')
@@ -1764,7 +1794,8 @@ async function sendButtonClickPlan(tabId: number): Promise<ClickPlan> {
   return {
     label: '发送钮',
     rect: button.rect,
-    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestIndexed, [SEND_BUTTON_SELECTOR, 0, x, y]),
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domSendGate,
+      [SEND_BUTTON_SELECTOR, x, y, ROW_SELECTOR, conversationRef, ROW_SELECTED_CLASS, COMPOSER_ID, expectedText]),
     observe: async (): Promise<ClickObservation> => {
       const composer = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
       return { trusted: null, onTarget: null, eventDriftPx: null, after: `输入框内容长度=${composer.text.length}` }
@@ -1854,7 +1885,7 @@ async function sendBossMessage(
       `上屏文本与文案不同,已停在草稿:期望 ${typedText.length} 字,实得「${typed.text.slice(0, 200)}」`, 'manualOnly')
   }
   // 最后一道闸之后立即唯一一次点击发送。
-  const plan = await sendButtonClickPlan(tabId)
+  const plan = await sendButtonClickPlan(tabId, args.conversationRef, typedText)
   ctx.checkpoint()
   await verifiedBossChatTab(fingerprint)
   if (Date.now() > ctx.irreversibleNotAfterMs) {
@@ -2003,6 +2034,7 @@ export const bossTestHooks = Object.freeze({
   matchAnchorTail,
   summarizeBossListRow,
   newlinesToSpaces,
+  domSendGate,
   identityCacheUsable,
   domReadBossListState,
   domLocateBossRow,

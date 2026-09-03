@@ -16066,6 +16066,36 @@ test('BOSS 发送用换行处理:换成一个空格而不是删掉——脑侧 c
   }
 })
 
+test('BOSS 发送前最后一道闸:落点是发送钮、选中行仍是目标、输入框仍是那句话,三者缺一不点', () => {
+  const button = { tagName: 'DIV', textContent: '发送', contains(node) { return node === button } }
+  const rows = [
+    { getAttribute() { return '11-0' }, classList: { contains(c) { return c === 'selected' } } },
+    { getAttribute() { return '12-0' }, classList: { contains() { return false } } },
+  ]
+  const composer = { textContent: '你好 方便聊聊吗' }
+  const saved = globalThis.document
+  const install = (overrides = {}) => {
+    globalThis.document = {
+      querySelectorAll(selector) { return selector === '.submit-content .submit' ? [button] : selector === '.geek-item' ? (overrides.rows ?? rows) : [] },
+      elementFromPoint() { return overrides.at === undefined ? button : overrides.at },
+      getElementById() { return overrides.composer === undefined ? composer : overrides.composer },
+    }
+  }
+  const gate = () => bossTestHooks.domSendGate('.submit-content .submit', 1, 1, '.geek-item', '11-0', 'selected', 'boss-chat-editor-input', '你好 方便聊聊吗')
+  try {
+    install()
+    assert.deepEqual(gate(), { onTarget: true, found: '发送钮' }, 'nbsp 与空格规范化后相同')
+    install({ at: { tagName: 'SPAN', textContent: '换微信', contains() { return false } } })
+    assert.equal(gate().onTarget, false, '落点不是发送钮')
+    install({ rows: [rows[1], { getAttribute() { return '11-0' }, classList: { contains() { return false } } }] })
+    const r = gate(); assert.equal(r.onTarget, false); assert.match(r.found, /选中行/, '真人切走了会话就不点')
+    install({ composer: { textContent: '你好 方便聊聊吗 再加一句' } })
+    const c = gate(); assert.equal(c.onTarget, false); assert.match(c.found, /输入框内容与文案不同/, '真人追打了字就不点')
+    install({ composer: null })
+    assert.equal(gate().onTarget, false, '输入框不见了就不点')
+  } finally { globalThis.document = saved }
+})
+
 test('OS 注入的观测器装在 isolated world:落点/点击观测的每一次注入都不进 MAIN', async () => {
   const hand = osClickHarness({})
   const worlds = []
