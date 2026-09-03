@@ -40,5 +40,4 @@ release/
 .claude/settings.local.json
 
 # 开发期 BOSS 测试账本(2026-09-03),与 data/ 同性质
-data-boss/
-data-boss2/
+data-boss*/
