@@ -160,6 +160,7 @@ const {
   SCROLL_BURST,
   runOsScroll,
   osScrollContractData,
+  osClickContractData,
   DEFAULT_MAX_DWELL_MS,
   OSENGINE_SOURCE,
 } = await import(unitBundleURL + `?t=${Date.now()}`)
@@ -15830,9 +15831,9 @@ test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话
   // 换微信、邀面卡、采集、招呼一条都没有:场景二、三与第二刀各自另过出口。
   assert.deepEqual(declared, [
     'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
-    'osProbe', 'osScroll', 'osType', 'probePlatform',
+    'osClick', 'osProbe', 'osScroll', 'osType', 'probePlatform',
     'readList', 'readResume', 'readThread', 'readUnreadTotal', 'sendMessage',
-  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B,建档后补采是场景一的硬前置;osScroll:2026-09-03 滚轮/点击探针战役出口)')
+  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B,建档后补采是场景一的硬前置;osScroll/osClick:2026-09-03 滚轮/点击探针战役出口)')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'sendGreeting'), /未实现原语能力/)
@@ -15856,16 +15857,18 @@ test('hello 平台能力表:智联表等于并集,BOSS 表恰为平台无关四�
     const tables = capabilitiesByPlatform()
     assert.deepEqual(tables.map((t) => t.id), ['zhilian', 'boss'])
     const union = capabilities()
-    assert.equal(union.length, 43, '契约原语全集应为 43 条')
-    // 智联少的是 debug.osType@1 与 debug.osScroll@1:键盘线与滚轮线只在 BOSS 上有靶子
-    // (智联走页面内输入与程序化滚动)。除此之外一条不少——少一条就是某原语的 capability 名填错了。
-    assert.deepEqual(tables[0].caps, union.filter((c) => c !== 'debug.osType@1' && c !== 'debug.osScroll@1'),
-      '智联表应等于并集减 debug.osType@1、debug.osScroll@1')
+    assert.equal(union.length, 44, '契约原语全集应为 44 条')
+    // 智联少的是 debug.osType@1、debug.osScroll@1、debug.osClick@1:键盘线、滚轮线与考古点击
+    // 只在 BOSS 上有靶子(智联走页面内输入与程序化滚动,考古点击后置)。除此之外一条不少——
+    // 少一条就是某原语的 capability 名填错了。
+    const bossOnly = ['debug.osType@1', 'debug.osScroll@1', 'debug.osClick@1']
+    assert.deepEqual(tables[0].caps, union.filter((c) => !bossOnly.includes(c)),
+      '智联表应等于并集减 BOSS 专属三条')
     assert.deepEqual(tables[1].caps, [
       'candidate.readResume@1',
       'chat.captureThreadScreenshot@1', 'chat.identifyCurrentConversation@1', 'chat.openConversation@1',
       'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.sendMessage@1',
-      'debug.osProbe@1', 'debug.osScroll@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
+      'debug.osClick@1', 'debug.osProbe@1', 'debug.osScroll@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
       'debug.slowEcho@1', 'debug.switchWindow@1', 'probe.platform@1',
     ], 'BOSS 表变了:要么适配器长了能力(先过出口),要么某条原语漏填 capability')
     for (const capability of tables[1].caps) {
@@ -16307,6 +16310,59 @@ test('考古定位:selector 命中不唯一且没给 index 即拒,越界即拒,�
     assert.deepEqual(domReadScrollMetrics('.one', 0), { found: true, scrollTop: 40, scrollHeight: 3000, clientHeight: 600 })
     assert.equal(domReadScrollMetrics('.none', 0).found, false)
   } finally { globalThis.document = saved.document; globalThis.window = saved.window }
+})
+
+test('只落不点:action=land 走完靠近、落点确认与命中测试就停,收场 landed、一次都不按', async () => {
+  const hand = osClickHarness({ calibrated: true })
+  try {
+    const plan = { ...togglePlan({ onTarget: true, observed: null }), action: 'land' }
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), plan)
+    assert.equal(out.outcome, 'landed', out.detail)
+    assert.equal(hand.clicks(), 0, '仅移动模式按下去了')
+    assert.equal(hand.plays(), 1, '热标定下只靠近一趟')
+    assert.match(out.detail, /命中=是/, '命中测试照过,并留在现场')
+    const data = osClickContractData('move', out, 1700000000000)
+    assert.equal(data.mode, 'move')
+    assert.equal(data.outcome, 'landed')
+    for (const k of ['attempts', 'unreachableFrames', 'planMs', 'elapsedMs', 'lagMaxUs']) assert.ok(Number.isInteger(data[k]), k)
+  } finally { hand.restore() }
+  // 命中测试不过时仅移动同样拒——落在别的东西上也不算落到
+  const miss = osClickHarness({ calibrated: true })
+  try {
+    const plan = { ...togglePlan({ onTarget: false, observed: null }), action: 'land' }
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), plan)
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(miss.clicks(), 0)
+  } finally { miss.restore() }
+})
+
+test('考古点击的命中测试:落点上是靶子或其后代,且 expectText 给了就核文本——列表重排后同一 index 指到别人时拒', () => {
+  const mk = (text, children = []) => {
+    const node = { tagName: 'LI', textContent: text, contains(x) { return x === node || children.includes(x) } }
+    return node
+  }
+  const rowA = mk('张先生 · 销售'); const rowB = mk('李女士 · 客服')
+  const inner = { tagName: 'SPAN', textContent: '销售' }; rowA.contains = (x) => x === rowA || x === inner
+  const saved = globalThis.document
+  let rows = [rowA, rowB]
+  let atPoint = rowA
+  globalThis.document = { querySelectorAll() { return rows }, elementFromPoint() { return atPoint } }
+  try {
+    const { domHitTestExpected } = bossTestHooks
+    assert.equal(domHitTestExpected('.row', 0, null, 1, 1).onTarget, true)
+    atPoint = inner
+    assert.equal(domHitTestExpected('.row', 0, '张先生 · 销售', 1, 1).onTarget, true, '后代也算命中,文本相符')
+    atPoint = rowB
+    const off = domHitTestExpected('.row', 0, null, 1, 1)
+    assert.equal(off.onTarget, false); assert.match(off.found, /别的元素/)
+    // 列表重排:index 0 现在是李女士,expectText 还是张先生
+    rows = [rowB, rowA]; atPoint = rowB
+    const swapped = domHitTestExpected('.row', 0, '张先生 · 销售', 1, 1)
+    assert.equal(swapped.onTarget, false, '同一 index 已指到别人,文本不符就不点')
+    assert.match(swapped.found, /文本已变/)
+    rows = []
+    assert.match(domHitTestExpected('.row', 0, null, 1, 1).found, /不在原来的位置/)
+  } finally { globalThis.document = saved }
 })
 
 test('BOSS 消息数组就绪判据:空数组不算就绪继续等,身份缺失立即收束', () => {

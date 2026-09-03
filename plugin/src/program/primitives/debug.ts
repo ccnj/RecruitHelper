@@ -5,6 +5,7 @@ import {
   CmdClass,
   DebugCapturePageArgs,
   DebugInspectSendSurfaceArgs,
+  DebugOsClickArgs,
   DebugOsProbeArgs,
   DebugOsScrollArgs,
   DebugOsTypeArgs,
@@ -211,12 +212,29 @@ const osScrollPrim: Primitive = {
   },
 }
 
+// debug.osClick:开发期 OS 点击探针。靶子由 selector 指定(debug.* 的显式例外),两种模式:
+// move 只落到元素上、绝不点;click 复用 osProbe 至多一次点击的内核,不重试。
+const osClickPrim: Primitive = {
+  name: PrimName.DebugOsClick,
+  capability: 'osClick',
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      const data = await callPlatform(ctx, 'osClick', rawArgs as DebugOsClickArgs)
+      return { status: 'ok', data }
+    } catch (error) {
+      return platformFailure(error)
+    }
+  },
+}
+
 export function registerDebugPrimitives(): void {
   register(pingPrim)
   register(inspectSendSurfacePrim)
   register(osProbePrim)
   register(osTypePrim)
   register(osScrollPrim)
+  register(osClickPrim)
   register(reloadPrim)
   register(switchWindowPrim)
   register(slowEchoPrim)

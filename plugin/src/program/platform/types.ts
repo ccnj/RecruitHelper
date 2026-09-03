@@ -68,6 +68,8 @@ import type {
   DebugOsTypeData,
   DebugOsScrollArgs,
   DebugOsScrollData,
+  DebugOsClickArgs,
+  DebugOsClickData,
   DebugOsProbeData,
   DebugInspectSendSurfaceArgs,
   DebugInspectSendSurfaceData,
@@ -327,6 +329,13 @@ export interface PlatformCapabilities {
    * debug.* 命名空间的显式例外(契约 note),生产原语不得照抄。
    */
   osScroll(input: PrimitiveInput<DebugOsScrollArgs>): Promise<DebugOsScrollData>
+
+  /**
+   * 开发期 OS 点击探针(2026-09-03):osProbe 的 reversibleToggle 靶子一般化为 selector 指着的
+   * 任意元素。move 只落到元素上不点;click 复用至多一次点击的内核。expectText 与命中测试
+   * 是错靶防线;它是考古工具,不是对不可逆控件的授权。
+   */
+  osClick(input: PrimitiveInput<DebugOsClickArgs>): Promise<DebugOsClickData>
 }
 
 /** 能力名。`requireCapability` 用它做键。 */

@@ -16,7 +16,7 @@
 // 直接要求。
 import { contentScriptHealthy, runInPage } from './inject'
 import { tabNavigationGeneration } from '../../base/tabGeneration'
-import { composeClearKeys, isHandServiceDown, osProbeContractData, playKeys, playTypePlan, readHandOS, runOsProbe, seedFrom } from './osinput'
+import { composeClearKeys, isHandServiceDown, osClickContractData, osProbeContractData, playKeys, playTypePlan, readHandOS, runOsProbe, seedFrom } from './osinput'
 import { planType } from '../osengine/plan'
 import { osScrollContractData, runOsScroll } from './osscroll'
 import type { ScrollTarget } from './osscroll'
@@ -48,6 +48,8 @@ import type {
   ChatSendMessageData,
   ChatSendMessageGuards,
   ConversationSummary,
+  DebugOsClickArgs,
+  DebugOsClickData,
   DebugOsProbeArgs,
   DebugOsScrollArgs,
   DebugOsScrollData,
@@ -1616,6 +1618,67 @@ function domReadScrollMetrics(selector: string, index: number): { found: boolean
   return { found: true, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }
 }
 
+/**
+ * 考古点击的命中测试:落点上是 selector[index] 或其后代,**且**给了 expectText 时元素此刻的
+ * 文本仍逐字相等——这是点击前的最后一次读。列表重排后同一个 index 可能指到另一行,
+ * 只看 index 会点错人;文本是那一行的身份。
+ */
+function domHitTestExpected(
+  selector: string, index: number, expectText: string | null, x: number, y: number,
+): { onTarget: boolean; found: string } {
+  let target: Element | undefined
+  try {
+    target = Array.from(document.querySelectorAll(selector))[index]
+  } catch {
+    target = undefined
+  }
+  const at = document.elementFromPoint(x, y)
+  if (!target) return { onTarget: false, found: '靶子已经不在原来的位置上' }
+  if (!at) return { onTarget: false, found: '落点上什么都没有' }
+  if (!(at === target || target.contains(at))) {
+    return { onTarget: false, found: `落点上是别的元素 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 8)}」` }
+  }
+  if (expectText !== null) {
+    const now = (target.textContent ?? '').trim()
+    if (now !== expectText) return { onTarget: false, found: `靶子文本已变:「${now.slice(0, 16)}」≠「${expectText.slice(0, 16)}」` }
+  }
+  return { onTarget: true, found: `靶子(${at.tagName.toLowerCase()})` }
+}
+
+async function bossOsClick(
+  args: DebugOsClickArgs,
+  ctx: PrimitiveContext,
+  fingerprint: string | undefined,
+): Promise<DebugOsClickData> {
+  const tab = await verifiedBossTab(fingerprint)
+  const tabId = tab.id!
+  const started = Date.now()
+  const refused = (detail: string): DebugOsClickData => osClickContractData(args.mode, {
+    outcome: 'refusedByGate', attempts: 0, calibStatus: '未知', unreachableFrames: 0, planMs: 0,
+    elapsedMs: Date.now() - started, lagMaxUs: 0, detail,
+  }, Date.now())
+  // 靶子在**移动之前**就要定位好:定不到、不唯一、看不见、文本不符,一步都不动。
+  const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [args.selector, args.index ?? -1])
+  if (located.status !== 'ok') return refused(`靶子定位失败(${located.status}):${located.detail}`)
+  const expectText = args.expectText === undefined ? null : args.expectText.trim()
+  if (expectText !== null && located.text !== expectText) {
+    return refused(`靶子文本不符:页面是「${located.text.slice(0, 16)}」,期望「${expectText.slice(0, 16)}」(${located.signature})`)
+  }
+  const plan: ClickPlan = {
+    label: located.signature,
+    rect: located.clip,
+    action: args.mode === 'move' ? 'land' : 'click',
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [args.selector, located.index, expectText, x, y]),
+    observe: async (): Promise<ClickObservation> => {
+      const after = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [args.selector, located.index])
+      return { trusted: null, onTarget: null, eventDriftPx: null,
+        after: after.status === 'ok' ? `靶子仍在:${after.signature}` : `靶子已不在(${after.status})` }
+    },
+  }
+  const probe = await runOsProbe(BOSS_INJECT, tabId, ctx, plan)
+  return osClickContractData(args.mode, probe, Date.now())
+}
+
 async function bossOsScroll(
   args: DebugOsScrollArgs,
   ctx: PrimitiveContext,
@@ -2520,6 +2583,7 @@ export const bossTestHooks = Object.freeze({
   domHitTestIndexed,
   domLocateBySelector,
   domReadScrollMetrics,
+  domHitTestExpected,
   mainReadBossResume,
   projectBossResume,
   bossConversationRef,
@@ -2552,6 +2616,7 @@ export const bossAdapter = {
   osType: ({ args, ctx, fingerprint }) => bossOsType(args, ctx, fingerprint),
   // 考古探针(2026-09-03):滚轮,selector 由调用方给。
   osScroll: ({ args, ctx, fingerprint }) => bossOsScroll(args, ctx, fingerprint),
+  osClick: ({ args, ctx, fingerprint }) => bossOsClick(args, ctx, fingerprint),
 
   // 场景一的七条(2026-09-03 开工):会话感知与回复。
   readList: ({ args, ctx, fingerprint }) => readBossList(args, ctx, fingerprint),

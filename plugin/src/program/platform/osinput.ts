@@ -20,7 +20,7 @@ import { getWsUrl } from '../../base/config'
 import { planMove, mulberry32, DEFAULT_MAX_DWELL_MS } from '../osengine/plan'
 import { runInPage } from './inject'
 import { PlatformError } from './types'
-import type { DebugOsProbeData, OsProbeTarget } from '../../base/protocol'
+import type { DebugOsClickData, DebugOsProbeData, OsClickMode, OsProbeTarget } from '../../base/protocol'
 import type { InjectOptions } from './inject'
 import type { ScrollTick } from './osscroll'
 import type { PrimitiveContext } from '../registry'
@@ -950,6 +950,27 @@ export function osProbeContractData(
     target,
     outcome: probe.outcome,
     attempts: Math.round(probe.attempts),
+    ...(probe.landingDriftPx === undefined ? {} : { landingDriftPx: Math.ceil(probe.landingDriftPx) }),
+    calibStatus: probe.calibStatus,
+    unreachableFrames: Math.round(probe.unreachableFrames),
+    planMs: Math.round(probe.planMs),
+    elapsedMs: Math.round(probe.elapsedMs),
+    lagMaxUs: Math.round(probe.lagMaxUs),
+    ...(probe.detail === undefined ? {} : { detail: probe.detail.slice(0, 2048) }),
+    observedAt,
+  }
+}
+
+/** debug.osClick 的装配,与 osProbeContractData 同形(mode 替代 target),取整同样收在这里。 */
+export function osClickContractData(
+  mode: OsClickMode,
+  probe: OsProbeResult,
+  observedAt: number,
+): DebugOsClickData {
+  return {
+    mode,
+    outcome: probe.outcome,
+    attempts: Math.min(16, Math.round(probe.attempts)),
     ...(probe.landingDriftPx === undefined ? {} : { landingDriftPx: Math.ceil(probe.landingDriftPx) }),
     calibStatus: probe.calibStatus,
     unreachableFrames: Math.round(probe.unreachableFrames),
