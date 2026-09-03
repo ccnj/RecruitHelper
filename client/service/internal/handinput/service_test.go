@@ -1,9 +1,11 @@
 package handinput
 
 import (
+	"errors"
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeInjector 记下每一次调用,并按一份**真实几何**回答光标位置——于是落点可以
@@ -28,6 +30,10 @@ type fakeInjector struct {
 	unknownKey string
 	// keyFailAt >0 时,第几次按键动作开始报错 —— 构造"打到一半失败"。
 	keyFailAt int
+	// wheels 记下滚轮刻度序列(带符号,deltaY 口径),供滚轮用例核对。
+	wheels []int
+	// wheelFailAt >0 时,第几格开始报错 —— 构造"滚到一半失败"。
+	wheelFailAt int
 }
 
 func (f *fakeInjector) MouseMove(x, y float64) error {
@@ -51,6 +57,13 @@ func (f *fakeInjector) KeyUp(code string) error   { return f.recordKey(code, "\u
 func (f *fakeInjector) recordKey(code, arrow string) error {
 	f.keys = append(f.keys, code+arrow)
 	if f.keyFailAt > 0 && len(f.keys) >= f.keyFailAt {
+		return errFake
+	}
+	return nil
+}
+func (f *fakeInjector) Wheel(notches int) error {
+	f.wheels = append(f.wheels, notches)
+	if f.wheelFailAt > 0 && len(f.wheels) >= f.wheelFailAt {
 		return errFake
 	}
 	return nil
@@ -379,5 +392,120 @@ func TestKeysRejectsModifierWindowShortfall(t *testing.T) {
 	}
 	if len(f.keys) != 0 {
 		t.Fatalf("校验失败后仍发了按键:%v", f.keys)
+	}
+}
+
+// 滚轮发在光标当前位置、按计划顺序逐格播出;它改变了光标下面的世界,所以播完
+// 必须熄灭点击——下一次点击要有属于它自己的落点确认。
+func TestScrollPlaysTicksInOrderAndDisarmsClick(t *testing.T) {
+	s, f := newReadyService(t)
+	res, err := s.Scroll(ScrollPlan{Ticks: []ScrollTick{{At: 0, Dy: 1}, {At: 20, Dy: 1}, {At: 45, Dy: 2}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.wheels; len(got) != 3 || got[0] != 1 || got[1] != 1 || got[2] != 2 {
+		t.Fatalf("刻度序列不对:%v", got)
+	}
+	if res.Ticks != 3 || res.Notches != 4 || res.Status != "ok" {
+		t.Fatalf("回包不对:%+v", res)
+	}
+	if err := s.Click(96); err == nil {
+		t.Fatal("滚轮之后没有重新确认落点就放行了点击")
+	}
+	if f.downs != 0 {
+		t.Fatalf("被拒的点击不得真的按下去:down=%d", f.downs)
+	}
+}
+
+// 这一轮还没播过任何计划就来滚——光标在哪都不知道,滚的会是任意窗口。拒,且一格不发。
+func TestScrollRefusedBeforeAnyLanding(t *testing.T) {
+	f := &fakeInjector{}
+	s := NewService(f)
+	_, err := s.Scroll(ScrollPlan{Ticks: []ScrollTick{{At: 0, Dy: 1}}})
+	if !errors.Is(err, errRefused) {
+		t.Fatalf("没有注入落点应按未放行拒,得到 %v", err)
+	}
+	if len(f.wheels) != 0 {
+		t.Fatalf("被拒后仍发了滚轮:%v", f.wheels)
+	}
+}
+
+// 落点确认之后真人碰了鼠标,滚轮会投给光标现在所在的那个窗口——也许是他自己在看的
+// 文档。判据与点击同一条:光标不在我们最后放它的地方就不滚。
+func TestScrollRefusedWhenCursorMovedAfterLanding(t *testing.T) {
+	s, f := newReadyService(t)
+	moved := [2]float64{9_000, 9_000}
+	f.cursorAt = &moved
+	_, err := s.Scroll(ScrollPlan{Ticks: []ScrollTick{{At: 0, Dy: -1}}})
+	if !errors.Is(err, errRefused) {
+		t.Fatalf("光标被挪走应按未放行拒,得到 %v", err)
+	}
+	if len(f.wheels) != 0 {
+		t.Fatalf("被拒后仍发了滚轮:%v", f.wheels)
+	}
+	// 拒绝之后点击也熄灭:不能让下一次点击凭同一次陈旧的落点确认蒙混过去。
+	f.cursorAt = nil
+	if err := s.Click(96); err == nil {
+		t.Fatal("滚轮被拒之后没有重新确认落点就放行了点击")
+	}
+}
+
+// 排错的计划在发出第一格之前整份否掉——失效方向是一格都没发;这些是排版错误,
+// 不是未放行,不该混进 409。
+func TestScrollRejectsMalformedPlanBeforeAnyTick(t *testing.T) {
+	tooMany := make([]ScrollTick, maxScrollTicks+1)
+	for i := range tooMany {
+		tooMany[i] = ScrollTick{At: float64(i), Dy: 1}
+	}
+	cases := map[string][]ScrollTick{
+		"空计划":  nil,
+		"没有方向": {{At: 0, Dy: 0}},
+		"时刻倒退": {{At: 30, Dy: 1}, {At: 10, Dy: 1}},
+		"方向反转": {{At: 0, Dy: 1}, {At: 40, Dy: -1}},
+		"一格过大": {{At: 0, Dy: 4}},
+		"跨度过长": {{At: 0, Dy: 1}, {At: maxScrollSpanMs + 1, Dy: 1}},
+		"格数过多": tooMany,
+		"负时刻":  {{At: -1, Dy: 1}},
+	}
+	for name, ticks := range cases {
+		s, f := newReadyService(t)
+		_, err := s.Scroll(ScrollPlan{Ticks: ticks})
+		if err == nil {
+			t.Fatalf("%s:应当拒绝", name)
+		}
+		if errors.Is(err, errRefused) {
+			t.Fatalf("%s:排版错误不该报成未放行:%v", name, err)
+		}
+		if len(f.wheels) != 0 {
+			t.Fatalf("%s:校验失败后仍发了滚轮:%v", name, f.wheels)
+		}
+	}
+}
+
+// 计划的时刻必须被尊重:实际跨度不能短于计划跨度(只断言下界,上界是真机的事)。
+func TestScrollHonoursPlannedTimeline(t *testing.T) {
+	s, _ := newReadyService(t)
+	start := time.Now()
+	if _, err := s.Scroll(ScrollPlan{Ticks: []ScrollTick{{At: 0, Dy: 1}, {At: 30, Dy: 1}, {At: 60, Dy: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if span := time.Since(start); span < 55*time.Millisecond {
+		t.Fatalf("计划跨度 60ms,实际只用了 %v —— 时刻没被尊重", span)
+	}
+}
+
+// 注入中途失败必须把已发出的格数带回去:插件要知道页面被滚了多少。
+func TestScrollReturnsPartialProgressOnInjectionFailure(t *testing.T) {
+	s, f := newReadyService(t)
+	f.wheelFailAt = 2
+	res, err := s.Scroll(ScrollPlan{Ticks: []ScrollTick{{At: 0, Dy: 1}, {At: 5, Dy: 1}, {At: 10, Dy: 1}}})
+	if err == nil {
+		t.Fatal("注入失败应当报错")
+	}
+	if errors.Is(err, errRefused) {
+		t.Fatalf("注入失败是故障,不是未放行:%v", err)
+	}
+	if res.Ticks != 1 {
+		t.Fatalf("失败前已发出 1 格,应当带回来,实际 %d", res.Ticks)
 	}
 }

@@ -58,6 +58,10 @@ const (
 	mouseeventfRightUp     = 0x0010
 	mouseeventfMiddleDown  = 0x0020
 	mouseeventfMiddleUp    = 0x0040
+	// 竖向滚轮。mouseData 是带符号的刻度量,一格 WHEEL_DELTA=120;微软口径
+	// **正=向前(远离用户)=向上,负=向后(朝向用户)=向下**。
+	mouseeventfWheel = 0x0800
+	wheelDelta       = 120
 
 	smXVirtualScreen  = 76
 	smYVirtualScreen  = 77
@@ -127,6 +131,19 @@ func (w *windowsInjector) MouseMove(x, y float64) error {
 
 func (w *windowsInjector) MouseDown(button int) error { return w.button(button, true) }
 func (w *windowsInjector) MouseUp(button int) error   { return w.button(button, false) }
+
+// Wheel 发一格滚轮。
+//
+// 接口口径是 deltaY(正=向下),微软的 mouseData 正=向上,所以取负。**不带 MOUSEEVENTF_MOVE**,
+// 系统就发在光标当前位置——与 button() 同一个理由:顺手带坐标会多产生一次移动事件。
+//
+// 2026-09-03 尚未真机:方向、UIPI 静默失败、TIP 空闲态下是否透传三项列在 Windows 首验单上。
+func (w *windowsInjector) Wheel(notches int) error {
+	if notches == 0 {
+		return fmt.Errorf("滚轮刻度为 0")
+	}
+	return sendWheel(mouseeventfWheel, int32(-notches*wheelDelta))
+}
 
 // KnowsKey 只查表,不发任何东西 —— 有它才能在发出第一次按键之前否掉整份计划。
 func (w *windowsInjector) KnowsKey(code string) error {
@@ -213,6 +230,17 @@ func (w *windowsInjector) Authorized() bool { return true }
 
 func sendMouse(flags uint32, dx, dy int32) error {
 	in := winMouseInput{typ: inputMouse, mi: mouseInput{dx: dx, dy: dy, dwFlags: flags}}
+	n, _, err := procSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
+	if n != 1 {
+		return errSendInput(n, err)
+	}
+	return nil
+}
+
+// sendWheel 与 sendMouse 的差别只在 mouseData:滚轮的刻度量走它,坐标留 0。
+// DWORD 字段装带符号的量是微软的定义(WHEEL_DELTA 的负倍数按补码放进去)。
+func sendWheel(flags uint32, delta int32) error {
+	in := winMouseInput{typ: inputMouse, mi: mouseInput{mouseData: uint32(delta), dwFlags: flags}}
 	n, _, err := procSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
 	if n != 1 {
 		return errSendInput(n, err)
