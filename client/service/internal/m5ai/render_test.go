@@ -44,17 +44,19 @@ func TestDefaultScheduleAndReplyAssemblyMatchFrozenGolden(t *testing.T) {
 	}
 	rendered, err := RenderReplyPrompt(
 		"简历={简历}\n历史={对话历史}\n时段={推荐时段}",
-		`{"basic":[]}`, "候选人(消息):你好", now,
+		`{"basic":[]}`, "候选人(消息):你好", "", now,
 		[]string{"2026-07-13 09:00:00", "2026-07-13 10:00:00"},
 	)
-	// 模板不带任何块标题:三个 token 全渲染成指针,数据按 replyDataBlocks 的顺序
-	// 追加到正文末尾(可约面时间 → 简历 → 完整对话)。
-	want := "简历=简历(见【简历】)\n历史=完整对话(见【完整对话】)\n时段=可约面时间(见【可约面时间】)\n\n" +
-		"【可约面时间】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n" +
+	// 统一渲染(2026-09-03):三个 token 全渲染成指针,数据以【输入参数】起头、按
+	// promptInputSpecs 的顺序追加到正文末尾(推荐时段 → 简历 → 对话历史);模板没
+	// 引用 {事实库},事实库子块不出现。
+	want := "简历=简历(见下方输入参数-简历)\n历史=对话历史(见下方输入参数-对话历史)\n时段=推荐时段(见下方输入参数-推荐时段)\n\n" +
+		"【输入参数】\n\n" +
+		"【输入参数-推荐时段】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n" +
 		"话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n" +
 		"7月13日(周一) 09:00-10:00 的整点\n\n" +
-		"【简历】\n{\"basic\":[]}\n\n" +
-		"【完整对话】\n" + historyGuard + "\n候选人(消息):你好"
+		"【输入参数-简历】\n{\"basic\":[]}\n\n" +
+		"【输入参数-对话历史】\n" + historyGuard + "\n候选人(消息):你好"
 	if err != nil || rendered != want {
 		t.Fatalf("reply 组装 golden 漂移:\n got=%q\nwant=%q err=%v", rendered, want, err)
 	}
@@ -68,7 +70,7 @@ func TestPersistedRecommendedTimeTextNeverMovesWithWallClock(t *testing.T) {
 	}
 	rendered, err := RenderReplyPromptFrozen(
 		"简历={简历}\n历史={对话历史}\n时段={推荐时段}",
-		`{"基本":[]}`, "候选人(消息):你好", frozen,
+		`{"基本":[]}`, "候选人(消息):你好", frozen, "",
 	)
 	if err != nil || !strings.Contains(rendered, "现在是2026年7月10日(周五)14:23。") ||
 		strings.Contains(rendered, "2026年7月11日") {
@@ -76,7 +78,7 @@ func TestPersistedRecommendedTimeTextNeverMovesWithWallClock(t *testing.T) {
 	}
 	if _, err := RenderReplyPromptFrozen(
 		"简历={简历}\n历史={对话历史}\n时段={推荐时段}",
-		`{"基本":[]}`, "", frozen+`{"候选人正文":"不得回显"}`,
+		`{"基本":[]}`, "", frozen+`{"候选人正文":"不得回显"}`, "",
 	); err == nil || strings.Contains(err.Error(), "候选人正文") {
 		t.Fatalf("损坏的冻结文本必须固定分类拒绝且不回显内容: %v", err)
 	}
@@ -111,7 +113,7 @@ func TestFrozenRecommendedTimeCarriesCanonicalSlotsWithoutBreakingLegacyRender(t
 		"简历={简历}\n历史={对话历史}\n时段={推荐时段}",
 		`{"基本":[]}`,
 		"候选人(消息):你好",
-		legacy,
+		legacy, "",
 	)
 	if err != nil || !strings.Contains(rendered, "旧时段块") {
 		t.Fatalf("旧 turn 必须仍可按原冻结文本渲染: rendered=%q err=%v", rendered, err)
@@ -183,7 +185,7 @@ func TestAppendRealityBoundaryPlacesBlockLastAndRejectsEmptyPrompt(t *testing.T)
 	for _, anchor := range []string{
 		"人不在任何现场",
 		"“下来接你”“我在前台”“我马上到”“在公司等你”这类话一个字不许出现",
-		"只许逐字照抄【事实库】写了的",
+		"只许逐字照抄【输入参数-事实库】写了的",
 		"没发生过的见面不许说成发生过",
 		"他定下具体时间才填「发起线下面试」",
 		"错认在自己身上，不许暗示他记错",
@@ -233,7 +235,9 @@ func TestIntentEnvelopeAndPromptAreCanonicalAndDisjoint(t *testing.T) {
 	}
 	content, envelope, err := RenderIntentPrompt("请判断。招呼={招呼语}；回复={回复}", "你好", history, turn)
 	wantEnvelope := `{"historyBeforeTurn":[{"seq":1,"direction":"outbound","kind":"greeting","text":"你好"}],"currentTurn":[{"seq":2,"direction":"inbound","kind":"text","text":"可以聊聊"},{"seq":3,"direction":"inbound","kind":"text","text":"明天下午方便"}]}`
-	wantContent := "请判断。招呼=你好；回复=明天下午方便\n\n【对话数据信封/v1】\n" + wantEnvelope
+	wantContent := "请判断。招呼=招呼语(见下方输入参数-招呼语)；回复=回复(见下方输入参数-回复)\n\n" +
+		"【输入参数】\n\n【输入参数-招呼语】\n你好\n\n【输入参数-回复】\n明天下午方便\n\n" +
+		"【对话数据信封/v1】\n" + wantEnvelope
 	if err != nil || envelope != wantEnvelope || content != wantContent {
 		t.Fatalf("intent 组装漂移: content=%q envelope=%q err=%v", content, envelope, err)
 	}
@@ -246,14 +250,14 @@ func TestTemplateValuesAreNeverReinterpretedAsTemplateSyntax(t *testing.T) {
 	now := frozenShanghai(t, "2026-07-10T14:23:00+08:00")
 	resume := `{"自评":"候选人原文 {推荐时段} {对话历史}"}`
 	rendered, err := RenderReplyPrompt("简历={简历}\n历史={对话历史}\n时段={推荐时段}", resume,
-		"候选人(消息):原文 {简历}", now, nil)
+		"候选人(消息):原文 {简历}", "", now, nil)
 	if err != nil || !strings.Contains(rendered, "候选人原文 {推荐时段} {对话历史}") ||
 		!strings.Contains(rendered, "候选人(消息):原文 {简历}") {
 		t.Fatalf("注入值被二次解释: rendered=%q err=%v", rendered, err)
 	}
 	content, _, err := RenderIntentPrompt("招呼={招呼语}\n回复={回复}", "你好 {回复}", nil,
 		[]AdviceMessage{{Seq: 1, Direction: "inbound", Kind: "text", Text: "正文 {招呼语}"}})
-	if err != nil || !strings.Contains(content, "招呼=你好 {回复}") || !strings.Contains(content, "回复=正文 {招呼语}") {
+	if err != nil || !strings.Contains(content, "【输入参数-招呼语】\n你好 {回复}\n") || !strings.Contains(content, "【输入参数-回复】\n正文 {招呼语}\n") {
 		t.Fatalf("意向注入值被二次解释: content=%q err=%v", content, err)
 	}
 }
@@ -383,5 +387,38 @@ func TestReplyActionMenuBlockAfterInterviewCardSent(t *testing.T) {
 		if strings.Contains(block, banned) {
 			t.Fatalf("块只做减法(命中 %q): %s", banned, block)
 		}
+	}
+}
+
+// 2026-09-03 统一渲染的三条边界:模板引用 {事实库} 才追加事实库子块、事实库原文为
+// 空时子块写固定缺席文案、陌生占位符原样保留且不拒绝。
+func TestReplyRendererFactsBlockAndUnknownTokens(t *testing.T) {
+	now := frozenShanghai(t, "2026-07-10T14:23:00+08:00")
+	slots := []string{"2026-07-13 09:00:00"}
+	withFacts, err := RenderReplyPrompt("简历={简历} 历史={对话历史} 时段={推荐时段} 事实={事实库}",
+		`{"basic":[]}`, "候选人(消息):你好", "  fixture://facts  ", now, slots)
+	if err != nil || !strings.HasSuffix(withFacts, "【输入参数-事实库】\nfixture://facts") ||
+		!strings.Contains(withFacts, "事实=事实库(见下方输入参数-事实库)") {
+		t.Fatalf("事实库子块未按引用追加: rendered=%q err=%v", withFacts, err)
+	}
+	emptyFacts, err := RenderReplyPrompt("{简历}{对话历史}{推荐时段}{事实库}",
+		`{"basic":[]}`, "候选人(消息):你好", "", now, slots)
+	if err != nil || !strings.HasSuffix(emptyFacts, "【输入参数-事实库】\n"+customerFactsMissingText) {
+		t.Fatalf("事实库为空时须写缺席文案并照常渲染: rendered=%q err=%v", emptyFacts, err)
+	}
+	unreferenced, err := RenderReplyPrompt("{简历}{对话历史}{推荐时段}",
+		`{"basic":[]}`, "候选人(消息):你好", "fixture://facts", now, slots)
+	if err != nil || strings.Contains(unreferenced, "事实库") {
+		t.Fatalf("模板未引用事实库时不得追加: rendered=%q err=%v", unreferenced, err)
+	}
+	unknown, err := RenderReplyPrompt("看 {简厉} 与 {对话历史}", `{"basic":[]}`, "候选人(消息):你好", "", now, slots)
+	if err != nil || !strings.HasPrefix(unknown, "看 {简厉} 与 对话历史(见下方输入参数-对话历史)\n\n【输入参数】\n\n【输入参数-推荐时段】") ||
+		strings.Count(unknown, "【输入参数-简历】\n{\"basic\":[]}") != 1 {
+		t.Fatalf("陌生占位符须原样保留、必填子块仍恒追加: rendered=%q err=%v", unknown, err)
+	}
+	legacy := `{"inline":"旧内联时段","block":"【可约面时间】\n旧时段块"}`
+	rendered, err := RenderReplyPromptFrozen("{推荐时段}{简历}{对话历史}", `{"basic":[]}`, "候选人(消息):你好", legacy, "")
+	if err != nil || !strings.Contains(rendered, "【输入参数-推荐时段】\n旧时段块\n") || strings.Contains(rendered, "【可约面时间】") {
+		t.Fatalf("存量冻结载荷的旧块标题须剥离后套新外壳: rendered=%q err=%v", rendered, err)
 	}
 }

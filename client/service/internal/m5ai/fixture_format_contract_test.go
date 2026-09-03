@@ -117,20 +117,21 @@ func TestFormatFixtureDrivesPromptTokenWhitelist(t *testing.T) {
 			expected := decodeFormatFixture[struct {
 				Status            string   `json:"status"`
 				ActiveInputTokens []string `json:"activeInputTokens"`
-				ErrorClass        string   `json:"errorClass"`
+				UnknownTokens     []string `json:"unknownTokens"`
 			}](t, testCase.Expected)
-			got, err := ValidatePromptTokens(input.DocType, input.Text)
-			if expected.Status == "rejected" {
-				requireFixtureError(t, err, expected.ErrorClass)
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
+			got, gotUnknown, err := ScanPromptTokens(input.DocType, input.Text)
+			if err != nil || expected.Status != "ok" {
+				t.Fatalf("2026-09-03 起陌生占位符不是错误,扫描只分类不拒绝: status=%s err=%v", expected.Status, err)
 			}
 			// Token 顺序不是契约，fixture 与 production 均按集合比较。
 			sortFixtureStrings(got)
 			sortFixtureStrings(expected.ActiveInputTokens)
 			sameFixtureStrings(t, got, expected.ActiveInputTokens)
+			sortFixtureStrings(gotUnknown)
+			sortFixtureStrings(expected.UnknownTokens)
+			if len(gotUnknown) != 0 || len(expected.UnknownTokens) != 0 {
+				sameFixtureStrings(t, gotUnknown, expected.UnknownTokens)
+			}
 		})
 	}
 }
@@ -407,11 +408,9 @@ func renderScheduleFixture(t *testing.T, input scheduleFixtureInput) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, err := renderReplyTemplateFrozen(input.SourcePrompt, "", "", frozen)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return rendered
+	// 时段 golden 只看推荐时段这一个子块:用统一渲染器只带该输入的规格渲染。
+	return renderPromptInputs(promptInputSpecs["多轮沟通"][:1], input.SourcePrompt,
+		map[string]string{"推荐时段": frozenSlotBlockBody(frozen)})
 }
 
 func TestFormatFixtureDrivesEveryScheduleGolden(t *testing.T) {
@@ -550,7 +549,7 @@ func TestFormatFixtureDrivesEveryProviderAssemblyGolden(t *testing.T) {
 					t.Fatal(err)
 				}
 				content, err := RenderReplyPrompt(input.SourcePrompt, input.TemplateValues.Resume,
-					input.TemplateValues.History, now, input.SelectedSlots)
+					input.TemplateValues.History, input.CustomerFacts, now, input.SelectedSlots)
 				if err != nil || len(expected.ProviderMessages) != 1 || expected.ProviderMessages[0].Role != "user" || content != expected.ProviderMessages[0].Content {
 					t.Fatalf("reply provider assembly 漂移: content=%q err=%v", content, err)
 				}
@@ -584,20 +583,23 @@ func TestFormatFixtureDrivesEveryProviderAssemblyGolden(t *testing.T) {
 					t.Fatal(err)
 				}
 				_, err = RenderReplyPrompt(replyReference.SourcePrompt, "", replyReference.TemplateValues.History,
-					now, replyReference.SelectedSlots)
+					replyReference.CustomerFacts, now, replyReference.SelectedSlots)
 				requireFixtureError(t, err, expected.ErrorClass)
-			case "assembly_unknown_token_fails":
+			case "assembly_unknown_token_kept_verbatim":
 				input := decodeFormatFixture[providerAssemblyFixtureInput](t, testCase.Input)
 				expected := decodeFormatFixture[struct {
-					ErrorClass string `json:"errorClass"`
+					RenderedPrefix string `json:"renderedPrefix"`
 				}](t, testCase.Expected)
 				now, err := time.Parse(time.RFC3339, replyReference.FrozenNow)
 				if err != nil {
 					t.Fatal(err)
 				}
-				_, err = RenderReplyPrompt(input.SourcePrompt, replyReference.TemplateValues.Resume,
-					replyReference.TemplateValues.History, now, replyReference.SelectedSlots)
-				requireFixtureError(t, err, expected.ErrorClass)
+				content, err := RenderReplyPrompt(input.SourcePrompt, replyReference.TemplateValues.Resume,
+					replyReference.TemplateValues.History, replyReference.CustomerFacts, now, replyReference.SelectedSlots)
+				if err != nil || !strings.HasPrefix(content, expected.RenderedPrefix) ||
+					!strings.Contains(content, inputSectionHeading) {
+					t.Fatalf("陌生占位符必须原样保留并照常追加子块: content=%q err=%v", content, err)
+				}
 			case "canonical_assembly_bytes":
 				input := decodeFormatFixture[providerAssemblyFixtureInput](t, testCase.Input)
 				if input.FixtureRef != "intent_prompt_and_envelope" || input.Runs < 2 {
@@ -781,7 +783,7 @@ func TestFormatFixtureDrivesEveryIntentEnvelopeGolden(t *testing.T) {
 				gotSeq := messageSeqs(envelope.CurrentTurn)
 				wantSeq := expected.EnvelopeCurrentTurnSeq
 				if string(mustFixtureJSON(t, gotSeq)) != string(mustFixtureJSON(t, wantSeq)) ||
-					!strings.Contains(content, "回复="+expected.ReplyTokenValue) {
+					!strings.Contains(content, "【输入参数-回复】\n"+expected.ReplyTokenValue) {
 					t.Fatalf("多消息 intent envelope 漂移: content=%q seq=%v", content, gotSeq)
 				}
 			case "prior_history_20_of_21":
@@ -849,7 +851,7 @@ func TestFormatFixtureDrivesEveryIntentEnvelopeGolden(t *testing.T) {
 				}](t, testCase.Expected)
 				content, _, err := RenderIntentPrompt("招呼={招呼语}\n回复={回复}", input.SentGreeting.Text, nil,
 					[]AdviceMessage{{Seq: 2, Direction: "inbound", Kind: "text", Text: "收到"}})
-				if err != nil || !strings.Contains(content, "招呼="+expected.GreetingTokenValue) ||
+				if err != nil || !strings.Contains(content, "【输入参数-招呼语】\n"+expected.GreetingTokenValue) ||
 					strings.Contains(content, input.DraftGreeting) || strings.Contains(content, input.FailedGreeting) {
 					t.Fatalf("招呼事实选择漂移: content=%q err=%v", content, err)
 				}

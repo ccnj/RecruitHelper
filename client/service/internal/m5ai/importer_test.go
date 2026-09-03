@@ -229,14 +229,17 @@ func TestImportLegacyJobConfigFailsClosedOnConflictsAndIncompleteDocuments(t *te
 			t.Fatal("空 documents 不得创建 revision")
 		}
 	})
-	t.Run("unknown live token", func(t *testing.T) {
+	// 2026-09-03 甲方裁决:白名单外占位符与必填缺引用都不再是导入门——模板问题不得
+	// 让职位停下来。原文原样保留,渲染时陌生占位符原样写回。
+	t.Run("unknown live token and missing required token are imported verbatim", func(t *testing.T) {
 		bundle := syntheticLegacyBundle(t, 1, "职位")
 		docs := bundle["documents"].(map[string]string)
-		docs["多轮沟通"] += "\n{未知字段}"
+		docs["多轮沟通"] = "只剩历史={对话历史}\n{未知字段}"
 		bundle["communication"].(map[string]any)["prompt"] = docs["多轮沟通"]
 		raw, _ := json.Marshal(bundle)
-		if _, err := ImportLegacyJobConfig(raw, time.Now()); err == nil || !strings.Contains(err.Error(), "unknownTemplateToken") {
-			t.Fatalf("未知活 token 未拒绝: %v", err)
+		revisions, err := ImportLegacyJobConfig(raw, time.Now())
+		if err != nil || len(revisions) != 1 || revisions[0].Communication.ReplyPrompt != docs["多轮沟通"] {
+			t.Fatalf("模板缺陷不得拒绝导入且原文须原样保留: revisions=%d err=%v", len(revisions), err)
 		}
 	})
 }

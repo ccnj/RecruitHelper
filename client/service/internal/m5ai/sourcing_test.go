@@ -103,11 +103,26 @@ func TestDeriveSourcingViewMatchesLegacyDefaultsAndClamps(t *testing.T) {
 	}
 }
 
-func TestDeriveSourcingViewRejectsUnboundPromptsAndInvalidFilters(t *testing.T) {
+// 2026-09-03 统一渲染:占位符缺失或重复不再让职位掉出有效集(必填输入恒追加),
+// 只有文档为空、包装字段非法或筛选配置非法才拒绝。
+func TestDeriveSourcingViewToleratesPlaceholderDefects(t *testing.T) {
 	for name, overrides := range map[string]map[string]string{
-		"scoring placeholder missing":   {"打分": "请评分"},
-		"scoring placeholder repeated":  {"打分": "{resume_json}{resume_json}"},
-		"greeting placeholder missing":  {"招呼语": `{"prompt":"{resume_summary_json}"}`},
+		"scoring placeholder missing":  {"打分": "请评分"},
+		"scoring placeholder repeated": {"打分": "{resume_json}{resume_json}"},
+		"greeting placeholder missing": {"招呼语": `{"prompt":"{resume_summary_json}"}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DeriveSourcingView(sourcingPackage(overrides)); err != nil {
+				t.Fatalf("占位符缺陷不得拒绝采集配置: %v", err)
+			}
+		})
+	}
+}
+
+func TestDeriveSourcingViewRejectsEmptyPromptsInvalidWrapperAndFilters(t *testing.T) {
+	for name, overrides := range map[string]map[string]string{
+		"scoring prompt empty":          {"打分": "  "},
+		"greeting prompt empty":         {"招呼语": `{"prompt":"  "}`},
 		"greeting wrapper flag invalid": {"招呼语": `{"prompt":"{career_state}{resume_summary_json}","usePlatformDefault":"false"}`},
 		"filters invalid":               {"职位筛选": `{}`},
 	} {
