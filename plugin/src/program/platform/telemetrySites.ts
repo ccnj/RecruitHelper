@@ -94,7 +94,9 @@ export const telemetrySites: readonly TelemetrySite[] = [bossTelemetrySite]
 const AEGIS_ENDPOINT = /\/actionLog\/fe\/ie\/common\.json/
 
 /** 行为通道里的良性码。 */
-const ROUTINE_BEHAVIOR = new Set(['0', '30004', '30005', '30006'])
+// 470000 是 C 端每次点击都发的基线码(action `web-event-click-geek`),与 B 端 click 的
+// p2=0 同位,不是命中 —— 2026-09-02 三次导出里它每次回首页都在。
+const ROUTINE_BEHAVIOR = new Set(['0', '30004', '30005', '30006', '470000'])
 
 /** 设备指纹上报本身——每次页面加载无条件发,跟检测到什么无关。 */
 const FINGERPRINT = new Set(['800001', '800003', '800009'])
@@ -126,6 +128,7 @@ export interface BossCodeMeaning {
  * `evidence/deobfuscated/sec370.clean.js` 的码表(`co`/`za`),我方未逐条真机核对。
  *
  * `nearUniversal` 那一族是例外:判据语义由我方 2026-08-28 直接读反混淆源码确认。
+ * 首页(C 端)那一族取自我方 2026-09-02 对 geek `index.js` 的解混淆,不在 hiBoss 的范围内。
  */
 const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code' | 'known'>> = {
   '0': { label: '无异常' },
@@ -163,8 +166,53 @@ const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code' | 'known'>> = {
   '800015': { label: 'devtools/CDP 探测命中(不可配置的 stack getter 被读)' },
   '800025': { label: 'navigator 原型链上有非原生实现' },
   '550013': { label: 'navigator 指纹串命中(userAgent,userAgent,sendBeacon)' },
-  '700009': { label: 'isTrusted 检查' },
   '99003': { label: 'Object.keys(window) 与白名单的差集(未知全局名)' },
+
+  // 点击与轨迹的行为层(sec-370 `ou()` 与同一个 click 监听里的几条支线)。
+  // **这一族绕开 `isTrusted`** —— 分支条件是 `!1 !== isTrusted`,只有显式 false 才跳过,
+  // 所以我们经操作系统注入的点击(isTrusted 为真)照样走进来。合成点击真正会踩的就是它们。
+  '700009': { label: 'isTrusted 检查' },
+  '700001': { label: '点击的 pageX 或 pageY 为 0' },
+  '700005': { label: '点击的 clientX 或 clientY <= 0' },
+  '700007': { label: '点击的 pageX 或 pageY 为负' },
+  '700013': { label: '点击目标的 DOM 路径就是 "html"(没落在任何具体元素上)' },
+  '700028': { label: '页面加载后第一次点击:既没有上次落点,轨迹也是空的' },
+  '700030': { label: '700009 二次升级:落在聊天区/牛人列表区(无节流)' },
+  '700031': { label: '700009 二次升级:同上,50ms 节流版' },
+  '700033': { label: '700009 二次升级:落在 menu-list' },
+  '700035': { label: '700009 二次升级:落在 records-center' },
+  '700044': { label: '累计 click 次数比累计 mousedown 多出 50 次以上,且落在聊天区' },
+  // 2026-09-03 本机唯一一次命中(10:35:33,会话条目→消息筛选页签,跨 109x287、零采样、间隔
+  // 3.17 秒),经甲方确认是 Chrome 插件的 CDP 点的,不是鼠标线。同日下午鼠标线的 60 余次
+  // 点击零命中——每次几十到几百个轨迹点,`y=Σ|dx|` 非零,分支直接关掉。
+  '700051': { label: '两次点击间光标横竖都跨过 54px 却零 mousemove,且落在聊天区(受限浏览器)' },
+  '700052': { label: '同 700051,非受限浏览器' },
+  '700053': { label: '跨距过线,且两次点击间的非零位移采样不足 2 个' },
+  '700057': { label: '两次点击间光标横竖都跨过 54px 却零 mousemove(不要求聊天区与零耗时)' },
+  '700061': { label: '匀速直线轨迹(样本>70、macOS UA 被排除);700053 分支里检出 CDP/Playwright 痕迹时也发这个码' },
+  '700071': { label: '连续 10 次 700053,CLAW 未写入' },
+  '700073': { label: '连续 10 次 700053,CLAW 已写入(18789 端口探测的产物)' },
+  '761005': { label: '700051/052/057/053 累计每满 10 次追加一条(p4=累计数)' },
+  '761011': { label: '同 761005,CDPSTATUS 为真' },
+  '700017': { label: '点击时的帧率序列:低于 20 的样本超过 20 个且全部低于 20' },
+  '700019': { label: '点击时的帧率序列:低于 20 的样本超过 20 个且全部低于 10' },
+  '910015': { label: '帧率序列里落在 (20,40) 的样本超过 50 个' },
+
+  // 首页(C 端)是另一套 SDK 与码表:sec-370 不在首页加载,首页走 zpAegis polyfill
+  // 再动态加载 geek 的 index.js。hiBoss 只抓过 /web/chat/recommend,所以它的码表天然没有
+  // 这一族。判据与 B 端同款(2026-09-02 三次导出比对确认),**与我们无关**。
+  '410001': { label: 'C 端:ws 127.0.0.1:18789,1 秒内有反应(同 550237)', nearUniversal: true },
+  '410003': { label: 'C 端:9222 端口,1 秒内有反应(同 550239)', nearUniversal: true },
+  '410005': { label: 'C 端:ws://127.0.0.1:10086/ws,1 秒内有反应(同 550245)', nearUniversal: true },
+  '410007': { label: 'C 端:10086 真正握手成功(同 550247);本机未见' },
+  '410009': { label: 'C 端:fetch 127.0.0.1:8642/v1/health(同 550241);本机未见' },
+  '400001': { label: 'C 端:探某个扩展的 options.js(WAR 探测);本机未见' },
+  '470000': { label: 'C 端每次点击的基线码(p2 恒为 47e4,带坐标/xpath/轨迹),等价于 B 端 click 的 p2=0' },
+  '470001': { label: 'C 端点击:isTrusted 为假;本机未见' },
+  '470003': { label: 'C 端点击:零坐标;本机未见' },
+  '470005': { label: 'C 端点击:负坐标;本机未见' },
+  '470007': { label: 'C 端点击:轨迹是直线;本机未见' },
+  '470009': { label: 'C 端点击:轨迹点太少;本机未见' },
 
   // 聚合补报。
   // 2026-08-28 两次真机 + 一次对照实验。第一次聚合的是
