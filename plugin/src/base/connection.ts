@@ -198,7 +198,12 @@ export class Connection {
     observedAt = Date.now(),
   ): SendOutcome {
     if (!KNOWN_EVENTS.has(name)) return 'dropped'
-    const body = { name, context, observedAt, data } as TypedEventBody
+    // 没有 context 就不放这个键。校验器按「键在不在」判缺失:键在、值 undefined 会被当成
+    // 一个坏 context 校验失败,整帧静默 dropped。handLog 正是不带 context 的那个事件——
+    // 2026-09-03 实证:两个 BOSS 账本的 processed_msgs 零条 event,手侧日志从没到过脑。
+    const body = (context === undefined
+      ? { name, observedAt, data }
+      : { name, context, observedAt, data }) as TypedEventBody
     if (validateKindBody(Kind.Event, body).length > 0) return 'dropped'
     return this.rawSend(Kind.Event, this.session, body)
   }

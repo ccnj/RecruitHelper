@@ -13500,6 +13500,17 @@ test('连接层协商 feature、发送 QoS0 event，并在完整 UTF-8 信封硬
   assert.equal(event.kind, Kind.Event)
   assert.equal(event.body.name, EventName.PageNavigated)
 
+  // handLog 不带 context:契约允许省略,但信封里不能留一个值为 undefined 的 context 键——
+  // 校验器按「键在不在」判缺失,键在、值 undefined 会被当成坏 context 校验失败、整帧静默
+  // dropped。2026-09-03 实证:两个 BOSS 账本的 processed_msgs 零条 event,手侧日志从没到过脑。
+  const beforeHandLog = socket.sent.length
+  assert.equal(connection.emitHandLog({ level: 'warn', code: 'probe', message: 'x', at: Date.now() }), 'sent',
+    '不带 context 的 handLog 必须发得出去')
+  assert.equal(socket.sent.length, beforeHandLog + 1)
+  const handLogFrame = JSON.parse(socket.sent.at(-1))
+  assert.equal(handLogFrame.body.name, EventName.HandLog)
+  assert.equal('context' in handLogFrame.body, false, '省略的 context 不能以 undefined 键的形式出现在信封里')
+
   socket.receive(envelope(Kind.Cmd, 'wire-cmd-1', 's', command(Primitive.DebugPing, { via: 'wire' })))
   await eventually(() => socket.sent.some((raw) => {
     const frame = JSON.parse(raw)
