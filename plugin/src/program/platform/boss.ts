@@ -932,7 +932,7 @@ function domHitTestIndexed(
       parts.push(cursor.tagName.toLowerCase() + (cls ? '.' + cls : ''))
       cursor = cursor.parentElement
     }
-    const r = node.getBoundingClientRect()
+    const r = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : { width: 0, height: 0 }
     return `${parts.join('<')}[${Math.round(r.width)}x${Math.round(r.height)}]「${(node.textContent ?? '').trim().slice(0, 8)}」`
   }
   const target = Array.from(document.querySelectorAll(selector))[index]
@@ -958,7 +958,7 @@ function domHitTestRow(
       parts.push(cursor.tagName.toLowerCase() + (cls ? '.' + cls : ''))
       cursor = cursor.parentElement
     }
-    const r = node.getBoundingClientRect()
+    const r = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : { width: 0, height: 0 }
     return `${parts.join('<')}[${Math.round(r.width)}x${Math.round(r.height)}]「${(node.textContent ?? '').trim().slice(0, 8)}」`
   }
   const target = rows.length === 1 ? rows[0] : undefined
@@ -990,7 +990,7 @@ function domSendGate(
       parts.push(cursor.tagName.toLowerCase() + (cls ? '.' + cls : ''))
       cursor = cursor.parentElement
     }
-    const r = node.getBoundingClientRect()
+    const r = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : { width: 0, height: 0 }
     return `${parts.join('<')}[${Math.round(r.width)}x${Math.round(r.height)}]「${(node.textContent ?? '').trim().slice(0, 8)}」`
   }
   const buttons = Array.from(document.querySelectorAll(buttonSelector))
