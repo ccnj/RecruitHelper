@@ -1330,23 +1330,14 @@ export function projectBossMessage(raw: BossRawMessage): BossProjectedMessage {
       hashInput: 'card\x1fwechatExchange',
     }
   }
-  if (bizType === 14) {
-    return {
-      kind: 'card', direction: raw.direction, text: text || null,
-      cardType: 'resumeAttachment', cardState: 'unknown',
-      hashInput: `card\x1fresumeAttachment\x1f${raw.mid}`,
-    }
-  }
-  if (bizType === 21050004) {
-    return {
-      kind: 'card', direction: raw.direction, text: text || null,
-      cardType: 'other', cardState: 'unknown',
-      hashInput: `card\x1fother\x1f${raw.mid}`,
-    }
-  }
+  // 信息卡一律投成 system,不投 card/other:脑把入站的未知卡片判成 unknownPlatformEvent 直接转人工
+  // (communication/events.go normalizeInboundMessage),而 BOSS 每个会话开头都有一张「沟通的职位」
+  // 职位卡(bizType 21050004,2026-09-03 账本实证)——投成卡片等于每个候选人都进人工。system 行只作
+  // 观测(EventSystemNotice),不作语义证词。bizType 14「对方请求发送附件简历」是候选人的请求对话框,
+  // 与契约 resumeAttachment「候选人已投递简历」语义不同,同样先归 system,等真机看过再定。
   const seenSystem = bizType === 21050060 || bizType === 21050070 || bizType === 21120018 ||
     bizType === 21130010 || bizType === 21050071 || bizType === 21050177 || bizType === 21050220 ||
-    bizType === 21130011
+    bizType === 21130011 || bizType === 21050004 || bizType === 14
   const label = `[系统消息:${bizType ?? raw.type ?? 'unknown'}]`
   return {
     kind: 'system', direction: raw.direction, text: text || label, hashInput: text || label,
