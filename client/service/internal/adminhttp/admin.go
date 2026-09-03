@@ -144,6 +144,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/cards/interview/probe", h(a.probeInterviewEditor))
 	mux.HandleFunc("POST /admin/osprobe", h(a.osProbe))
 	mux.HandleFunc("POST /admin/ostype", h(a.osType))
+	mux.HandleFunc("POST /admin/osscroll", h(a.osScroll))
+	mux.HandleFunc("POST /admin/osclick", h(a.osClick))
 	mux.HandleFunc("POST /admin/notify/probe", h(a.notifyProbeSend))
 	mux.HandleFunc("GET /admin/messages/send", h(a.sendMessageStatus))
 	mux.HandleFunc("GET /admin/ledger", h(a.ledger))
