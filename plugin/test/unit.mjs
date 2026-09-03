@@ -152,6 +152,7 @@ const {
   refuseWhenNotInFront,
   describeFront,
   osProbeContractData,
+  composeClearKeys,
   DEFAULT_MAX_DWELL_MS,
   OSENGINE_SOURCE,
 } = await import(unitBundleURL + `?t=${Date.now()}`)
@@ -8000,11 +8001,9 @@ test('智联会话 click-once 对冲突绑定、人工草稿与账号变化一�
     },
   }
   try {
-    const draft = zhilianTestHooks.mainClickConversationOnce(targetRef, '', fingerprint, Date.now() + 1_000)
-    assert.deepEqual(draft, { status: 'failed', reason: 'composer_nonempty' })
-    assert.equal(clicks, 0)
-
-    composer.value = ''
+    // 草稿非空不再挡切会话(2026-09-03 撤销 composer.empty);下面这次因 sessionId 歧义被拒,
+    // 与草稿无关——草稿留在框里原样不动。
+    composer.value = '人工草稿'
     const conflict = zhilianTestHooks.mainClickConversationOnce(targetRef, '', fingerprint, Date.now() + 1_000)
     assert.deepEqual(conflict, { status: 'failed', reason: 'list_binding_unresolved' })
     assert.equal(clicks, 0, '同一行出现两个 sessionId 必须拒绝')
@@ -8375,8 +8374,9 @@ test('M3 evaluator 只守世界状态、目标 token 与公开 DOM 语义', asyn
     assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
     fixture.button.closest = originalButtonClosest
 
+    // 草稿非空不再拒:preflight 就绪,由写入整段覆盖(2026-09-03 撤销 composer.empty)。
     fixture.composer.value = '人工草稿'
-    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_nonempty' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'ready' })
     fixture.composer.value = ''
     assert.equal(fixture.state.intrinsicClicks, 0)
   } finally {
@@ -8754,11 +8754,9 @@ test('M5-B 卡片 evaluator 以同一冻结输入做 preflight/commit，且最�
     assert.equal(fixture.state.intrinsicClicks, 2, '两条独立命令各只允许一次标准 click')
 
     const clicksBeforeGuards = fixture.state.intrinsicClicks
+    // 草稿非空不再拒(2026-09-03 撤销 composer.empty):preflight 就绪,不产生点击。
     fixture.composer.value = '人工草稿'
-    assert.deepEqual(invoke('wechatInvite', null), {
-      status: 'failed',
-      reason: 'composer_nonempty',
-    })
+    assert.deepEqual(invoke('wechatInvite', null, 'preflight'), { status: 'ready' })
     fixture.composer.value = ''
 
     const originalHref = globalThis.location.href
@@ -16043,6 +16041,23 @@ test('BOSS 消息数组:方向只认 fromId 对我方 userId,绑定核对用同�
   try { assert.equal(bossTestHooks.mainReadBossThread(peer, 0).status, 'identity_missing', '读不到我方身份就判不了方向,不猜') } finally { noUser.restore() }
   const noList = installBossPageFixture({ instances: [app] })
   try { assert.equal(bossTestHooks.mainReadBossThread(peer, 0).status, 'missing') } finally { noList.restore() }
+})
+
+test('清空输入框的按键序列:全选加删除,修饰键按操作系统选,留足修饰键窗口', () => {
+  for (const [os, modifier] of [['darwin', 'MetaLeft'], ['windows', 'ControlLeft'], [undefined, 'ControlLeft']]) {
+    const keys = composeClearKeys(os, () => 0.5)
+    assert.deepEqual(keys.map((k) => k.code), [modifier, 'KeyA', 'Backspace'], `${os} 的修饰键`)
+    const [mod, a, bs] = keys
+    assert.equal(mod.modifier, true)
+    assert.ok(mod.down < a.down && a.down < a.up && a.up < mod.up, '字母键在修饰键按住期间按下并松开')
+    assert.ok(bs.down - mod.up >= 40, '修饰键松手到 Backspace 按下至少 40ms,否则手服务校验不放行')
+    for (const k of keys) assert.ok(k.up > k.down, `${k.code} 松手晚于按下`)
+  }
+  // 抖动极值下窗口仍够
+  for (const jitter of [() => 0, () => 0.999]) {
+    const [mod, a, bs] = composeClearKeys('darwin', jitter)
+    assert.ok(a.up < mod.up && bs.down - mod.up >= 40, '抖动极值下顺序与窗口仍成立')
+  }
 })
 
 test('BOSS 消息数组就绪判据:空数组不算就绪继续等,身份缺失立即收束', () => {

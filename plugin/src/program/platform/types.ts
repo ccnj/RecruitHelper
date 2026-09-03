@@ -314,8 +314,8 @@ export interface PlatformCapabilities {
    * 开发期 OS 打字探针。与 osProbe 同族、同理由:独立原语,不碰任何生产原语。
    *
    * 把一句中文打进输入框然后**停手,不点发送**——所以它没有平台副作用,草稿只是
-   * 页面本地状态。但覆盖用户已经敲进去的字是三条红线之一,所以 composer.empty
-   * 是硬前置,与发送原语用同一个闸,不为调试放宽。
+   * 页面本地状态。框里已有的字先以真实按键全选删除再打(2026-09-03 裁决撤销
+   * composer.empty),与发送原语同一条清空路径。
    */
   osType(input: PrimitiveInput<DebugOsTypeArgs>): Promise<DebugOsTypeData>
 }

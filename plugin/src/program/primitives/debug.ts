@@ -173,8 +173,8 @@ const osProbePrim: Primitive = {
 // debug.osType:开发期 OS 打字探针。与 osProbe 同族——独立原语,不碰任何生产原语。
 //
 // **它打完就停手,不点发送。** 草稿只是页面本地状态,没有任何东西到达候选人。
-// 但 composer.empty 是硬前置(覆盖用户已经敲进去的字是三条红线之一),
-// 那道闸由适配器执行,与发送原语用同一个。
+// 框里已有的字由适配器先以真实按键全选删除再打(2026-09-03 裁决撤销 composer.empty),
+// 与发送原语同一条清空路径。
 const osTypePrim: Primitive = {
   name: PrimName.DebugOsType,
   capability: 'osType',

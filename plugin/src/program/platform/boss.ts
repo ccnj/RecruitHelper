@@ -16,7 +16,7 @@
 // 直接要求。
 import { contentScriptHealthy, runInPage } from './inject'
 import { tabNavigationGeneration } from '../../base/tabGeneration'
-import { isHandServiceDown, osProbeContractData, playTypePlan, runOsProbe, seedFrom } from './osinput'
+import { composeClearKeys, isHandServiceDown, osProbeContractData, playKeys, playTypePlan, readHandOS, runOsProbe, seedFrom } from './osinput'
 import { planType } from '../osengine/plan'
 import type { ClickObservation, ClickPlan } from './osinput'
 import { PlatformError } from './types'
@@ -609,13 +609,8 @@ async function bossOsType(
   if (!before.found) {
     return osTypeData('refusedByGate', started, { detail: '页面上找不到聊天输入框' })
   }
-  // composer.empty 是硬前置。覆盖用户已经敲进去的字是三条红线之一,
-  // 这条闸与发送原语用的是同一个,不为调试放宽。
-  if (before.text !== '') {
-    return osTypeData('refusedByGate', started, {
-      detail: `输入框非空(${before.text.length} 字),不覆盖用户已经敲进去的内容`,
-    })
-  }
+  // 输入框非空不再拒(2026-09-03 甲方裁决撤销 composer.empty):取到焦点、前台就绪后
+  // 走与发送原语同一条清空路径,见下方。
   trace.push(`点前 焦点=${before.focused ? '在' : '不在'} 窗口=${before.windowFocused ? '在前台' : '不在前台'}` +
     ` 矩形=${Math.round(before.w)}x${Math.round(before.h)}`)
 
@@ -650,6 +645,17 @@ async function bossOsType(
     return osTypeData('refusedByGate', started, {
       detail: `${trace.join(' | ')} | 焦点不在输入框,按键会打到别处`,
     })
+  }
+  // 框里有字就先清掉,与发送原语同一条路径(2026-09-03 裁决撤销 composer.empty)。
+  if (beforeKeys.text !== '') {
+    try {
+      await clearBossComposerByKeys(tab.id!, ctx, trace, beforeKeys.text.length)
+    } catch (error) {
+      const outcome = error instanceof PlatformError && error.code === 'CTX_NOT_READY' ? 'handServiceUnavailable' : 'refusedByGate'
+      return osTypeData(outcome, started, {
+        detail: `${trace.join(' | ')} | 清空输入框失败:${describeError(error).slice(0, 300)}`,
+      })
+    }
   }
 
   // 换行先删掉(理由见 stripNewlines)。删了就留痕——发出去的才是事实。
@@ -747,6 +753,8 @@ const LIST_WINDOW_MAX = 32
 const THREAD_WINDOW_MAX = 64
 /** 条件等待上限(AGENTS「平台交互节奏与条件等待」2026-08-26 放宽到 20 秒,是封顶不是必须用满)。 */
 const READY_WAIT_MS = 20_000
+/** 全选删除之后等输入框回读为空的封顶。三次按键之后页面一帧就该空,给 5 秒是宽裕。 */
+const CLEAR_WAIT_MS = 5_000
 const READY_POLL_MS = 250
 /** 发后验证读的时钟容差,与脑侧 §9.4.1 同款 5 秒。 */
 const SEND_CLOCK_TOLERANCE_MS = 5_000
@@ -1987,6 +1995,37 @@ async function sendButtonClickPlan(tabId: number, conversationRef: string, expec
   }
 }
 
+/**
+ * 用真实按键清空输入框:全选加删除,回读为空才算清掉。前提由调用方保证:焦点已在输入框、
+ * Chrome 在前台。2026-09-03 甲方裁决撤销 composer.empty——框里的字无论真人还是机器留的
+ * 都清掉,系统持续运行优先。清不空按 manualOnly 拒:那时框里是什么人一眼能看到。
+ * 日志只记字数,不记内容。
+ */
+async function clearBossComposerByKeys(
+  tabId: number, ctx: PrimitiveContext, trace: string[], beforeLength: number,
+): Promise<void> {
+  let played
+  try {
+    played = await playKeys(composeClearKeys(await readHandOS()))
+  } catch (error) {
+    if (isHandServiceDown(error)) {
+      throw new PlatformError('CTX_NOT_READY', '手服务不可用,清空输入框未开始', 'afterRecovery', 'pageBroken')
+    }
+    throw new PlatformError('ELEMENT_UNRESOLVED',
+      `清空输入框的按键半途失败:${describeError(error).slice(0, 300)}`, 'manualOnly')
+  }
+  const settled = await pollUntil(ctx,
+    () => runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID]),
+    (read) => read.found && read.text === '', CLEAR_WAIT_MS)
+  if (!settled.satisfied) {
+    throw new PlatformError('ELEMENT_UNRESOLVED',
+      `全选删除后输入框仍有 ${settled.value.text.length} 字,未清空`, 'manualOnly')
+  }
+  trace.push(`清掉 ${beforeLength} 字旧内容(${played.keys} 次按键)`)
+  reportHandLog('warn', 'composerDraftCleared',
+    `BOSS 打字前清掉输入框里 ${beforeLength} 字旧内容(2026-09-03 裁决:草稿不再保护)`)
+}
+
 async function sendBossMessage(
   args: ChatSendMessageArgs, guards: ChatSendMessageGuards, ctx: PrimitiveContext, fingerprint: string | undefined,
 ): Promise<ChatSendMessageData> {
@@ -2002,7 +2041,7 @@ async function sendBossMessage(
   // 目标绑定:当前会话必须就是目标。不是就自己把它点到前台——与智联 ensureThreadRoute 同款,
   // 发送原语负责路由(2026-09-03 Mac 真机:轮内没有别的命令打开过目标,这里原来直接拒绝,
   // 一轮白跑、意图白铸)。打开是一次列表行点击,不产生候选人可见副作用;点开后再核对一次,
-  // 仍不是目标就拒,后面的 composer.empty、发送前最后一道闸(选中行=目标)照旧。
+  // 仍不是目标就拒,后面的发送前最后一道闸(选中行=目标)照旧。
   const readCurrentRef = async (): Promise<string> => {
     const current = await runInPage(BOSS_INJECT, tabId, mainReadBossCurrentConversation, [])
     return current.status === 'ready' ? bossConversationRef(current.uid, current.friendSource) : ''
@@ -2013,12 +2052,10 @@ async function sendBossMessage(
       throw new PlatformError('GUARD_FAILED', '点开目标后当前会话仍不是发送目标,已取消', 'manualOnly')
     }
   }
-  // composer.empty 是硬前置:覆盖用户草稿是三条红线之一。
+  // 输入框里已有的字不再挡路(2026-09-03 甲方裁决撤销 composer.empty):取到焦点、
+  // Chrome 在前台之后用真实按键全选删除,回读为空再打。见下方 clearBossComposerByKeys。
   const composerBefore = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
   if (!composerBefore.found) throw new PlatformError('ELEMENT_UNRESOLVED', '页面上找不到聊天输入框', 'manualOnly')
-  if (composerBefore.text !== '') {
-    throw new PlatformError('USER_ACTIVE', `输入框非空(${composerBefore.text.length} 字),不覆盖用户草稿`, 'afterRecovery')
-  }
   // 基线:发前的消息身份集合,发后只认不在基线里的新行。expectedTail 只观测不拦(2026-08-04 裁决)。
   const baseline = await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)
   const baselineMids = new Set(baseline.rows.map((row) => row.mid))
@@ -2046,8 +2083,15 @@ async function sendBossMessage(
   if (!beforeKeys.windowFocused) {
     throw new PlatformError('CTX_NOT_READY', `等了 ${READY_WAIT_MS / 1000} 秒 Chrome 仍不在前台,按键会打到别的应用上`, 'afterRecovery')
   }
-  if (!beforeKeys.focused || beforeKeys.text !== '') {
-    throw new PlatformError('USER_ACTIVE', '打字前输入框状态已变(焦点或内容),已取消', 'afterRecovery')
+  if (!beforeKeys.focused) {
+    throw new PlatformError('USER_ACTIVE', '打字前焦点已离开输入框,已取消', 'afterRecovery')
+  }
+  if (beforeKeys.text !== '') {
+    await clearBossComposerByKeys(tabId, ctx, trace, beforeKeys.text.length)
+    const cleared = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
+    if (!cleared.focused || !cleared.windowFocused) {
+      throw new PlatformError('USER_ACTIVE', '清空输入框后焦点或前台状态已变,已取消', 'afterRecovery')
+    }
   }
   const { text: typedText, removed } = newlinesToSpaces(args.text)
   if (removed > 0) trace.push(`${removed} 个换行符换成空格`)
