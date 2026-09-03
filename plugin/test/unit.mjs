@@ -155,6 +155,9 @@ const {
   describeFront,
   osProbeContractData,
   composeClearKeys,
+  composeScrollBurst,
+  composeScrollPause,
+  SCROLL_BURST,
   DEFAULT_MAX_DWELL_MS,
   OSENGINE_SOURCE,
 } = await import(unitBundleURL + `?t=${Date.now()}`)
@@ -16126,6 +16129,38 @@ test('清空输入框的按键序列:全选加删除,修饰键按操作系统选
   for (const jitter of [() => 0, () => 0.999]) {
     const [mod, a, bs] = composeClearKeys('darwin', jitter)
     assert.ok(a.up < mod.up && bs.down - mod.up >= 40, '抖动极值下顺序与窗口仍成立')
+  }
+})
+
+test('滚轮排版器:一簇 3~8 格同向、首格在 0、间隔在量程内且逐格放慢,同种子可复现', () => {
+  for (let seed = 1; seed <= 300; seed++) {
+    const direction = seed % 2 ? 1 : -1
+    const burst = composeScrollBurst(direction, mulberry32(seed))
+    assert.ok(burst.length >= SCROLL_BURST.minTicks && burst.length <= SCROLL_BURST.maxTicks, `种子 ${seed} 簇长 ${burst.length}`)
+    assert.equal(burst[0].at, 0)
+    for (const t of burst) assert.equal(t.dy, direction, '一簇只滚一个方向,否则手服务校验不放行')
+    for (let i = 1; i < burst.length; i++) {
+      const gap = burst[i].at - burst[i - 1].at
+      // 减速系数最多把量程上限抬到 1 + 0.08×6 倍
+      assert.ok(gap >= SCROLL_BURST.gapMinMs && gap <= SCROLL_BURST.gapMaxMs * (1 + SCROLL_BURST.decelPerTick * 6) + 1,
+        `种子 ${seed} 第 ${i} 格间隔 ${gap}ms 出了量程`)
+    }
+    assert.ok(burst[burst.length - 1].at < 20_000, '整簇跨度远小于手服务 20s 封顶')
+  }
+  // 中位随机数下逐格放慢:后一格间隔严格大于前一格
+  const flat = composeScrollBurst(1, () => 0.5)
+  for (let i = 2; i < flat.length; i++) {
+    assert.ok(flat[i].at - flat[i - 1].at > flat[i - 1].at - flat[i - 2].at, '簇内应逐格放慢')
+  }
+  // 预算比最小簇还小时按预算给,最后一簇短一点、不为凑数多滚
+  assert.equal(composeScrollBurst(1, mulberry32(3), 2).length, 2)
+  assert.equal(composeScrollBurst(1, mulberry32(3), 1).length, 1)
+  assert.ok(composeScrollBurst(1, mulberry32(3), 100).length <= SCROLL_BURST.maxTicks, '预算再大也不超一簇上限')
+  assert.deepEqual(composeScrollBurst(-1, mulberry32(9)), composeScrollBurst(-1, mulberry32(9)), '同种子同一簇')
+  // 簇间停顿
+  for (let seed = 1; seed <= 100; seed++) {
+    const pause = composeScrollPause(mulberry32(seed))
+    assert.ok(pause >= SCROLL_BURST.pauseMinMs && pause <= SCROLL_BURST.pauseMaxMs, `停顿 ${pause}ms`)
   }
 })
 

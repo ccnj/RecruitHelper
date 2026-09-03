@@ -22,6 +22,7 @@ import { runInPage } from './inject'
 import { PlatformError } from './types'
 import type { DebugOsProbeData, OsProbeTarget } from '../../base/protocol'
 import type { InjectOptions } from './inject'
+import type { ScrollTick } from './osscroll'
 import type { PrimitiveContext } from '../registry'
 
 /** 冷启动粗估必然打偏,所以要允许重来几趟。上游实测两趟就追上。 */
@@ -1019,6 +1020,25 @@ export function composeClearKeys(os: string | undefined, jitter: () => number = 
 /** 播一段裸按键(不经上屏机制)。回包与 /type 同形。 */
 export async function playKeys(keys: KeyPress[]): Promise<TypePlayResult> {
   return await callHand<TypePlayResult>('/keys', { keys })
+}
+
+/** 一簇滚轮的回执,与手服务 ScrollResult 同形。**不含页面滚到了哪**——那要回读 DOM,是调用方的事。 */
+export interface ScrollPlayResult {
+  ticks: number
+  notches: number
+  lagMeanUs: number
+  lagMaxUs: number
+  status: string
+}
+
+/**
+ * 把一簇滚轮交给手服务播出去。**光标必须已经落在目标容器上**(先 runOsProbe 到 landed):
+ * 滚轮投给光标下面那个窗口,手服务核对光标仍在最后注入的落点,不在就拒——
+ * 拒是 409,`callHand` 不抛、原因在 `status` 里,调用方按 `status !== 'ok'` 收场,不重试。
+ * 排错(500)与手服务不可达照旧抛。
+ */
+export async function playScroll(ticks: ScrollTick[]): Promise<ScrollPlayResult> {
+  return await callHand<ScrollPlayResult>('/scroll', { ticks })
 }
 
 /** 手服务所在的操作系统(runtime.GOOS);旧脑没有该字段时为 undefined。 */
