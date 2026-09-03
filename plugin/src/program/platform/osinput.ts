@@ -78,6 +78,15 @@ const PACE_MIN_MS = 1000
 const PACE_JITTER_MS = 800
 
 /**
+ * 等 Chrome 切到最前的上限。点「开始」的那一刻客户端窗口必然在最前面(刚点完按钮),第一条
+ * OS 点击几秒后就到,人来不及切窗口(2026-09-03 Mac 第二跑)。所以不在最前面时不是立刻拒,
+ * 而是条件等待:每 500ms 复查一次,切过来就继续;封顶 20 秒(AGENTS「条件等待」上限),
+ * 且不超过命令自己的 deadline。等不到才拒,拒的原因照旧带前台状态。
+ */
+export const FRONT_WAIT_MS = 20_000
+const FRONT_POLL_MS = 500
+
+/**
  * 落点读取前的稳定等待。
  *
  * **不能在 /play 一返回就读。** 手服务返回的时刻只表示"最后一帧已经发出去了",
@@ -455,12 +464,37 @@ export async function runOsProbe(
   }
   // Chrome 不在最前面就一步不动(2026-09-03 Mac 首跑:客户端窗口盖着 Chrome,一整轮每次
   // 都是飞一圈再报"没观测到 mousemove")。有正面证词才拒;读不到按未知放行。
-  const front = await readFrontFacts(tabId, view)
-  const frontRefusal = refuseWhenNotInFront(front)
+  let front = await readFrontFacts(tabId, view)
+  let frontRefusal = refuseWhenNotInFront(front)
   if (frontRefusal !== null) {
-    try { await runInPage(observerWorld(inject), tabId, pageReadLandingAndDetach, [LANDING_KEY]) } catch { /* 页面可能已导航走 */ }
-    return { outcome: 'refusedByGate', attempts: 0, calibStatus, unreachableFrames: 0,
-      planMs: 0, elapsedMs: Date.now() - started, lagMaxUs: 0, detail: frontRefusal }
+    // 条件等待人把 Chrome 切过来。等的时候光标一动不动;每次复查只读扩展接口,不碰页面。
+    const waitUntil = Math.min(Date.now() + FRONT_WAIT_MS, Number.isFinite(ctx.deadlineMs) ? ctx.deadlineMs : Infinity)
+    let waited = 0
+    while (frontRefusal !== null && Date.now() < waitUntil) {
+      ctx.checkpoint()
+      if (waited === 0) ctx.progress('等待 Chrome 切到最前')
+      await new Promise((r) => setTimeout(r, FRONT_POLL_MS))
+      waited += 1
+      front = await readFrontFacts(tabId, view)
+      frontRefusal = refuseWhenNotInFront(front)
+    }
+    if (frontRefusal === null) {
+      // 切过来了:页面那半的事实(可见性、文档焦点)重读一次,观测器顺带重装(幂等)。
+      try {
+        view = await runInPage(observerWorld(inject), tabId, pageInstallObserverAndReadViewport, [LANDING_KEY])
+        front = await readFrontFacts(tabId, view)
+        frontRefusal = refuseWhenNotInFront(front)
+      } catch (error) {
+        throw error instanceof PlatformError ? error : new PlatformError(
+          'CTX_NOT_READY', `读视口失败:${String(error).slice(0, 120)}`, 'afterRecovery', 'contentScriptDead')
+      }
+    }
+    if (frontRefusal !== null) {
+      try { await runInPage(observerWorld(inject), tabId, pageReadLandingAndDetach, [LANDING_KEY]) } catch { /* 页面可能已导航走 */ }
+      return { outcome: 'refusedByGate', attempts: 0, calibStatus, unreachableFrames: 0,
+        planMs: 0, elapsedMs: Date.now() - started, lagMaxUs: 0,
+        detail: `等了 ${Math.round(waited * FRONT_POLL_MS / 1000)} 秒仍然:${frontRefusal}` }
+    }
   }
   const frontSummary = describeFront(front)
 
