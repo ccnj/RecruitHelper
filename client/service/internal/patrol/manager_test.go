@@ -1472,6 +1472,52 @@ func TestUserActiveYieldsRoundWithoutQuietWindow(t *testing.T) {
 	}
 }
 
+// 2026-09-03 出口审查 O4：手用 ELEMENT_UNRESOLVED/retryable=no 声明"翻不了窗"
+// （BOSS 尚无滚轮注入）时，不是这一轮坏了，按部分遍历收束；前一窗已处理的会话照常保留。
+func TestListNextUnsupportedEndsAsPartialTraversal(t *testing.T) {
+	h := newHarness(t)
+	conversationKey := seedTracked(
+		t,
+		h,
+		"conversation-next-unsupported",
+		"peer-next-unsupported",
+		[]store.MessageDraft{draftText("old")},
+	)
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimChatReadList {
+			var args protocol.ChatReadListArgs
+			if err := json.Unmarshal(request.Args, &args); err != nil {
+				t.Fatalf("readList args: %v", err)
+			}
+			if args.Move == protocol.ListWindowMoveNext {
+				return nil, &RunError{
+					Code: protocol.ErrCodeElementUnresolved, Retryable: protocol.RetryableNo,
+					SideEffect: protocol.SideEffectNone, Cause: errors.New("BOSS 尚未实现列表滚动"),
+				}
+			}
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{
+					summary(conversationKey.ConversationRef, "peer-next-unsupported", "old", 0),
+				},
+				Complete: false,
+			}, nil
+		}
+		return defaultHandler(request)
+	}
+
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("翻窗不可用只是部分遍历，不得让轮失败: result=%+v err=%v", result, err)
+	}
+	account, _ := h.db.AccountByKey(h.key)
+	if account.PausedReason != "" || account.StoppedAt != nil {
+		t.Fatalf("翻窗不可用不得暂停账号: %+v", account)
+	}
+	if got := h.runner.count(protocol.PrimChatReadList); got != 2 {
+		t.Fatalf("应有一次 reset 与一次 next 读列表，实际 %d 次", got)
+	}
+}
+
 func TestProbeMismatchPausesBeforeAnyAccountDataRead(t *testing.T) {
 	h := newHarness(t)
 	h.hands.set(HandState{Online: true, Session: "session-other", BootID: "boot-other"})

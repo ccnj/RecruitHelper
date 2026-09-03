@@ -271,6 +271,16 @@ func (a *roundActor) execute(ctx context.Context) error {
 				a.listTraversalIncomplete = true
 				return nil
 			}
+			if move == protocol.ListWindowMoveNext && isRunError(err, protocol.ErrCodeElementUnresolved) {
+				if typed := runError(err); typed != nil && typed.Retryable == protocol.RetryableNo {
+					// 手声明"这个平台翻不了窗"（BOSS 尚无滚轮注入，2026-09-03 出口审查 O4）：
+					// 不是这一轮坏了，是窗口到了手能操作的物理边界。已处理的窗口照常
+					// 保留，按部分遍历收束；下一轮重新 reset。伪造 complete=true 是手侧
+					// 不被允许的（规格 §12.6），所以收束放在脑这边。
+					a.listTraversalIncomplete = true
+					return nil
+				}
+			}
 			a.handleCommandFailure(err)
 			return err
 		}

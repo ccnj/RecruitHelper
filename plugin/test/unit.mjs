@@ -78,6 +78,14 @@ const {
   allSites,
   bossAdapter,
   bossSite,
+  bossTestHooks,
+  identityCacheUsable,
+  resetBossIdentityCacheForTest,
+  tabNavigationGeneration,
+  noteMainFrameNavigation,
+  forgetTab,
+  resetTabGenerationsForTest,
+  registerTabGenerationTracking,
   requireCapability,
   resetSitesForTest,
   setSitesForTest,
@@ -15729,7 +15737,7 @@ test('全文档观察器只给能读登录态的站点装:BOSS 上一个都不�
   }
 })
 
-test('BOSS 适配器:MAIN world + os 通道,只声明三条探针能力,其余显式拒绝', () => {
+test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话原语,其余显式拒绝', () => {
   assert.equal(bossAdapter.id, 'boss')
   assert.equal(bossAdapter.hostMatch, bossSite.match, '适配器与站点表必须是同一个"BOSS 是谁"')
   // MAIN 是 2026-08-28 取数通道裁决的直接后果:isolated world 拿不到 user$ 与消息数组。
@@ -15742,21 +15750,21 @@ test('BOSS 适配器:MAIN world + os 通道,只声明三条探针能力,其余�
   const declared = Object.keys(bossAdapter)
     .filter((key) => typeof bossAdapter[key] === 'function')
     .sort()
-  // **这张名单只在过了出口之后才准变长。** 原来是两条(probePlatform、osProbe),
-  // 依据是「坐标被证明对之前不实现任何真业务原语」。2026-08-30 四趟真机全绿之后
-  // 坐标这条前提成立了,osType 是键盘线出口里明列的一条,不是顺手加的。
-  //
-  // 三条全是 `debug.*` 探针:**一条真业务原语都还没有**。BOSS 上的 sendMessage、
-  // readList 之类要等键盘线在 Windows 上跑通之后另立——那才是"顺手加"该拦的东西。
-  assert.deepEqual(declared, ['osProbe', 'osType', 'probePlatform'],
-    '适配器能力变长了。这张名单每加一条都要先过出口:' +
-    'BOSS 上至今没有任何真业务原语,只有 debug.* 探针')
+  // **这张名单只在过了出口之后才准变长。** 三条探针(2026-08-28/08-30/09-01 各自出口)之后,
+  // 2026-09-03 甲方批准场景一出口,加了七条会话原语——恰好是「仅回复一轮闭环」要的那七条。
+  // 换微信、邀面卡、采集、招呼一条都没有:场景二、三与第二刀各自另过出口。
+  assert.deepEqual(declared, [
+    'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
+    'osProbe', 'osType', 'probePlatform',
+    'readList', 'readThread', 'readUnreadTotal', 'sendMessage',
+  ], '适配器能力变了。这张名单每加一条都要先过出口')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
-  assert.throws(() => requireCapability(bossAdapter, 'sendMessage'), /未实现原语能力/)
+  assert.throws(() => requireCapability(bossAdapter, 'sendGreeting'), /未实现原语能力/)
+  assert.throws(() => requireCapability(bossAdapter, 'sendWechatInvite'), /未实现原语能力/)
 })
 
-test('hello 平台能力表:智联表等于并集,BOSS 表恰为平台无关四条加探针三条', async () => {
+test('hello 平台能力表:智联表等于并集,BOSS 表恰为平台无关四条加探针三条加场景一七条', async () => {
   // 原语的 capability 字段是与 handler 内 callPlatform 字面量并行的第二份声明;
   // 这两条断言把它钉住:漏填一条,BOSS 表会多出一条(第二条红);填错名字,
   // 智联表会少一条(第一条红)。
@@ -15779,6 +15787,8 @@ test('hello 平台能力表:智联表等于并集,BOSS 表恰为平台无关四�
     assert.deepEqual(tables[0].caps, union.filter((c) => c !== 'debug.osType@1'),
       '智联表应等于并集减 debug.osType@1')
     assert.deepEqual(tables[1].caps, [
+      'chat.captureThreadScreenshot@1', 'chat.identifyCurrentConversation@1', 'chat.openConversation@1',
+      'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.sendMessage@1',
       'debug.osProbe@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
       'debug.slowEcho@1', 'debug.switchWindow@1', 'probe.platform@1',
     ], 'BOSS 表变了:要么适配器长了能力(先过出口),要么某条原语漏填 capability')
@@ -15786,10 +15796,323 @@ test('hello 平台能力表:智联表等于并集,BOSS 表恰为平台无关四�
       assert.ok(union.includes(capability), `BOSS 表 ⊆ 并集:${capability}`)
     }
     assert.equal(hasCapability(bossAdapter, 'osType'), true)
-    assert.equal(hasCapability(bossAdapter, 'sendMessage'), false)
+    assert.equal(hasCapability(bossAdapter, 'sendMessage'), true)
+    assert.equal(hasCapability(bossAdapter, 'sendGreeting'), false,
+      '招呼是第二刀,场景一的 hello 表里不该有它——脑按表不派,手也不该声明')
   })
 })
 
+
+
+// ---------------------------------------------------------------------------
+// 场景一(2026-09-03):七条会话原语的纯函数与页面函数。页面函数用假 document 跑,
+// 判据全是形状(uid/friendSource/newMsgCount/encryptUid、conversation$、list$+isToTop),
+// 不认组件名;夹具里没有任何真实候选人。
+
+test('标签页导航代数:只认主框架 commit,关闭即清,SPA 内路由推进不算', () => {
+  resetTabGenerationsForTest()
+  const listeners = {}
+  const saved = globalThis.chrome
+  globalThis.chrome = {
+    webNavigation: { onCommitted: { addListener(fn) { listeners.committed = fn } } },
+    tabs: { onRemoved: { addListener(fn) { listeners.removed = fn } } },
+  }
+  try {
+    registerTabGenerationTracking()
+    assert.equal(tabNavigationGeneration(7), 0, '没见过的标签页是 0')
+    listeners.committed({ tabId: 7, frameId: 0, url: 'https://www.zhipin.com/web/chat/index' })
+    assert.equal(tabNavigationGeneration(7), 1)
+    listeners.committed({ tabId: 7, frameId: 3, url: 'https://ad.example/iframe' })
+    assert.equal(tabNavigationGeneration(7), 1, '子框架导航与"页面换了"无关')
+    listeners.committed({ tabId: 7, frameId: 0, url: 'https://www.zhipin.com/web/user/?ka=bticket' })
+    assert.equal(tabNavigationGeneration(7), 2, '登出跳登录页是主框架导航,代数必须变')
+    assert.equal(tabNavigationGeneration(8), 0, '按标签页各算各的')
+    listeners.removed(7)
+    assert.equal(tabNavigationGeneration(7), 0)
+    noteMainFrameNavigation(9); forgetTab(9)
+    assert.equal(tabNavigationGeneration(9), 0)
+  } finally {
+    globalThis.chrome = saved
+    resetTabGenerationsForTest()
+  }
+})
+
+test('身份复核缓存:指纹同、代数同、没超期三者齐才能顶掉一次 MAIN 读', () => {
+  const now = 1_700_000_000_000
+  const cached = { fingerprint: 'f'.repeat(64), generation: 3, verifiedAt: now - 60_000 }
+  assert.equal(identityCacheUsable(cached, 'f'.repeat(64), 3, now), true)
+  assert.equal(identityCacheUsable(undefined, 'f'.repeat(64), 3, now), false, '没缓存就读')
+  assert.equal(identityCacheUsable(cached, 'e'.repeat(64), 3, now), false, '脑要求的指纹变了就读')
+  assert.equal(identityCacheUsable(cached, 'f'.repeat(64), 4, now), false, '标签页导航过就读——换账号必经导航')
+  assert.equal(identityCacheUsable(cached, 'f'.repeat(64), 3, now + 30 * 60_000), false, '30 分钟到期就读')
+  assert.equal(identityCacheUsable(cached, 'f'.repeat(64), 3, now - 120_000), false, '时钟倒退按失效处理')
+  resetBossIdentityCacheForTest()
+})
+
+test('BOSS 会话引用:uid-friendSource,两层都有;不是这个形状的一律不认', () => {
+  const { bossConversationRef, parseBossConversationRef } = bossTestHooks
+  assert.equal(bossConversationRef(650166511, 0), '650166511-0')
+  assert.deepEqual(parseBossConversationRef('650166511-0'), { uid: 650166511, friendSource: 0 })
+  for (const bad of ['', '0-0', 'abc', '650166511', '650166511-', '-1', '650166511-0-1', 'session-42']) {
+    assert.equal(parseBossConversationRef(bad), null, `不该认:${bad}`)
+  }
+})
+
+test('BOSS 侧栏角标文本:空是 0、数字照读、99+ 向多算', () => {
+  const parse = bossTestHooks.parseBossUnreadBadgeText
+  assert.equal(parse(''), 0)
+  assert.equal(parse(' 24 '), 24)
+  assert.equal(parse('99+'), 99)
+  assert.equal(parse('新'), 1, '认不出的非空文本按 1:不能把满格未读读成零')
+})
+
+test('BOSS 消息投影:只实现真机已见的 bizType,未见值归并 system 并带出原始类型', async () => {
+  const { projectBossMessage } = bossTestHooks
+  const base = { mid: '4123', direction: 'in', type: 'text', bizType: 101, bodyType: 1, status: 1, time: 1788402198000, text: ' 你好   世界 ', interviewCondition: null, actionAid: null }
+  const text = projectBossMessage(base)
+  assert.deepEqual([text.kind, text.direction, text.text, text.hashInput], ['text', 'in', '你好 世界', '你好 世界'])
+  const noBiz = projectBossMessage({ ...base, bizType: null })
+  assert.equal(noBiz.kind, 'text', '早期普通文本没有 bizType 字段(平台事实 §二)')
+  const wx = projectBossMessage({ ...base, bizType: 12, direction: 'in', text: '某人的微信号:abc' })
+  assert.equal(wx.kind, 'text')
+  const recalled = projectBossMessage({ ...base, status: 3, text: '' })
+  assert.deepEqual([recalled.kind, recalled.text], ['system', '[消息已撤回]'])
+  for (const [bizType, condition, state, direction] of [[21130009, 1, 'pending', 'out'], [21130008, 3, 'accepted', 'in'], [21130006, 5, 'expired', 'out'], [21130009, 4, 'unknown', 'out']]) {
+    const card = projectBossMessage({ ...base, bizType, bodyType: 14, direction, text: '发送了面试邀请', interviewCondition: condition })
+    assert.deepEqual([card.kind, card.cardType, card.cardState, card.direction], ['card', 'interviewInvite', state, direction], `bizType=${bizType}`)
+    assert.equal(card.hashInput, 'card\x1finterviewInvite\x1f4123', '邀面卡暂按消息身份投影,1.2 落地后改常量')
+  }
+  const wxReq = projectBossMessage({ ...base, bizType: 21050024, bodyType: 4, type: 'action', direction: 'out', text: '请求交换微信已发送', actionAid: 32 })
+  assert.deepEqual([wxReq.kind, wxReq.cardType, wxReq.cardState, wxReq.hashInput], ['card', 'wechatExchange', 'pending', 'card\x1fwechatExchange'])
+  const resumeReq = projectBossMessage({ ...base, bizType: 14, bodyType: 7, text: '对方请求发送附件简历' })
+  assert.deepEqual([resumeReq.kind, resumeReq.cardType, resumeReq.cardState], ['card', 'resumeAttachment', 'unknown'])
+  const tip = projectBossMessage({ ...base, bizType: 21050060, bodyType: 12, direction: 'system', text: '平台提示' })
+  assert.deepEqual([tip.kind, tip.unrecognized], ['system', undefined])
+  const empty = projectBossMessage({ ...base, bizType: 21130010, bodyType: 4, direction: 'system', text: '' })
+  assert.deepEqual([empty.kind, empty.text], ['system', '[系统消息:21130010]'])
+  const unseen = projectBossMessage({ ...base, bizType: 99999999, bodyType: 1, text: '像文本但类型没见过' })
+  assert.equal(unseen.kind, 'system', '枚举面事实门:未见值不得实现成文本')
+  assert.match(unseen.unrecognized, /bizType=99999999/)
+})
+
+test('BOSS 锚尾匹配:唯一命中才给起点,零命中与重复命中都不裁', () => {
+  const { matchAnchorTail } = bossTestHooks
+  const h = (c) => c.repeat(64)
+  const messages = [
+    { direction: 'in', contentHash: h('a') }, { direction: 'out', contentHash: h('b') },
+    { direction: 'in', contentHash: h('c') }, { direction: 'out', contentHash: h('b') },
+    { direction: 'in', contentHash: h('c') },
+  ]
+  assert.deepEqual(matchAnchorTail(messages, []), { count: 0, start: null })
+  assert.deepEqual(matchAnchorTail(messages, [{ direction: 'in', contentHash: h('a') }, { direction: 'out', contentHash: h('b') }]), { count: 1, start: 0 })
+  assert.deepEqual(matchAnchorTail(messages, [{ direction: 'out', contentHash: h('b') }, { direction: 'in', contentHash: h('c') }]), { count: 2, start: null }, '重复命中必须保留完整候选窗口')
+  assert.deepEqual(matchAnchorTail(messages, [{ direction: 'out', contentHash: h('z') }]), { count: 0, start: null })
+  assert.deepEqual(matchAnchorTail(messages.slice(0, 1), [{ direction: 'in', contentHash: h('a') }, { direction: 'out', contentHash: h('b') }]), { count: 0, start: null }, '锚比窗口还长不算命中')
+})
+
+test('BOSS 列表行摘要:引用与候选人引用取自内存 id,职位名空则省略,秒级 lastTS 转毫秒', () => {
+  const { summarizeBossListRow } = bossTestHooks
+  const row = { uid: 650166511, friendSource: 0, name: ' 宋先生 ', jobName: '销售经理', newMsgCount: 1, lastTS: 1788402198000, lastText: '您好,对贵公司很感兴趣', lastIsSelf: false }
+  const summary = summarizeBossListRow(row)
+  assert.equal(summary.conversationRef, '650166511-0')
+  assert.equal(summary.peer.platformUserRef, '650166511')
+  assert.equal(summary.peer.displayName, '宋先生')
+  assert.equal(summary.positionTitle, '销售经理')
+  assert.equal(summary.unreadCount, 1)
+  assert.equal(summary.lastActivityTs, 1788402198000)
+  assert.deepEqual(summary.lastMessage, { direction: 'in', kind: 'text', textPreview: '您好,对贵公司很感兴趣' })
+  const bare = summarizeBossListRow({ ...row, jobName: ' ', lastTS: 1788402198, lastText: '', lastIsSelf: true, newMsgCount: -1 })
+  assert.equal('positionTitle' in bare, false, '缺失必须省略,不得猜')
+  assert.equal(bare.lastActivityTs, 1788402198000)
+  assert.deepEqual(bare.lastMessage, { direction: 'out', kind: 'system', textPreview: '' })
+  assert.equal(bare.unreadCount, 0)
+})
+
+/** 假页面:querySelectorAll 按选择器分发;带 __vue__ 的元素模拟 Vue 实例。 */
+function installBossPageFixture({ instances = [], rows = [], viewport = { w: 1470, h: 746 } } = {}) {
+  const saved = { document: globalThis.document, window: globalThis.window }
+  const vueElements = instances.map((instance) => ({ __vue__: instance }))
+  const rowElements = rows.map((row) => ({
+    getAttribute(name) { return name === 'data-id' ? row.dataId : null },
+    classList: { contains(cls) { return cls === 'selected' && row.selected === true } },
+    querySelector(selector) {
+      return selector === '.badge-count' && row.bubble
+        ? { textContent: row.bubble, getClientRects() { return [{}] } }
+        : null
+    },
+    getBoundingClientRect() { return row.rect ?? { x: 229, y: 352, width: 339, height: 74, left: 229, top: 352, right: 568, bottom: 426 } },
+  }))
+  globalThis.window = { innerWidth: viewport.w, innerHeight: viewport.h }
+  globalThis.document = {
+    querySelectorAll(selector) { return selector === '*' ? vueElements : selector === '.geek-item' ? rowElements : [] },
+  }
+  return { restore() { globalThis.document = saved.document; globalThis.window = saved.window } }
+}
+
+const listRow = (uid, friendSource, extra = {}) => ({
+  uid, friendSource, encryptUid: `enc-${uid}`, uniqueId: `u${uid}`, newMsgCount: 0, name: `候选${uid}`,
+  jobName: '销售经理', lastTS: 1788402198000, lastText: '你好', lastIsSelf: false, ...extra,
+})
+
+test('BOSS 列表数据层:按形状找数组,取与 DOM 行顺序对齐的那份、最长者胜;未读数与总数如实', () => {
+  const rows = [listRow(11, 0, { newMsgCount: 2 }), listRow(12, 0), listRow(13, 1, { newMsgCount: 1 }), listRow(14, 0)]
+  const chat = { 'list$': rows, 'allList$': [listRow(99, 0), ...rows] }
+  const virtual = { $props: { dataSources: rows, other: 1 } }
+  const decoy = { 'list$': [{ label: '全部', labelId: 1 }] }
+  const page = installBossPageFixture({
+    instances: [chat, virtual, decoy],
+    rows: rows.slice(0, 3).map((r) => ({ dataId: `${r.uid}-${r.friendSource}` })),
+  })
+  try {
+    const read = bossTestHooks.mainReadBossListWindow(32, '.geek-item')
+    assert.equal(read.status, 'ready')
+    assert.equal(read.total, 4, 'DOM 只画 3 行,数据层 4 条才是窗口')
+    assert.equal(read.rows.length, 4)
+    assert.deepEqual(read.rows.map((r) => [r.uid, r.friendSource, r.newMsgCount]), [[11, 0, 2], [12, 0, 0], [13, 1, 1], [14, 0, 0]])
+    assert.equal(read.rows[0].name, '候选11')
+    assert.equal(bossTestHooks.mainReadBossListWindow(2, '.geek-item').rows.length, 2, 'limit 只裁窗口不裁 total')
+  } finally { page.restore() }
+
+  const misaligned = installBossPageFixture({ instances: [chat], rows: [{ dataId: '12-0' }, { dataId: '11-0' }] })
+  try {
+    const read = bossTestHooks.mainReadBossListWindow(32, '.geek-item')
+    assert.equal(read.status, 'missing', '没有一份数组与 DOM 顺序对齐就是读不到,不猜一份')
+  } finally { misaligned.restore() }
+
+  const empty = installBossPageFixture({ instances: [{ 'list$': [] }], rows: [] })
+  try {
+    assert.equal(bossTestHooks.mainReadBossListWindow(32, '.geek-item').status, 'empty')
+  } finally { empty.restore() }
+
+  const nothing = installBossPageFixture({ instances: [decoy], rows: [] })
+  try {
+    assert.equal(bossTestHooks.mainReadBossListWindow(32, '.geek-item').status, 'missing', '连空数组都没有不算可信空态')
+  } finally { nothing.restore() }
+})
+
+test('BOSS 当前会话:没打开时零持有者→none,十几个组件持同一对象→ready,两个不同对象→ambiguous', () => {
+  const conversation = { uid: 650166511, friendSource: 0, encryptUid: 'enc', uniqueId: 'u', name: '宋先生', weixin: null }
+  const none = installBossPageFixture({ instances: [{ 'list$': [] }, { other: 1 }] })
+  try { assert.deepEqual(bossTestHooks.mainReadBossCurrentConversation(), { status: 'none' }) } finally { none.restore() }
+  const many = installBossPageFixture({ instances: [{ 'conversation$': conversation }, { 'conversation$': conversation }, { 'conversation$': { ...conversation } }] })
+  try {
+    assert.deepEqual(bossTestHooks.mainReadBossCurrentConversation(), { status: 'ready', uid: 650166511, friendSource: 0, name: '宋先生' })
+  } finally { many.restore() }
+  const two = installBossPageFixture({ instances: [{ 'conversation$': conversation }, { 'conversation$': { ...conversation, uid: 7 } }] })
+  try { assert.deepEqual(bossTestHooks.mainReadBossCurrentConversation(), { status: 'ambiguous', count: 2 }) } finally { two.restore() }
+  const proto = Object.create({ 'conversation$': conversation })
+  const inherited = installBossPageFixture({ instances: [proto] })
+  try { assert.deepEqual(bossTestHooks.mainReadBossCurrentConversation(), { status: 'none' }, '只认自有属性') } finally { inherited.restore() }
+})
+
+test('BOSS 消息数组:方向只认 fromId 对我方 userId,绑定核对用同一次注入里的 conversation$,userId 不出页面', () => {
+  const me = 765357657
+  const peer = 650166511
+  const conversation = { uid: peer, friendSource: 0, name: '宋先生' }
+  const list = [
+    { mid: 4001, body: { type: 1, text: '您好' }, fromId: peer, isSelf: false, type: 'text', bizType: 101, status: 2, time: 1788402100000 },
+    { mid: 4002, body: { type: 1, text: '你好,方便聊聊吗' }, fromId: me, isSelf: true, type: 'text', bizType: 101, status: 1, time: 1788402200000 },
+    { mid: 4003, body: { type: 4, text: '' }, fromId: 0, isSelf: false, type: 'action', bizType: 21130010, status: 1, time: 1788402300000 },
+    { mid: 4004, body: { type: 14, text: '', interview: { condition: 1, text: '发送了面试邀请' } }, fromId: me, isSelf: true, type: 'text', bizType: 21130009, status: 1, time: 1788402400000 },
+  ]
+  const holder = { 'list$': list, isToTop: true, 'conversation$': conversation }
+  const app = { 'user$': { userId: me, token: 'secret-token', phone: '13800000000' } }
+  const page = installBossPageFixture({ instances: [app, holder, { 'conversation$': conversation }] })
+  try {
+    const read = bossTestHooks.mainReadBossThread(peer, 0)
+    assert.equal(read.status, 'ready')
+    assert.equal(read.isToTop, true)
+    assert.equal(read.peerName, '宋先生')
+    assert.deepEqual(read.rows.map((r) => [r.mid, r.direction, r.text, r.interviewCondition]),
+      [['4001', 'in', '您好', null], ['4002', 'out', '你好,方便聊聊吗', null], ['4003', 'system', '', null], ['4004', 'out', '', 1]])
+    const serialized = JSON.stringify(read)
+    for (const secret of ['secret-token', '13800000000', String(me)]) {
+      assert.equal(serialized.includes(secret), false, `页面读数泄露:${secret}`)
+    }
+    assert.equal(bossTestHooks.mainReadBossThread(7, 0).status, 'binding_mismatch', '列表绑定的不是目标就不交')
+  } finally { page.restore() }
+  const noUser = installBossPageFixture({ instances: [holder] })
+  try { assert.equal(bossTestHooks.mainReadBossThread(peer, 0).status, 'identity_missing', '读不到我方身份就判不了方向,不猜') } finally { noUser.restore() }
+  const noList = installBossPageFixture({ instances: [app] })
+  try { assert.equal(bossTestHooks.mainReadBossThread(peer, 0).status, 'missing') } finally { noList.restore() }
+})
+
+test('BOSS 行定位:按 data-id 唯一命中,带出选中态、气泡与是否在视口内', () => {
+  const page = installBossPageFixture({ rows: [
+    { dataId: '11-0', selected: true },
+    { dataId: '12-0', bubble: '1' },
+    { dataId: '13-0', rect: { x: 229, y: 900, width: 339, height: 74, left: 229, top: 900, right: 568, bottom: 974 } },
+    { dataId: '14-0' }, { dataId: '14-0' },
+  ] })
+  try {
+    const locate = (ref) => bossTestHooks.domLocateBossRow('.geek-item', ref, 'selected', '.badge-count')
+    assert.deepEqual([locate('11-0').count, locate('11-0').selected, locate('11-0').bubble, locate('11-0').inViewport], [1, true, false, true])
+    assert.deepEqual([locate('12-0').selected, locate('12-0').bubble, locate('12-0').bubbleText], [false, true, '1'])
+    assert.equal(locate('13-0').inViewport, false, '视口外的行点不到——BOSS 上没有滚动注入')
+    assert.equal(locate('14-0').count, 2, '重复 data-id 不猜哪一个')
+    assert.equal(locate('99-0').count, 0)
+  } finally { page.restore() }
+})
+
+test('BOSS 发送用换行处理:换成一个空格而不是删掉——脑侧 contentHash 把换行当空白折叠', () => {
+  const { newlinesToSpaces } = bossTestHooks
+  assert.deepEqual(newlinesToSpaces('你好\n方便聊聊吗'), { text: '你好 方便聊聊吗', removed: 1 })
+  assert.deepEqual(newlinesToSpaces('a\r\n\r\nb\rc'), { text: 'a b c', removed: 3 })
+  assert.deepEqual(newlinesToSpaces('无换行'), { text: '无换行', removed: 0 })
+  // 与脑侧规范化一致:发出去的文本经 NFC/空白折叠/trim 后,哈希输入逐字节相同。
+  const norm = (v) => v.normalize('NFC').replace(/ /gu, ' ').replace(/\s+/gu, ' ').trim()
+  for (const text of ['你好\n方便聊聊吗', ' 首行 \n\n 次行 ', 'a\r\nb']) {
+    assert.equal(norm(newlinesToSpaces(text).text), norm(text), `规范化后必须相同:${JSON.stringify(text)}`)
+  }
+})
+
+test('BOSS 发送前最后一道闸:落点是发送钮、选中行仍是目标、输入框仍是那句话,三者缺一不点', () => {
+  const button = { tagName: 'DIV', textContent: '发送', contains(node) { return node === button } }
+  const rows = [
+    { getAttribute() { return '11-0' }, classList: { contains(c) { return c === 'selected' } } },
+    { getAttribute() { return '12-0' }, classList: { contains() { return false } } },
+  ]
+  const composer = { textContent: '你好 方便聊聊吗' }
+  const saved = globalThis.document
+  const install = (overrides = {}) => {
+    globalThis.document = {
+      querySelectorAll(selector) { return selector === '.submit-content .submit' ? [button] : selector === '.geek-item' ? (overrides.rows ?? rows) : [] },
+      elementFromPoint() { return overrides.at === undefined ? button : overrides.at },
+      getElementById() { return overrides.composer === undefined ? composer : overrides.composer },
+    }
+  }
+  const gate = () => bossTestHooks.domSendGate('.submit-content .submit', 1, 1, '.geek-item', '11-0', 'selected', 'boss-chat-editor-input', '你好 方便聊聊吗')
+  try {
+    install()
+    assert.deepEqual(gate(), { onTarget: true, found: '发送钮' }, 'nbsp 与空格规范化后相同')
+    install({ at: { tagName: 'SPAN', textContent: '换微信', contains() { return false } } })
+    assert.equal(gate().onTarget, false, '落点不是发送钮')
+    install({ rows: [rows[1], { getAttribute() { return '11-0' }, classList: { contains() { return false } } }] })
+    const r = gate(); assert.equal(r.onTarget, false); assert.match(r.found, /选中行/, '真人切走了会话就不点')
+    install({ composer: { textContent: '你好 方便聊聊吗 再加一句' } })
+    const c = gate(); assert.equal(c.onTarget, false); assert.match(c.found, /输入框内容与文案不同/, '真人追打了字就不点')
+    install({ composer: null })
+    assert.equal(gate().onTarget, false, '输入框不见了就不点')
+  } finally { globalThis.document = saved }
+})
+
+test('OS 注入的观测器装在 isolated world:落点/点击观测的每一次注入都不进 MAIN', async () => {
+  const hand = osClickHarness({})
+  const worlds = []
+  const original = globalThis.chrome.scripting.executeScript
+  globalThis.chrome.scripting.executeScript = async (request) => {
+    worlds.push([request.func.name, request.world])
+    return original(request)
+  }
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx())
+    assert.equal(out.outcome, 'landed')
+    assert.ok(worlds.length >= 2)
+    for (const [name, world] of worlds) {
+      assert.equal(world, 'ISOLATED', `${name} 注入到了 ${world}:观测器挂在 MAIN 的 window 上会被 getOwnPropertyNames 看见`)
+    }
+  } finally { hand.restore() }
+})
 
 test('装上第二个平台之后,不带 context 的 probe.platform 一律被拒 —— 而账号绑定正走这条路', async () => {
   // 拒绝本身是对的:ProbePlatformData 没有平台身份字段,脑既无从指定探哪个、
