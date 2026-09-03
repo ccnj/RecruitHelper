@@ -924,13 +924,24 @@ function domLocateBossRow(
 function domHitTestIndexed(
   selector: string, index: number, x: number, y: number,
 ): { onTarget: boolean; found: string } {
+  const signature = (node: Element): string => {
+    const parts: string[] = []
+    let cursor: Element | null = node
+    for (let depth = 0; cursor && cursor !== document.body && depth < 4; depth += 1) {
+      const cls = typeof cursor.className === 'string' ? cursor.className.trim().split(/\s+/u).slice(0, 2).join('.') : ''
+      parts.push(cursor.tagName.toLowerCase() + (cls ? '.' + cls : ''))
+      cursor = cursor.parentElement
+    }
+    const r = node.getBoundingClientRect()
+    return `${parts.join('<')}[${Math.round(r.width)}x${Math.round(r.height)}]「${(node.textContent ?? '').trim().slice(0, 8)}」`
+  }
   const target = Array.from(document.querySelectorAll(selector))[index]
   const at = document.elementFromPoint(x, y)
   if (!target) return { onTarget: false, found: '靶子已经不在原来的位置上' }
   if (!at) return { onTarget: false, found: '落点上什么都没有' }
   const onTarget = at === target || target.contains(at)
-  const tag = at.tagName.toLowerCase()
-  return { onTarget, found: onTarget ? `靶子(${tag})` : `${tag}「${(at.textContent ?? '').trim().slice(0, 12)}」` }
+  // 不命中时把遮挡物的签名带出去(类名链、尺寸、文本头几个字):它是清场白名单的唯一数据来源。
+  return { onTarget, found: onTarget ? `靶子(${at.tagName.toLowerCase()})` : `遮挡物 ${signature(at)}` }
 }
 
 /** 落点上的元素是不是 data-id 为 conversationRef 的行(或其后代)。 */
@@ -939,13 +950,23 @@ function domHitTestRow(
 ): { onTarget: boolean; found: string } {
   const rows = Array.from(document.querySelectorAll(rowSelector))
     .filter((el) => el.getAttribute('data-id') === conversationRef)
+  const signature = (node: Element): string => {
+    const parts: string[] = []
+    let cursor: Element | null = node
+    for (let depth = 0; cursor && cursor !== document.body && depth < 4; depth += 1) {
+      const cls = typeof cursor.className === 'string' ? cursor.className.trim().split(/\s+/u).slice(0, 2).join('.') : ''
+      parts.push(cursor.tagName.toLowerCase() + (cls ? '.' + cls : ''))
+      cursor = cursor.parentElement
+    }
+    const r = node.getBoundingClientRect()
+    return `${parts.join('<')}[${Math.round(r.width)}x${Math.round(r.height)}]「${(node.textContent ?? '').trim().slice(0, 8)}」`
+  }
   const target = rows.length === 1 ? rows[0] : undefined
   const at = document.elementFromPoint(x, y)
   if (!target) return { onTarget: false, found: `目标行不唯一(${rows.length})` }
   if (!at) return { onTarget: false, found: '落点上什么都没有' }
   const onTarget = at === target || target.contains(at)
-  const tag = at.tagName.toLowerCase()
-  return { onTarget, found: onTarget ? `目标行(${tag})` : `${tag}「${(at.textContent ?? '').trim().slice(0, 12)}」` }
+  return { onTarget, found: onTarget ? `目标行(${at.tagName.toLowerCase()})` : `遮挡物 ${signature(at)}` }
 }
 
 /**
@@ -961,6 +982,17 @@ function domSendGate(
 ): { onTarget: boolean; found: string } {
   const normalize = (value: string): string =>
     value.normalize('NFC').replace(/\u00a0/gu, ' ').replace(/\s+/gu, ' ').trim()
+  const signature = (node: Element): string => {
+    const parts: string[] = []
+    let cursor: Element | null = node
+    for (let depth = 0; cursor && cursor !== document.body && depth < 4; depth += 1) {
+      const cls = typeof cursor.className === 'string' ? cursor.className.trim().split(/\s+/u).slice(0, 2).join('.') : ''
+      parts.push(cursor.tagName.toLowerCase() + (cls ? '.' + cls : ''))
+      cursor = cursor.parentElement
+    }
+    const r = node.getBoundingClientRect()
+    return `${parts.join('<')}[${Math.round(r.width)}x${Math.round(r.height)}]「${(node.textContent ?? '').trim().slice(0, 8)}」`
+  }
   const buttons = Array.from(document.querySelectorAll(buttonSelector))
   const button = buttons.length === 1 ? buttons[0] : undefined
   const at = document.elementFromPoint(x, y)
@@ -972,7 +1004,7 @@ function domSendGate(
   const composerText = composer ? (composer.textContent ?? '') : ''
   const textOk = !!composer && normalize(composerText) === normalize(expectedText)
   const problems: string[] = []
-  if (!onButton) problems.push(at ? `落点是 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 12)}」` : '落点上什么都没有')
+  if (!onButton) problems.push(at ? `遮挡物 ${signature(at)}` : '落点上什么都没有')
   if (!rowOk) problems.push(`当前选中行 ${selectedRows.length === 1 ? '不是目标' : `数量 ${selectedRows.length}`}`)
   if (!textOk) problems.push(composer ? `输入框内容与文案不同(${composerText.length} 字)` : '输入框不见了')
   return { onTarget: onButton && rowOk && textOk, found: problems.length ? problems.join(';') : '发送钮' }
@@ -1398,6 +1430,129 @@ export function summarizeBossListRow(row: BossListRow): ConversationSummary {
   }
 }
 
+
+// ── 清场:白名单关闭 + 通用识别留痕(2026-09-03 甲方裁决) ──────────────────────
+//
+// 关闭动作只走白名单:每一项都是真机见过、语义确认为营销位或引导的容器(平台事实 §十三)。
+// 没见过的叉号一律不点——没见过的控件里就有业务动作(「不合适」长得也像个叉),误关营销位
+// 代价为零,误点业务动作是错靶。识别面反过来是通用的:命中测试被遮时把遮挡物签名写进
+// 手侧日志(clickTargetCovered)与错误 detail,人看一眼是营销位就加一行。
+//
+// 它不是原语:是 readList(move=reset) 起手的一趟尽力而为,每项至多点一次、可见才点,
+// 失败只留痕不拦;与智联的 dismissGlobalPromoModalsBestEffort 同一位置、同一纪律。
+
+interface BossDismissEntry {
+  readonly label: string
+  /** 容器选择器:可见才算"在"。 */
+  readonly container: string
+  /** 关闭控件选择器(容器内)。 */
+  readonly closer: string
+}
+
+export const BOSS_DISMISS_WHITELIST: readonly BossDismissEntry[] = [
+  { label: '列表顶营销卡', container: '.batch-chat-intention', closer: '.close' },
+  { label: '左下客户端下载横幅', container: '.c-menu-bottom-ad', closer: '.ad-banner-close' },
+  { label: '右栏意向沟通引导气泡', container: '.guide-intention .dialog-wrap', closer: '.iboss-close' },
+]
+
+interface DomOverlayState {
+  index: number
+  label: string
+  visible: boolean
+  closerRect: DomRect4
+  closerInViewport: boolean
+}
+
+/** 白名单各项现在在不在、关闭控件在哪。只读。 */
+function domReadBossOverlays(entries: Array<{ label: string; container: string; closer: string }>): DomOverlayState[] {
+  const visible = (el: Element): boolean => {
+    const r = el.getBoundingClientRect()
+    const style = getComputedStyle(el)
+    return r.width > 0 && r.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'
+  }
+  return entries.map((entry, index) => {
+    const containers = Array.from(document.querySelectorAll(entry.container)).filter(visible)
+    const container = containers.length === 1 ? containers[0]! : undefined
+    const closers = container ? Array.from(container.querySelectorAll(entry.closer)).filter(visible) : []
+    const closer = closers[0]
+    if (!container || !closer) {
+      return { index, label: entry.label, visible: false, closerRect: { x: 0, y: 0, w: 0, h: 0 }, closerInViewport: false }
+    }
+    const r = closer.getBoundingClientRect()
+    return {
+      index, label: entry.label, visible: true,
+      closerRect: { x: r.x, y: r.y, w: r.width, h: r.height },
+      closerInViewport: r.width > 4 && r.height > 4 && r.left >= 0 && r.top >= 0 &&
+        r.right <= window.innerWidth && r.bottom <= window.innerHeight,
+    }
+  })
+}
+
+function domHitTestOverlayCloser(
+  container: string, closer: string, x: number, y: number,
+): { onTarget: boolean; found: string } {
+  const containers = Array.from(document.querySelectorAll(container))
+  const root = containers.length === 1 ? containers[0]! : undefined
+  const target = root ? root.querySelector(closer) : null
+  const at = document.elementFromPoint(x, y)
+  if (!target) return { onTarget: false, found: '关闭控件已经不在了' }
+  if (!at) return { onTarget: false, found: '落点上什么都没有' }
+  const onTarget = at === target || target.contains(at)
+  return { onTarget, found: onTarget ? '关闭控件' : `${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 8)}」` }
+}
+
+/**
+ * 白名单清场,尽力而为。每项至多一次 OS 点击;点完条件等待容器消失(封顶 3s,诊断读不是放行判据);
+ * 关掉记 warn、关不掉记 error,都带签名。任何 PlatformError 只留痕不抛;StopExecution 原样穿过。
+ */
+async function dismissBossOverlaysBestEffort(tab: chrome.tabs.Tab, ctx: PrimitiveContext): Promise<void> {
+  const tabId = tab.id!
+  const entries = BOSS_DISMISS_WHITELIST as Array<{ label: string; container: string; closer: string }>
+  let states: DomOverlayState[]
+  try {
+    states = await runInPage(BOSS_DOM, tabId, domReadBossOverlays, [entries])
+  } catch (error) {
+    if (!(error instanceof PlatformError)) throw error
+    return
+  }
+  for (const state of states) {
+    if (!state.visible) continue
+    ctx.checkpoint()
+    const entry = BOSS_DISMISS_WHITELIST[state.index]!
+    if (!state.closerInViewport) {
+      reportHandLog('warn', 'promoModalDismissSkipped', `BOSS 清场:「${entry.label}」在但关闭控件不在视口内,不点`)
+      continue
+    }
+    const plan: ClickPlan = {
+      label: `清场「${entry.label}」`,
+      rect: state.closerRect,
+      hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestOverlayCloser, [entry.container, entry.closer, x, y]),
+      observe: async (): Promise<ClickObservation> => {
+        const after = await runInPage(BOSS_DOM, tabId, domReadBossOverlays, [entries])
+        return { trusted: null, onTarget: null, eventDriftPx: null, after: `容器${after[state.index]?.visible ? '仍在' : '已消失'}` }
+      },
+    }
+    try {
+      const probe = await runOsProbe(BOSS_INJECT, tabId, ctx, plan)
+      if (probe.outcome !== 'clicked') {
+        reportHandLog('warn', 'promoModalDismissRefused', `BOSS 清场:「${entry.label}」未点击(${probe.outcome})`, probe.detail)
+        continue
+      }
+      const settled = await pollUntil(ctx,
+        () => runInPage(BOSS_DOM, tabId, domReadBossOverlays, [entries]),
+        (after) => !after[state.index]?.visible, 3_000)
+      if (settled.satisfied) {
+        reportHandLog('warn', 'promoModalDismissed', `BOSS 清场:已关闭「${entry.label}」`)
+      } else {
+        reportHandLog('error', 'promoModalDismissFailed', `BOSS 清场:点了「${entry.label}」但容器仍在`, probe.detail)
+      }
+    } catch (error) {
+      if (!(error instanceof PlatformError)) throw error
+      reportHandLog('error', 'promoModalDismissFailed', `BOSS 清场:「${entry.label}」处理异常`, error.message)
+    }
+  }
+}
+
 // ── OS 点击的编排 ─────────────────────────────────────────────────────────────
 
 /** 点一下,不成就按闸的原因失败。至多一次点击是 runOsProbe 的内核,这里不重试。 */
@@ -1406,6 +1561,10 @@ async function osClickOnce(tabId: number, ctx: PrimitiveContext, plan: ClickPlan
   if (probe.outcome === 'clicked') return probe.detail ?? ''
   if (probe.outcome === 'handServiceUnavailable') {
     throw new PlatformError('CTX_NOT_READY', `${what}:手服务不可用(${probe.detail ?? ''})`, 'afterRecovery', 'pageBroken')
+  }
+  if (probe.detail && probe.detail.includes('遮挡物')) {
+    // 通用识别、白名单关闭:遮挡物的签名在 detail 里,人看一眼是营销位就加进 BOSS_DISMISS_WHITELIST。
+    reportHandLog('warn', 'clickTargetCovered', `BOSS ${what}:靶子被遮,未点`, probe.detail)
   }
   throw new PlatformError('ELEMENT_UNRESOLVED', `${what}未点击:${probe.detail ?? probe.outcome}`, 'afterRecovery')
 }
@@ -1574,6 +1733,9 @@ async function readBossList(
   }
   const wantUnread = args.filter === 'unread'
   ctx.checkpoint()
+  // 每轮第一条命令起手清一趟白名单里的营销位与引导(尽力而为,失败只留痕)。
+  await dismissBossOverlaysBestEffort(tab, ctx)
+  await verifiedBossChatTab(fingerprint)
   await ensureBossListFilter(tab, ctx, fingerprint, wantUnread)
   // 「未读」小页签是服务端查询:类名同步翻、数据异步回(平台事实 §十二)。类名翻了之后
   // 数据层可能还是「全部」那份,所以按条件等待"窗内全部行未读数>0"(封顶 20s);超时按
@@ -2186,6 +2348,9 @@ async function readBossResume(
 
 /** 只为 Node 单测导出纯函数与页面函数;生产 bundle 无引用时被 tree-shake。 */
 export const bossTestHooks = Object.freeze({
+  domReadBossOverlays,
+  domHitTestOverlayCloser,
+  domHitTestIndexed,
   mainReadBossResume,
   projectBossResume,
   bossConversationRef,

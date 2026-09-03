@@ -79,6 +79,7 @@ const {
   bossAdapter,
   bossSite,
   bossTestHooks,
+  BOSS_DISMISS_WHITELIST,
   identityCacheUsable,
   resetBossIdentityCacheForTest,
   tabNavigationGeneration,
@@ -16133,6 +16134,52 @@ test('BOSS 简历摘要页面读:按形状找当前会话对象,uid 不对就 mi
   } finally { page.restore() }
   const none = installBossPageFixture({ instances: [{ other: 1 }] })
   try { assert.equal(bossTestHooks.mainReadBossResume(11, 0).status, 'none') } finally { none.restore() }
+})
+
+test('BOSS 清场白名单:只有真机见过的三处营销位与引导,「不合适」永远不在名单里', () => {
+  assert.deepEqual(BOSS_DISMISS_WHITELIST.map((e) => e.container), ['.batch-chat-intention', '.c-menu-bottom-ad', '.guide-intention .dialog-wrap'])
+  for (const entry of BOSS_DISMISS_WHITELIST) {
+    assert.ok(!/not-fit|operate-btn|toolbar/.test(entry.container + entry.closer), `业务动作不得进清场名单:${entry.label}`)
+    assert.ok(entry.closer.startsWith('.'), '关闭控件必须是容器内的选择器')
+  }
+})
+
+test('BOSS 清场页面读:容器可见且唯一才算在,关闭控件要在视口内;命中测试只认那个关闭控件', () => {
+  const rect = (x, y, w, h) => ({ x, y, width: w, height: h, left: x, top: y, right: x + w, bottom: y + h })
+  const mk = (r, children = []) => ({ getBoundingClientRect() { return r }, querySelectorAll(sel) { return children.filter((c) => c.sel === sel).map((c) => c.el) }, querySelector(sel) { const hit = children.find((c) => c.sel === sel); return hit ? hit.el : null }, contains(n) { return children.some((c) => c.el === n) } })
+  const closer = mk(rect(546, 196, 22, 18))
+  const card = mk(rect(229, 196, 339, 74), [{ sel: '.close', el: closer }])
+  const offscreenCloser = mk(rect(148, 900, 16, 16))
+  const ad = mk(rect(0, 652, 168, 94), [{ sel: '.ad-banner-close', el: offscreenCloser }])
+  const saved = { document: globalThis.document, window: globalThis.window, getComputedStyle: globalThis.getComputedStyle }
+  globalThis.window = { innerWidth: 1470, innerHeight: 746 }
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    querySelectorAll(sel) { return sel === '.batch-chat-intention' ? [card] : sel === '.c-menu-bottom-ad' ? [ad] : [] },
+    elementFromPoint(x, y) { return x === 557 ? closer : { tagName: 'DIV', textContent: '别的' } },
+  }
+  try {
+    const states = bossTestHooks.domReadBossOverlays(BOSS_DISMISS_WHITELIST)
+    assert.deepEqual(states.map((s) => [s.label, s.visible, s.closerInViewport]), [
+      ['列表顶营销卡', true, true], ['左下客户端下载横幅', true, false], ['右栏意向沟通引导气泡', false, false],
+    ])
+    assert.deepEqual(states[0].closerRect, { x: 546, y: 196, w: 22, h: 18 })
+    assert.equal(bossTestHooks.domHitTestOverlayCloser('.batch-chat-intention', '.close', 557, 205).onTarget, true)
+    assert.equal(bossTestHooks.domHitTestOverlayCloser('.batch-chat-intention', '.close', 100, 100).onTarget, false, '落点不在关闭控件上就不点')
+    assert.equal(bossTestHooks.domHitTestOverlayCloser('.guide-intention .dialog-wrap', '.iboss-close', 557, 205).onTarget, false, '容器不在就不点')
+  } finally { Object.assign(globalThis, saved) }
+})
+
+test('BOSS 命中测试被遮时带出遮挡物签名:类名链、尺寸、文本头几个字——白名单靠它长', () => {
+  const saved = { document: globalThis.document }
+  const cover = { tagName: 'DIV', className: 'dialog-body promo', textContent: '限时优惠 立即领取', parentElement: { tagName: 'DIV', className: 'dialog-wrap active', parentElement: null, getBoundingClientRect() { return { width: 0, height: 0 } } }, getBoundingClientRect() { return { width: 352, height: 144 } } }
+  const target = { tagName: 'SPAN', textContent: '未读', contains() { return false } }
+  globalThis.document = { body: {}, querySelectorAll() { return [target] }, elementFromPoint() { return cover } }
+  try {
+    const hit = bossTestHooks.domHitTestIndexed('.chat-message-filter-left span', 0, 10, 10)
+    assert.equal(hit.onTarget, false)
+    assert.match(hit.found, /^遮挡物 div\.dialog-body\.promo<div\.dialog-wrap\.active\[352x144\]「限时优惠 立即领」$/)
+  } finally { Object.assign(globalThis, saved) }
 })
 
 test('OS 注入的观测器装在 isolated world:落点/点击观测的每一次注入都不进 MAIN', async () => {
