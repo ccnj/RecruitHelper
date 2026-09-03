@@ -15829,6 +15829,24 @@ test('标签页导航代数:只认主框架 commit,关闭即清,SPA 内路由推
   }
 })
 
+test('OS 注入的观测器装在 isolated world:落点/点击观测的每一次注入都不进 MAIN', async () => {
+  const hand = osClickHarness({})
+  const worlds = []
+  const original = globalThis.chrome.scripting.executeScript
+  globalThis.chrome.scripting.executeScript = async (request) => {
+    worlds.push([request.func.name, request.world])
+    return original(request)
+  }
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx())
+    assert.equal(out.outcome, 'landed')
+    assert.ok(worlds.length >= 2)
+    for (const [name, world] of worlds) {
+      assert.equal(world, 'ISOLATED', `${name} 注入到了 ${world}:观测器挂在 MAIN 的 window 上会被 getOwnPropertyNames 看见`)
+    }
+  } finally { hand.restore() }
+})
+
 test('装上第二个平台之后,不带 context 的 probe.platform 一律被拒 —— 而账号绑定正走这条路', async () => {
   // 拒绝本身是对的:ProbePlatformData 没有平台身份字段,脑既无从指定探哪个、
   // 也无从从回包分辨探到了哪个,猜一个顶上就是错靶的开始(见 registry.ts)。
