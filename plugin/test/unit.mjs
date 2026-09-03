@@ -78,6 +78,8 @@ const {
   allSites,
   bossAdapter,
   bossSite,
+  identityCacheUsable,
+  resetBossIdentityCacheForTest,
   tabNavigationGeneration,
   noteMainFrameNavigation,
   forgetTab,
@@ -15827,6 +15829,18 @@ test('标签页导航代数:只认主框架 commit,关闭即清,SPA 内路由推
     globalThis.chrome = saved
     resetTabGenerationsForTest()
   }
+})
+
+test('身份复核缓存:指纹同、代数同、没超期三者齐才能顶掉一次 MAIN 读', () => {
+  const now = 1_700_000_000_000
+  const cached = { fingerprint: 'f'.repeat(64), generation: 3, verifiedAt: now - 60_000 }
+  assert.equal(identityCacheUsable(cached, 'f'.repeat(64), 3, now), true)
+  assert.equal(identityCacheUsable(undefined, 'f'.repeat(64), 3, now), false, '没缓存就读')
+  assert.equal(identityCacheUsable(cached, 'e'.repeat(64), 3, now), false, '脑要求的指纹变了就读')
+  assert.equal(identityCacheUsable(cached, 'f'.repeat(64), 4, now), false, '标签页导航过就读——换账号必经导航')
+  assert.equal(identityCacheUsable(cached, 'f'.repeat(64), 3, now + 30 * 60_000), false, '30 分钟到期就读')
+  assert.equal(identityCacheUsable(cached, 'f'.repeat(64), 3, now - 120_000), false, '时钟倒退按失效处理')
+  resetBossIdentityCacheForTest()
 })
 
 test('OS 注入的观测器装在 isolated world:落点/点击观测的每一次注入都不进 MAIN', async () => {

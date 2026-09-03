@@ -17,6 +17,7 @@
 // 不进日志、不进任何上报。这条不是风格,是「AI provider 数据边界」与凭据禁令的
 // 直接要求。
 import { contentScriptHealthy, runInPage } from './inject'
+import { tabNavigationGeneration } from '../../base/tabGeneration'
 import { isHandServiceDown, osProbeContractData, playTypePlan, runOsProbe, seedFrom } from './osinput'
 import { planType } from '../osengine/plan'
 import type { ClickObservation, ClickPlan } from './osinput'
@@ -144,10 +145,57 @@ async function probeBoss(): Promise<ProbePlatformData> {
  * 动鼠标之前必须确认"现在登录的还是脑绑定的那个人"。这道闸和智联那边同款:
  * 它防的是错靶——把 A 账号的动作落在 B 账号的页面上。
  */
+/** 缓存有效期。协议规格 §12 第 9 条(2026-09-03 增补)定的 30 分钟。 */
+const IDENTITY_CACHE_TTL_MS = 30 * 60_000
+
+interface VerifiedIdentity {
+  fingerprint: string
+  /** 读指纹**之前**记下的导航代数:读的过程中若发生导航,下次比对必然不等,方向是重读。 */
+  generation: number
+  verifiedAt: number
+}
+
+/** 按标签页缓存的身份核对结果。只在内存:后台进程重启即清,那正是该失效的时刻之一。 */
+const verifiedIdentities = new Map<number, VerifiedIdentity>()
+
+/**
+ * 缓存能不能顶掉这一次 MAIN world 读。三个条件缺一即重读:指纹与脑要求的相同、
+ * 标签页自那次读取后没有主框架导航、没超过有效期。纯函数,单测直接钉。
+ */
+export function identityCacheUsable(
+  cached: VerifiedIdentity | undefined,
+  expectedFingerprint: string,
+  currentGeneration: number,
+  now: number,
+): boolean {
+  if (!cached) return false
+  if (cached.fingerprint !== expectedFingerprint) return false
+  if (cached.generation !== currentGeneration) return false
+  if (now - cached.verifiedAt >= IDENTITY_CACHE_TTL_MS || now < cached.verifiedAt) return false
+  return true
+}
+
+/** 测试专用。 */
+export function resetBossIdentityCacheForTest(): void {
+  verifiedIdentities.clear()
+}
+
 async function verifiedBossTab(expectedFingerprint: string | undefined): Promise<chrome.tabs.Tab> {
   if (!expectedFingerprint) {
     throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
   }
+  // 缓存命中就不进 MAIN world(协议规格 §12 第 9 条 2026-09-03 增补):BOSS 上换账号必经
+  // 整页导航,导航代数没变、指纹相同、没超期,页面就还是核对过的那个账号。
+  const cachedTab = await bossTab()
+  if (cachedTab && cachedTab.id !== undefined) {
+    const cached = verifiedIdentities.get(cachedTab.id)
+    if (identityCacheUsable(cached, expectedFingerprint, tabNavigationGeneration(cachedTab.id), Date.now())) {
+      return cachedTab
+    }
+  }
+  const generationBeforeRead = cachedTab && cachedTab.id !== undefined
+    ? tabNavigationGeneration(cachedTab.id)
+    : 0
   const probe = await probeBoss()
   if (probe.pageKind === 'none') {
     throw new PlatformError('CTX_NOT_READY', '请在 Chrome 中打开 BOSS 直聘页面', 'manualOnly', 'pageAbsent')
@@ -162,6 +210,11 @@ async function verifiedBossTab(expectedFingerprint: string | undefined): Promise
   if (!tab || tab.id === undefined) {
     throw new PlatformError('CTX_NOT_READY', 'BOSS 标签页缺少 id', 'afterRecovery', 'pageBroken')
   }
+  verifiedIdentities.set(tab.id, {
+    fingerprint: probe.principalFingerprint,
+    generation: generationBeforeRead,
+    verifiedAt: Date.now(),
+  })
   return tab
 }
 
