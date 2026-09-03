@@ -16316,7 +16316,7 @@ function osClickHarness({ armed = true, refuseClick = null, calibrated = true, o
       },
     },
     tabs: { async get() { return { id: 7, active: tabActive, windowId: 3 } } },
-    windows: { async get() { return { id: 3, focused: windowFocused, state: windowState } } },
+    windows: { async get() { return { id: 3, focused: typeof windowFocused === 'function' ? windowFocused() : windowFocused, state: windowState } } },
     scripting: {
       async executeScript({ func }) {
         if (func.name === 'pageInstallObserverAndReadViewport') {
@@ -16434,28 +16434,44 @@ test('手服务自己拒了点击(光标被动过)就收场,不换个姿势再�
 })
 
 test('Chrome 不在最前面就一步不动:有正面证词才拒,读不到按未知放行', async () => {
+  // deadline 给得很短:等待封顶取 min(20s, 命令 deadline),用例不必真等 20 秒。
+  const shortCtx = () => ({ ...osClickCtx(), deadlineMs: Date.now() + 300 })
   const hand = osClickHarness({ windowFocused: false })
   try {
-    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, shortCtx(),
       togglePlan({ onTarget: true, observed: null }))
     assert.equal(out.outcome, 'refusedByGate')
     assert.equal(hand.plays(), 0, '窗口没焦点时光标一步都不该飞——2026-09-03 Mac 首跑整轮都在别的窗口上飞了一圈才停')
-    assert.match(out.detail, /Chrome 窗口不在最前面\(系统焦点在别的窗口\)/)
+    assert.match(out.detail, /等了 \d+ 秒仍然:Chrome 窗口不在最前面\(系统焦点在别的窗口\)/)
     assert.match(out.detail, /窗口焦点=否 窗口状态=normal 标签激活=是 页面可见=visible 文档焦点=是/)
   } finally { hand.restore() }
   const minimized = osClickHarness({ windowState: 'minimized' })
   try {
-    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx())
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, shortCtx())
     assert.equal(out.outcome, 'refusedByGate'); assert.match(out.detail, /已最小化/); assert.equal(minimized.plays(), 0)
   } finally { minimized.restore() }
   const inactive = osClickHarness({ tabActive: false })
   try {
-    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx())
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, shortCtx())
     assert.equal(out.outcome, 'refusedByGate'); assert.match(out.detail, /不是当前激活标签/); assert.equal(inactive.plays(), 0)
   } finally { inactive.restore() }
   assert.equal(refuseWhenNotInFront({ windowFocused: null, windowState: null, tabActive: null, docFocused: null, visibility: null }), null, '全未知不拒绝')
   assert.equal(refuseWhenNotInFront({ windowFocused: true, windowState: 'normal', tabActive: true, docFocused: false, visibility: 'visible' }), null, '文档焦点不参与判据:地址栏有焦点时鼠标照样到页面')
   assert.match(describeFront({ windowFocused: true, windowState: 'fullscreen', tabActive: true, docFocused: false, visibility: 'visible' }), /文档焦点=否/)
+})
+
+test('人在 20 秒内把 Chrome 切过来,命令照常往下走——点「开始」那一刻客户端必然在最前面', async () => {
+  let asks = 0
+  const hand = osClickHarness({ windowFocused: () => { asks += 1; return asks >= 3 } })
+  try {
+    const progress = []
+    const ctx = { ...osClickCtx(), progress(stage) { progress.push(stage) } }
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, ctx)
+    assert.equal(out.outcome, 'landed', '切过来之后就该继续,不是拒')
+    assert.ok(hand.plays() > 0)
+    assert.ok(asks >= 3, '等的时候在复查前台状态')
+    assert.ok(progress.includes('等待 Chrome 切到最前'), '等待要向脑汇报进度,人才知道它在等什么')
+  } finally { hand.restore() }
 })
 
 test('前台判据通过后,零观测的拒绝里仍带移动前的前台状态——好分清"没在前台"和"飞到屏幕外"', async () => {

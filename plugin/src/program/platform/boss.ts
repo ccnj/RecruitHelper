@@ -2018,9 +2018,12 @@ async function sendBossMessage(
     if (!after.focused) throw new PlatformError('ELEMENT_UNRESOLVED', '点中输入框但焦点没到', 'afterRecovery')
     trace.push('点了输入框取焦点')
   }
-  const beforeKeys = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
+  // 发键前 Chrome 必须在前台(否则拼音会敲进别的应用)。不在就条件等待人切过来,封顶 20 秒。
+  const focusWait = await pollUntil(ctx, () => runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID]),
+    (read) => read.windowFocused)
+  const beforeKeys = focusWait.value
   if (!beforeKeys.windowFocused) {
-    throw new PlatformError('CTX_NOT_READY', 'Chrome 不在前台,按键会打到别的应用上', 'afterRecovery')
+    throw new PlatformError('CTX_NOT_READY', `等了 ${READY_WAIT_MS / 1000} 秒 Chrome 仍不在前台,按键会打到别的应用上`, 'afterRecovery')
   }
   if (!beforeKeys.focused || beforeKeys.text !== '') {
     throw new PlatformError('USER_ACTIVE', '打字前输入框状态已变(焦点或内容),已取消', 'afterRecovery')
