@@ -1849,14 +1849,30 @@ async function openBossConversation(
 
 // ── chat.readThread ─────────────────────────────────────────────────────────
 
+/**
+ * 消息数组的就绪判据:绑定到目标且至少读到一行。点开会话的瞬间 message-list 先以空数组挂到
+ * 新会话上、历史要再等一个来回(2026-09-03 Mac 真机:点击后 4 秒读到 0 行,对方名也还是空),
+ * 空数组不算就绪。能出现在列表里的会话至少有一条消息,等到封顶仍空就照实交出去——脑侧按
+ * 空快照瞬时跳过、下轮再读,不在这里猜。读不到我方身份则立即收束,等也等不来。
+ */
+function bossThreadReadSettled(read: BossThreadRead): boolean {
+  return (read.status === 'ready' && read.rows.length > 0) || read.status === 'identity_missing'
+}
+
 async function readBossThreadRows(
   tab: chrome.tabs.Tab, ctx: PrimitiveContext, uid: number, friendSource: number,
 ): Promise<Extract<BossThreadRead, { status: 'ready' }>> {
   const settled = await pollUntil(ctx,
     () => runInPage(BOSS_INJECT, tab.id!, mainReadBossThread, [uid, friendSource]),
-    (read) => read.status === 'ready' || read.status === 'identity_missing')
+    bossThreadReadSettled)
   const read = settled.value
-  if (read.status === 'ready') return read
+  if (read.status === 'ready') {
+    if (!settled.satisfied) {
+      reportHandLog('warn', 'threadListEmptyAfterWait',
+        `BOSS 消息数组等到封顶仍为空,照实交出 0 行(isToTop=${read.isToTop})`)
+    }
+    return read
+  }
   if (read.status === 'identity_missing') {
     throw new PlatformError('CTX_NOT_READY', '页面上读不到我方账号身份,无法判定消息方向', 'afterRecovery', 'identityUnverified')
   }
@@ -2342,6 +2358,7 @@ async function readBossResume(
 
 /** 只为 Node 单测导出纯函数与页面函数;生产 bundle 无引用时被 tree-shake。 */
 export const bossTestHooks = Object.freeze({
+  bossThreadReadSettled,
   domReadBossOverlays,
   domHitTestOverlayCloser,
   domHitTestIndexed,

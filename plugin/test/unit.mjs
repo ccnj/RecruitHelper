@@ -16045,6 +16045,16 @@ test('BOSS 消息数组:方向只认 fromId 对我方 userId,绑定核对用同�
   try { assert.equal(bossTestHooks.mainReadBossThread(peer, 0).status, 'missing') } finally { noList.restore() }
 })
 
+test('BOSS 消息数组就绪判据:空数组不算就绪继续等,身份缺失立即收束', () => {
+  const { bossThreadReadSettled } = bossTestHooks
+  assert.equal(bossThreadReadSettled({ status: 'ready', rows: [], isToTop: true, peerName: '' }), false,
+    '点开瞬间 message-list 先挂空数组,不能当成"这个会话没有消息"')
+  assert.equal(bossThreadReadSettled({ status: 'ready', rows: [{ mid: '1' }], isToTop: false, peerName: '宋先生' }), true)
+  assert.equal(bossThreadReadSettled({ status: 'identity_missing' }), true, '读不到我方身份等也等不来,立即收束')
+  assert.equal(bossThreadReadSettled({ status: 'missing' }), false)
+  assert.equal(bossThreadReadSettled({ status: 'binding_mismatch', detail: 'x' }), false)
+})
+
 test('BOSS 行定位:按 data-id 唯一命中,带出选中态、气泡与是否在视口内', () => {
   const page = installBossPageFixture({ rows: [
     { dataId: '11-0', selected: true },
