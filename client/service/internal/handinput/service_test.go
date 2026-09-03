@@ -2,6 +2,7 @@ package handinput
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -9,11 +10,11 @@ import (
 // 像真机一样算出来:我们按当前(可能错的)标定发出去,浏览器按真实几何看到别处。
 type fakeInjector struct {
 	unauthorized bool
-	truth  Calib
-	moves  [][2]float64
-	downs  int
-	ups    int
-	failAt int // >0 时第几次移动开始报错
+	truth        Calib
+	moves        [][2]float64
+	downs        int
+	ups          int
+	failAt       int // >0 时第几次移动开始报错
 	// seed 非零时,SeedCalib 直接返回它 —— 用来构造"粗估算错了"的场面。
 	seed *Calib
 	// cursorAt 非空时,CursorPos 报它而不是最后注入的那一点 —— 用来构造
@@ -326,5 +327,57 @@ func TestStateCarriesInjectAuthorization(t *testing.T) {
 	denied := NewService(&fakeInjector{unauthorized: true})
 	if denied.State().InjectAuthorized {
 		t.Fatal("未授权的注入器必须报 injectAuthorized=false")
+	}
+}
+
+// /keys:裸按键不经上屏机制,按时刻顺序播出;修饰键按住期间的字母键照发,松手后再删除。
+func TestKeysPlaysSequenceInPlannedOrder(t *testing.T) {
+	f := &fakeInjector{}
+	s := NewService(f)
+	res, err := s.Keys(KeySequence{Keys: []PlanKey{
+		{Code: "ControlLeft", Down: 0, Up: 230, Modifier: true},
+		{Code: "KeyA", Down: 90, Up: 170},
+		{Code: "Backspace", Down: 420, Up: 500},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ControlLeft↓", "KeyA↓", "KeyA↑", "ControlLeft↑", "Backspace↓", "Backspace↑"}
+	if strings.Join(f.keys, " ") != strings.Join(want, " ") {
+		t.Fatalf("按键顺序不对:%v", f.keys)
+	}
+	if res.Keys != 6 || res.Status != "ok" {
+		t.Fatalf("回包不对:%+v", res)
+	}
+}
+
+// 键表里没有的键在发出任何一次按键之前就拒——失效方向是一个都没发。
+func TestKeysRejectsUnknownCodeBeforeAnyPress(t *testing.T) {
+	f := &fakeInjector{unknownKey: "MetaLeft"}
+	s := NewService(f)
+	if _, err := s.Keys(KeySequence{Keys: []PlanKey{
+		{Code: "MetaLeft", Down: 0, Up: 230, Modifier: true},
+		{Code: "KeyA", Down: 90, Up: 170},
+	}}); err == nil {
+		t.Fatal("注入器不认识的键放行了")
+	}
+	if len(f.keys) != 0 {
+		t.Fatalf("校验失败后仍发了按键:%v", f.keys)
+	}
+}
+
+// 修饰键松手到下一键按下不足 40ms 属排版错误,同样在发键前拒。
+func TestKeysRejectsModifierWindowShortfall(t *testing.T) {
+	f := &fakeInjector{}
+	s := NewService(f)
+	if _, err := s.Keys(KeySequence{Keys: []PlanKey{
+		{Code: "ControlLeft", Down: 0, Up: 230, Modifier: true},
+		{Code: "KeyA", Down: 90, Up: 170},
+		{Code: "Backspace", Down: 250, Up: 330},
+	}}); err == nil {
+		t.Fatal("修饰键窗口不足放行了")
+	}
+	if len(f.keys) != 0 {
+		t.Fatalf("校验失败后仍发了按键:%v", f.keys)
 	}
 }

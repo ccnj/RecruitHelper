@@ -17,7 +17,7 @@ import (
 // 门禁盯着(dispatch/ostype_producer_test.go)。
 //
 // 它把一句中文打进 IM 输入框然后**停手,不点发送**。输入框非空时手侧会拒绝——
-// composer.empty 是硬前置,与发送原语用同一道闸,不为调试放宽。
+// 输入框里已有的内容先以真实按键全选删除再打(2026-09-03 裁决撤销 composer.empty),与发送原语同一条清空路径。
 //
 // **outcome=typed 但 matched=false 不是失败。** macOS 开发机没有自研 TIP、走系统
 // 输入法,上屏词不可控(「聊聊」可能出成「了了」);Windows 上 TIP 说了算,应当

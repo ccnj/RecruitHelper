@@ -560,13 +560,12 @@ interface MainClickConversationResult {
   status: 'clicked' | 'already_selected' | 'failed'
   reason?: 'action_window_elapsed' | 'identity_changed' | 'route_changed' | 'list_items_missing' |
     'list_binding_unresolved' | 'target_binding_duplicated' | 'target_binding_changed' |
-    'click_target_missing' | 'composer_ambiguous' | 'composer_nonempty'
+    'click_target_missing' | 'composer_ambiguous'
 }
 
 interface MainSendOnceResult {
   status: 'ready' | 'clicked' | 'failed'
-  reason?: 'route_changed' | 'guard_unresolved' | 'target_changed' | 'baseline_changed' |
-    'composer_nonempty' | 'composer_missing' | 'input_rejected' | 'identity_changed' |
+  reason?: 'route_changed' | 'guard_unresolved' | 'target_changed' | 'baseline_changed' | 'composer_missing' | 'input_rejected' | 'identity_changed' |
     'action_window_elapsed'
 }
 
@@ -668,7 +667,7 @@ type MainPrepareInterviewEditorResult =
   | { status: 'ready'; prepared: MainPreparedInterviewEditor }
   | {
     status: 'failed'
-    reason: 'route_changed' | 'identity_changed' | 'target_changed' | 'composer_nonempty' |
+    reason: 'route_changed' | 'identity_changed' | 'target_changed' |
       'surface_unavailable' | 'editor_unavailable' | 'date_unavailable' | 'time_unavailable' |
       'duration_unavailable' | 'method_unavailable' | 'input_rejected' | 'action_window_elapsed' |
       'unexpected'
@@ -685,7 +684,7 @@ type MainSendCardOnceResult =
   | {
     status: 'failed'
     reason: 'route_changed' | 'identity_changed' | 'target_changed' | 'baseline_changed' |
-      'guard_unresolved' | 'composer_nonempty' | 'surface_unavailable' | 'input_rejected' |
+      'guard_unresolved' | 'surface_unavailable' | 'input_rejected' |
       'action_window_elapsed'
     // 失败点细分：只含选择器命中数与我方自设常量，随 error.message 上行帮助
     // 脑侧诊断该改哪一处判据；绝不携带候选人/联系人字段或任何页面文本。
@@ -10335,12 +10334,13 @@ function mainClickConversationOnce(
     if (rows.some(({ refs }) => refs.size !== 1)) return null
     return rows.map(({ node, refs }) => ({ node, ref: [...refs][0] }))
   }
-  const composerDraftSafe = (): 'ok' | 'ambiguous' | 'nonempty' => {
+  // 只判输入框是否唯一;草稿非空不再拒(2026-09-03 甲方裁决撤销 composer.empty,
+  // 发送原语会以本命令正文覆盖编辑器,这里也不再为保护草稿而不切会话)。
+  const composerDraftSafe = (): 'ok' | 'ambiguous' => {
     const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
       'textarea.km-input__original.is-normal.is-textarea.is-autoresize',
     )).filter((element) => visible(element) && element.closest('.im-sender__input-wrapper') !== null)
-    if (composers.length > 1) return 'ambiguous'
-    return composers.length === 1 && composers[0].value !== '' ? 'nonempty' : 'ok'
+    return composers.length > 1 ? 'ambiguous' : 'ok'
   }
 
   if (!Number.isFinite(notAfterMs) || Date.now() > notAfterMs) {
@@ -10350,9 +10350,7 @@ function mainClickConversationOnce(
   if (!principal || digest(principal) !== expectedPrincipalFingerprint) {
     return { status: 'failed', reason: 'identity_changed' }
   }
-  const draft = composerDraftSafe()
-  if (draft === 'ambiguous') return { status: 'failed', reason: 'composer_ambiguous' }
-  if (draft === 'nonempty') return { status: 'failed', reason: 'composer_nonempty' }
+  if (composerDraftSafe() === 'ambiguous') return { status: 'failed', reason: 'composer_ambiguous' }
   const route = new URL(location.href)
   if (route.pathname !== '/app/im') return { status: 'failed', reason: 'route_changed' }
   const currentConversationRef = route.searchParams.get('sessionId') ?? ''
@@ -10391,9 +10389,7 @@ function mainClickConversationOnce(
       (finalRoute.searchParams.get('sessionId') ?? '') !== expectedCurrentConversationRef) {
     return { status: 'failed', reason: 'route_changed' }
   }
-  const finalDraft = composerDraftSafe()
-  if (finalDraft === 'ambiguous') return { status: 'failed', reason: 'composer_ambiguous' }
-  if (finalDraft === 'nonempty') return { status: 'failed', reason: 'composer_nonempty' }
+  if (composerDraftSafe() === 'ambiguous') return { status: 'failed', reason: 'composer_ambiguous' }
   if (!firstRow.isConnected || !clickTarget.isConnected ||
       (clickTarget !== firstRow && !firstRow.contains(clickTarget))) {
     return { status: 'failed', reason: 'click_target_missing' }
@@ -11535,9 +11531,6 @@ async function mainSendMessageOnce(
     const surfaceFailure: SendFailureReason = expectedComposerValue === ''
       ? 'composer_missing'
       : 'input_rejected'
-    const valueFailure: SendFailureReason = expectedComposerValue === ''
-      ? 'composer_nonempty'
-      : 'input_rejected'
     if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
       return failedEvaluation('action_window_elapsed')
     }
@@ -11553,7 +11546,11 @@ async function mainSendMessageOnce(
 
     const currentSurface = surface()
     if (!currentSurface) return failedEvaluation(surfaceFailure)
-    if (currentSurface.composer.value !== expectedComposerValue) return failedEvaluation(valueFailure)
+    // preflight 期望值为空时不核对内容:编辑器里已有的草稿由写入整段覆盖(2026-09-03 甲方
+    // 裁决撤销 composer.empty)。写入正文之后仍以本命令正文精确相等核对所有权,不变。
+    if (expectedComposerValue !== '' && currentSurface.composer.value !== expectedComposerValue) {
+      return failedEvaluation('input_rejected')
+    }
     const currentBaselineState = baselineState(binding.target)
     // 2026-08-04 甲方裁决：消息基线降为观测模式，'changed' 只记不停手；
     // 'unresolved'（读不到）仍然拒绝——那是"读不到→不确认"的失效方向。
@@ -11744,12 +11741,6 @@ async function mainPrepareInterviewEditor(
       const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
       return matches.length === 1 && clean(matches[0].peerPartnerId) !== ''
     }
-    const composerEmpty = (): boolean => {
-      const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
-        'textarea.km-input__original.is-normal.is-textarea.is-autoresize',
-      )).filter((element) => visible(element) && element.closest('.im-sender__input-wrapper') !== null)
-      return composers.length === 1 && composers[0].value === ''
-    }
     const wait = (delayMs: number): Promise<void> =>
       new Promise((resolve) => setTimeout(resolve, delayMs))
     const interactionGap = (): Promise<void> => wait(1_000 + Math.floor(Math.random() * 501))
@@ -11827,7 +11818,6 @@ async function mainPrepareInterviewEditor(
     const principal = principalCanonical()
     if (!principal || await digest(principal) !== expectedPrincipalFingerprint) return failed('identity_changed')
     if (!targetResolved()) return failed('target_changed')
-    if (!composerEmpty()) return failed('composer_nonempty')
 
     const details = Array.from(document.querySelectorAll<HTMLElement>('.im-session-detail')).filter(visible)
     if (details.length !== 1) return failed('surface_unavailable')
@@ -12159,7 +12149,6 @@ async function mainPrepareInterviewEditor(
     if (Date.now() > irreversibleNotAfterMs) return await abort('action_window_elapsed')
     if (!routeMatches()) return await abort('route_changed')
     if (!targetResolved()) return await abort('target_changed')
-    if (!composerEmpty()) return await abort('composer_nonempty')
     if (!waySelected()) return await abort('input_rejected', `finalWay ${wayLabel}`)
     const dateValue = clean(exactDate.textContent)
     const timeValue = clean(exactTime.value)
@@ -12712,7 +12701,7 @@ function mainSendCardOnce(
   if (cardKind !== 'wechatAccept') {
     if (composers.length !== 1) return failed('surface_unavailable')
     if (composers[0].closest('.im-session-detail') !== details[0]) return failed('surface_unavailable')
-    if (composers[0].value !== '') return failed('composer_nonempty')
+    // 输入框有草稿不再拒(2026-09-03 甲方裁决撤销 composer.empty):卡片走弹窗,不碰 IM 输入框。
   }
 
   let actionTarget: HTMLElement | null = null
@@ -13701,9 +13690,6 @@ async function ensureThreadRoute(
     clickNotAfterMs,
   ])
   if (click.status === 'failed') {
-    if (click.reason === 'composer_nonempty') {
-      throw new ZhilianPlatformError('USER_ACTIVE', '当前会话存在人工草稿，拒绝自动切换', 'afterRecovery')
-    }
     if (click.reason === 'identity_changed') {
       throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '切换会话前登录身份发生变化', 'manualOnly')
     }
@@ -13810,9 +13796,6 @@ export async function sendZhilianMessage(
   reportBaselineDrift('chat.sendMessage', args.conversationRef, sendBaseline)
 
   const throwEvaluationFailure = (evaluation: MainSendOnceResult): never => {
-    if (evaluation.reason === 'composer_nonempty') {
-      throw new ZhilianPlatformError('USER_ACTIVE', '发送前输入框出现人工草稿，已取消点击', 'afterRecovery')
-    }
     if (evaluation.reason === 'target_changed') {
       throw new ZhilianPlatformError('GUARD_FAILED', '发送前会话与候选人的目标绑定发生变化，已取消点击', 'manualOnly')
     }
@@ -14111,9 +14094,6 @@ async function closeInterviewSuccessModalBestEffort(tabId: number): Promise<void
 function throwInterviewPreparationFailure(
   preparation: Exclude<MainPrepareInterviewEditorResult, { status: 'ready' }>,
 ): never {
-  if (preparation.reason === 'composer_nonempty') {
-    throw new ZhilianPlatformError('USER_ACTIVE', '邀面准备期间出现人工草稿，已取消编辑器', 'afterRecovery')
-  }
   if (preparation.reason === 'identity_changed') {
     throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '邀面准备期间登录身份发生变化', 'manualOnly')
   }
@@ -14140,9 +14120,6 @@ function throwInterviewPreparationFailure(
 function throwCardEvaluationFailure(evaluation: MainSendCardOnceResult): never {
   if (evaluation.status !== 'failed') {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '卡片发送 evaluator 返回未知状态', 'manualOnly')
-  }
-  if (evaluation.reason === 'composer_nonempty') {
-    throw new ZhilianPlatformError('USER_ACTIVE', '发送前输入框出现人工草稿，已取消卡片发送', 'afterRecovery')
   }
   if (evaluation.reason === 'target_changed' || evaluation.reason === 'baseline_changed') {
     throw new ZhilianPlatformError('GUARD_FAILED', '卡片发送前目标绑定或消息基线发生变化', 'manualOnly')

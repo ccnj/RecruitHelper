@@ -42,6 +42,8 @@ type PlayResult struct {
 // State 是插件在生成计划之前要问的那几件事。
 type State struct {
 	Platform string `json:"platform"`
+	// OS 是 runtime.GOOS。插件按它选清空输入框的修饰键(darwin 用 Command,其余用 Control)。
+	OS string `json:"os"`
 	// InjectAuthorized:操作系统会不会真的投递我们的事件(macOS 辅助功能授权)。false 时插件移动前就拒。
 	InjectAuthorized bool `json:"injectAuthorized"`
 	// CursorCSSX/Y 是光标此刻所在,已按当前标定反算成视口 CSS 坐标。
@@ -112,7 +114,7 @@ func NewService(inj Injector) *Service {
 func (s *Service) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := State{Platform: s.inj.Platform(), InjectAuthorized: s.inj.Authorized(), ClockSource: clockSourceName(),
+	st := State{Platform: s.inj.Platform(), OS: runtime.GOOS, InjectAuthorized: s.inj.Authorized(), ClockSource: clockSourceName(),
 		ClickArmed: s.armed, Samples: s.pb.N(), ResidualPx: finiteOrNil(s.pb.Residual())}
 	c, ready := s.pb.Calib()
 	st.Calibrated = ready
@@ -285,6 +287,21 @@ func (s *Service) Type(plan TypePlan) (TypeResult, error) {
 	s.armed = false
 
 	evs, _ := plan.Flatten()
+	res, err := s.playKeyEvents(evs)
+	if err != nil {
+		return res, err
+	}
+	if session != nil {
+		// 回报是按键处理完之后才回来的,注入循环结束时还在路上。
+		// 等到齐或超时,别在回报还在路上时就下对账结论。
+		res.Words = session.Settle(tipSettleWait)
+	}
+	return res, nil
+}
+
+// playKeyEvents 按时刻逐个注入按键。调用方已持锁、已锁 OS 线程。
+// 失败返回时已发出的次数在 res.Keys 里——插件要知道发出去多少。
+func (s *Service) playKeyEvents(evs []keyEvent) (TypeResult, error) {
 	held := make(map[string]int, 4)
 	defer func() {
 		// 逆序放开还按着的键:后按的先放,与真人松手的次序一致。
@@ -326,12 +343,32 @@ func (s *Service) Type(plan TypePlan) (TypeResult, error) {
 	}
 	res.LagMaxUs = lagMax
 	res.Status = "ok"
-	if session != nil {
-		// 回报是按键处理完之后才回来的,注入循环结束时还在路上。
-		// 等到齐或超时,别在回报还在路上时就下对账结论。
-		res.Words = session.Settle(tipSettleWait)
-	}
 	return res, nil
+}
+
+// KeySequence 是一小段裸按键:不进组字区、不驱动 TIP,用于编辑操作——现在只有
+// "全选加删除"清空输入框这一种用途(2026-09-03 甲方裁决撤销 composer.empty)。
+// 键与时刻由插件排,本包照旧只播放;校验与 TypePlan 同一套(键码认不认识、
+// 修饰键窗口够不够)。
+type KeySequence struct {
+	Keys []PlanKey `json:"keys"`
+}
+
+// Keys 播放一段裸按键。**刻意不接上屏机制**:这些键本来就该原样到达页面,
+// 走 DriveWords 会让 TIP 把 ctrl+A 当成组字键吃掉。
+func (s *Service) Keys(seq KeySequence) (TypeResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	plan := TypePlan{Words: []PlanWord{{Direct: true, Passthrough: true, Keys: seq.Keys}}}
+	if err := plan.Validate(s.inj.KnowsKey); err != nil {
+		return TypeResult{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	s.armed = false
+	evs, _ := plan.Flatten()
+	return s.playKeyEvents(evs)
 }
 
 func (s *Service) Landing(clientX, clientY float64) (PBStatus, error) {

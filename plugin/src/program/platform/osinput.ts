@@ -272,6 +272,8 @@ interface HandState {
   injectAuthorized?: boolean
   /** 注入平台的人话描述,未授权时带着"要授权哪个应用"。 */
   platform?: string
+  /** runtime.GOOS。清空输入框的修饰键按它选:darwin 用 Command,其余用 Control。旧脑没有。 */
+  os?: string
 }
 
 interface PlayResponse {
@@ -980,6 +982,48 @@ export interface TypePlayResult {
  */
 export async function playTypePlan(plan: unknown): Promise<TypePlayResult> {
   return await callHand<TypePlayResult>('/type', plan)
+}
+
+/** 一次裸按键,与手服务 PlanKey 同形。时刻是相对序列起点的毫秒。 */
+export interface KeyPress {
+  code: string
+  down: number
+  up: number
+  shift?: boolean
+  modifier?: boolean
+}
+
+/**
+ * 清空输入框的按键序列:修饰键按住、A、松开、Backspace——全选加删除。
+ *
+ * 修饰键按操作系统选:macOS 是 Command,其余是 Control;Windows 键表刻意不收
+ * MetaLeft,发错平台会在手服务校验期显式报错,不会打出一个别的键。时刻带小抖动,
+ * 修饰键松手到 Backspace 按下之间留足手服务的修饰键窗口(40ms),否则校验不放行。
+ * 立案:2026-09-03 甲方裁决撤销 composer.empty,框里的字无论谁留的都清掉再打。
+ */
+export function composeClearKeys(os: string | undefined, jitter: () => number = Math.random): KeyPress[] {
+  const j = (base: number, spread: number): number => Math.round(base + (jitter() - 0.5) * spread)
+  const modifier = os === 'darwin' ? 'MetaLeft' : 'ControlLeft'
+  const aDown = j(110, 40)
+  const aUp = aDown + j(70, 30)
+  const modUp = aUp + j(60, 30)
+  const bsDown = modUp + j(220, 80)
+  const bsUp = bsDown + j(75, 30)
+  return [
+    { code: modifier, down: 0, up: modUp, modifier: true },
+    { code: 'KeyA', down: aDown, up: aUp },
+    { code: 'Backspace', down: bsDown, up: bsUp },
+  ]
+}
+
+/** 播一段裸按键(不经上屏机制)。回包与 /type 同形。 */
+export async function playKeys(keys: KeyPress[]): Promise<TypePlayResult> {
+  return await callHand<TypePlayResult>('/keys', { keys })
+}
+
+/** 手服务所在的操作系统(runtime.GOOS);旧脑没有该字段时为 undefined。 */
+export async function readHandOS(): Promise<string | undefined> {
+  return (await callHand<HandState>('/state', {})).os
 }
 
 /** 手服务没起来的标记。调用方据此与"打字本身失败"分开收场。 */
