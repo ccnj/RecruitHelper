@@ -1,6 +1,7 @@
 package handinput
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"runtime"
@@ -426,22 +427,9 @@ func (s *Service) Click(pressMs float64) error {
 	// 落点确认与点击派发之间隔着一次页面往返(编排层要拿落点去问平台的命中测试:
 	// 这个像素上是谁)。几十到几百毫秒的窗口里真人碰一下鼠标,光标就不在原处了,
 	// 而点击用的是光标当前位置——那一下会落在任意元素上,是错靶。
-	//
-	// 判据是现成的:注入用绝对坐标,发完之后系统不该再动它。这道闸只读我们自己
-	// 注入 API 的光标位置,不碰平台内部(守卫立法三问的脆性一项:低脆)。
-	// 读不到光标时同样不点:失效方向永远是宁可不点。
-	if s.lastInj == nil {
+	if err := s.cursorParkedAtLastInj(); err != nil {
 		s.armed = false
-		return fmt.Errorf("未放行:这一轮没有可核对的注入落点")
-	}
-	x, y, err := s.inj.CursorPos()
-	if err != nil {
-		s.armed = false
-		return fmt.Errorf("未放行:读不到光标当前位置(%w)", err)
-	}
-	if d := math.Hypot(float64(x)-s.lastInj[0], float64(y)-s.lastInj[1]); d > cursorMovedPx {
-		s.armed = false
-		return fmt.Errorf("未放行:落点确认之后光标被动过(偏 %.0f 像素),这一下会落在别处", d)
+		return err
 	}
 	s.armed = false
 	if err := s.inj.MouseDown(MouseLeft); err != nil {
@@ -449,4 +437,77 @@ func (s *Service) Click(pressMs float64) error {
 	}
 	WaitUntil(nowNanos()+int64(pressMs*1e6), s.mode)
 	return s.inj.MouseUp(MouseLeft)
+}
+
+// errRefused 标记"闸没放行":不是服务故障,是判据在说话。HTTP 面把它翻成 409,
+// 让插件与"注入失败"分开收场——两者的处置不同,前者不重试、报原因,后者是故障。
+var errRefused = errors.New("未放行")
+
+// cursorParkedAtLastInj 核对光标此刻**还在**我们最后把它放的地方。
+//
+// 判据是现成的:注入用绝对坐标,发完之后系统不该再动它。这道闸只读我们自己
+// 注入 API 的光标位置,不碰平台内部(守卫立法三问的脆性一项:低脆)。
+// 读不到光标时同样算没核对上:失效方向永远是宁可不做。
+//
+// 点击与滚轮共用这一条:两者都发在光标当前位置,真人在中间碰过鼠标,落的就是别处。
+func (s *Service) cursorParkedAtLastInj() error {
+	if s.lastInj == nil {
+		return fmt.Errorf("%w:这一轮没有可核对的注入落点", errRefused)
+	}
+	x, y, err := s.inj.CursorPos()
+	if err != nil {
+		return fmt.Errorf("%w:读不到光标当前位置(%v)", errRefused, err)
+	}
+	if d := math.Hypot(float64(x)-s.lastInj[0], float64(y)-s.lastInj[1]); d > cursorMovedPx {
+		return fmt.Errorf("%w:落点确认之后光标被动过(偏 %.0f 像素),这一下会落在别处", errRefused, d)
+	}
+	return nil
+}
+
+// Scroll 按时刻把一串滚轮格播出去,发在光标当前位置。
+//
+// 滚轮不是候选人可见动作,但它改变世界:光标下面换了元素,上一次落点确认随之过期,
+// 所以播放期间与播放之后一律熄灭点击,与 Play/Type 同款;下一次点击要有属于它自己的
+// 落点确认。lastInj 不动——光标本身没挪。
+//
+// 播之前核对光标**还在**我们最后放它的地方(插件先把它落到目标容器里,再来滚):
+// 滚轮事件投给光标下面那个窗口,真人在中间碰过鼠标的话,滚的就是别的东西——
+// 也许是他自己正在看的文档。对不上就不滚,回 errRefused。
+//
+// 校验在发出第一格**之前**全部做完,失效方向是"一格都没发"。
+func (s *Service) Scroll(plan ScrollPlan) (ScrollResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := plan.Validate(); err != nil {
+		return ScrollResult{}, err
+	}
+	if err := s.cursorParkedAtLastInj(); err != nil {
+		s.armed = false
+		return ScrollResult{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	s.armed = false
+
+	res := ScrollResult{}
+	base := nowNanos()
+	var lagSum, lagMax float64
+	for _, t := range plan.Ticks {
+		deadline := base + int64(t.At*1e6)
+		WaitUntil(deadline, s.mode)
+		at := nowNanos()
+		if err := s.inj.Wheel(t.Dy); err != nil {
+			// 已发出的格数在 res.Ticks 里:插件要知道页面被滚了多少。
+			return res, fmt.Errorf("第 %d 格滚轮注入失败:%w", res.Ticks+1, err)
+		}
+		res.Ticks++
+		res.Notches += absInt(t.Dy)
+		lag := float64(at-deadline) / 1e3
+		lagSum += lag
+		lagMax = math.Max(lagMax, math.Abs(lag))
+	}
+	res.LagMeanUs = lagSum / float64(res.Ticks)
+	res.LagMaxUs = lagMax
+	res.Status = "ok"
+	return res, nil
 }

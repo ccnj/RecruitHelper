@@ -24,6 +24,7 @@ package handinput
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 )
 
@@ -35,6 +36,7 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/handinput/click", s.handleClick)
 	mux.HandleFunc("/handinput/type", s.handleType)
 	mux.HandleFunc("/handinput/keys", s.handleKeys)
+	mux.HandleFunc("/handinput/scroll", s.handleScroll)
 	mux.HandleFunc("/handinput/reseed", s.handleReseed)
 }
 
@@ -170,6 +172,28 @@ func (s *Service) handleKeys(w http.ResponseWriter, r *http.Request) {
 	res, err := s.Keys(seq)
 	if err != nil {
 		res.Status = err.Error()
+		writeJSON(w, http.StatusInternalServerError, res)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// scroll 播一份滚轮计划。回包形状与 /type、/keys 同款(错误文本在 status)。
+//
+// 三种收场分开:计划排错或注入失败是 500;光标不在我们放它的地方是 **409**——
+// 那不是服务故障,是闸在说话,插件按原因收场、不重试;成功 200。
+func (s *Service) handleScroll(w http.ResponseWriter, r *http.Request) {
+	var plan ScrollPlan
+	if !readJSON(w, r, &plan) {
+		return
+	}
+	res, err := s.Scroll(plan)
+	if err != nil {
+		res.Status = err.Error()
+		if errors.Is(err, errRefused) {
+			writeJSON(w, http.StatusConflict, res)
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, res)
 		return
 	}

@@ -380,6 +380,56 @@
           "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
+      "DebugOsScrollArgs": {
+        "type": "object",
+        "fields": {
+          "selector": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "index": { "type": "int", "minimum": 0, "optional": true },
+          "direction": { "type": "string", "enumRef": "enums.osScrollDirection" },
+          "distancePx": { "type": "int", "minimum": 1, "maximum": 20000 }
+        }
+      },
+      "DebugOsScrollData": {
+        "type": "object",
+        "fields": {
+          "outcome": { "type": "string", "enumRef": "enums.osScrollOutcome" },
+          "scrollTopBefore": { "type": "int", "minimum": 0 },
+          "scrollTopAfter": { "type": "int", "minimum": 0 },
+          "scrolledPx": { "type": "int", "minimum": 0 },
+          "ticks": { "type": "int", "minimum": 0 },
+          "bursts": { "type": "int", "minimum": 0 },
+          "attempts": { "type": "int", "minimum": 0, "maximum": 16 },
+          "elapsedMs": { "type": "int", "minimum": 0 },
+          "lagMaxUs": { "type": "int", "minimum": 0 },
+          "detail": { "type": "string", "maxLength": 2048, "optional": true },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
+      "DebugOsClickArgs": {
+        "type": "object",
+        "fields": {
+          "selector": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "index": { "type": "int", "minimum": 0, "optional": true },
+          "mode": { "type": "string", "enumRef": "enums.osClickMode" },
+          "expectText": { "type": "string", "maxLength": 256, "optional": true }
+        }
+      },
+      "DebugOsClickData": {
+        "type": "object",
+        "fields": {
+          "mode": { "type": "string", "enumRef": "enums.osClickMode" },
+          "outcome": { "type": "string", "enumRef": "enums.osProbeOutcome" },
+          "attempts": { "type": "int", "minimum": 0, "maximum": 16 },
+          "landingDriftPx": { "type": "int", "minimum": 0, "optional": true },
+          "calibStatus": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "unreachableFrames": { "type": "int", "minimum": 0 },
+          "planMs": { "type": "int", "minimum": 0 },
+          "elapsedMs": { "type": "int", "minimum": 0 },
+          "lagMaxUs": { "type": "int", "minimum": 0 },
+          "detail": { "type": "string", "maxLength": 2048, "optional": true },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "DebugReloadArgs": { "type": "object", "fields": {} },
       "DebugReloadData": { "type": "object", "fields": {} },
       "DebugProbeInterviewEditorArgs": {
@@ -1321,6 +1371,9 @@
     "osProbeTarget": ["viewportSpread", "reversibleToggle"],
     "osProbeOutcome": ["landed", "clicked", "refusedByGate", "handServiceUnavailable"],
     "osTypeOutcome": ["typed", "refusedByGate", "planFailed", "handServiceUnavailable"],
+    "osScrollDirection": ["down", "up"],
+    "osScrollOutcome": ["scrolled", "edge", "stuck", "refusedByGate", "handServiceUnavailable"],
+    "osClickMode": ["move", "click"],
     "sourcingAgeMode": ["any", "range"],
     "sourcingActiveWindow": ["any", "today", "days3", "days7", "days30"],
     "sourcingCareerStatus": ["employedLooking", "leftLooking", "employedOpen", "employedNotLooking"],
@@ -1430,6 +1483,44 @@
       "deadlineMs": 300000,
       "leaseMs": 60000,
       "note": "开发期 OS 打字探针(2026-09-01 立案),与 debug.osProbe 同族:独立原语,不改动任何生产原语的执行路径;立它而不立运行期开关,依据同样是大方向 3——测试与生产必须共用同一分发器、同一信封、同一分发路径,开关会造出一条测试专用分支。**它把一句中文打进 IM 输入框,然后停手——不点发送。** 所以 platformSideEffect 是 none:草稿只是页面本地状态,没有任何东西到达服务端,更没有任何东西到达候选人。编辑器里已有的内容一律先以真实按键全选删除、回读为空再打(2026-09-03 裁决撤销 composer.empty,与发送原语同一条清空路径),清不空才拒。执行五段:定位输入框矩形 → 走鼠标线 OS 点击拿到焦点(复用 osProbe 那条闸链)→ 插件侧排版 → 经本机手服务播按键 → 回读输入框比对。**焦点必须靠真实点击拿到**,不用 DOM focus():那会造出一个「没有前置点击的焦点」,是真人身上不存在的形状,与整条线的立论相反。**matched 只报不判。** Windows 上自研 TIP 决定上屏哪个词,回读应当逐字相同;macOS 开发机没有 TIP、走系统输入法,上屏词不可控——「聊聊」可能出成「了了」。两边跑同一份代码、同一条判定,差别由 matched 如实带出,不设平台分支。因此 matched=false **不是失败**,outcome 照样是 typed。planFailed 是正常收场之一:排版器闭环自验,排不出合格形状就如实说排不出来;打不出的字元(英文字母、半角标点)会更早地显式失败。**两种都不许兜底成「那就随便打一份」**。args 只有文案本身,不含坐标、种子与任何 DOM 细节——种子由插件从 cmdMsgId 确定性派生,与鼠标线同款,好让同一条命令可重放。data 只回诊断值;回读到的文本走 detail,不进结构化字段(「诊断辅助默认不进契约」)。脑侧无任何业务生产者,唯一派发入口是 /admin 手动端点。leaseMs 必须声明——base 的租约脉冲只对声明了它的命令启动。"
+    },
+    "debug.osScroll": {
+      "ver": 1,
+      "class": "intrusive",
+      "batch": "X",
+      "platformSideEffect": "none",
+      "argsSchema": "DebugOsScrollArgs",
+      "dataSchema": "DebugOsScrollData",
+      "preconditions": [
+        "context.platform",
+        "context.accountRef",
+        "context.expectedPrincipalFingerprint",
+        "login.in",
+        "manualQuiet"
+      ],
+      "execBudgetMs": 180000,
+      "deadlineMs": 300000,
+      "leaseMs": 60000,
+      "note": "开发期 OS 滚轮探针(2026-09-03 立案),与 debug.osProbe 同族:独立原语,不改动任何生产原语的执行路径;脑侧无任何业务生产者,唯一派发入口是 /admin 手动端点,门禁盯着。**它把光标落到一个滚动容器上,再以真实滚轮事件把容器朝一个方向滚一段距离,然后停手**——不点击、不输入。platformSideEffect 是 none:滚动只改页面本地视口;页面因此自行拉历史或下一页,那是页面自己的请求、节奏与埋点(「手对平台零出站」),不是本原语的副作用。**args 带 CSS selector 是 debug.* 命名空间的显式例外。** 本原语的用途就是让考古者(人或 Claude 经诊断台)指着任意 DOM 滚与点,意图级靶子枚举做不到这一点(每个新靶子都要改契约、换代插件)。脑对该字符串完全不透明:零解释、零平台分支、不落任何业务表;插件在 isolated world 以 querySelectorAll(selector)[index] 定位。只在 debug.osScroll / debug.osClick 两条上如此,任何生产原语的 args 仍不得携带 selector,大方向 2 原样。执行:定位容器(命中不唯一且未给 index 即拒;矩形不在视口内即拒;定不到一步不动)→ 经鼠标线落到容器内一点(复用 osProbe 那条闸链:前台、授权、散开标定、落点确认)→ 插件按簇排滚轮(一簇 3~8 格、簇内间隔对数正态且逐格放慢、簇间停顿 250~700ms)→ 每簇后回读容器 scrollTop 闭环:累计像素达到 distancePx 为 scrolled;容器已到顶/到底为 edge;一簇下去 scrollTop 纹丝不动而又不在边上为 stuck(方向反了、光标不在容器上、页面拦截——如实报,不换方向、不重试);手服务核对光标已不在落点、或落点闸链任一步未放行为 refusedByGate。格数由闭环决定,不进 args;单次调用只滚 distancePx。data 只回诊断整数(滚动前后 scrollTop、实际像素、格数、簇数、落点趟数),不回显 selector,不带坐标、账号或候选人任何信息;每簇观测走 detail。不声明 surface.im:考古对象是任意 BOSS 页面,适配器只核对登录身份与页面存在。**它是生产滚动能力的前身**:readList move=next、readThread 翻历史到顶、截图拼接接上滚轮时复用同一条注入链与排版器,各自另立、另裁。leaseMs 必须声明——base 的租约脉冲只对声明了它的命令启动。"
+    },
+    "debug.osClick": {
+      "ver": 1,
+      "class": "intrusive",
+      "batch": "X",
+      "platformSideEffect": "none",
+      "argsSchema": "DebugOsClickArgs",
+      "dataSchema": "DebugOsClickData",
+      "preconditions": [
+        "context.platform",
+        "context.accountRef",
+        "context.expectedPrincipalFingerprint",
+        "login.in",
+        "manualQuiet"
+      ],
+      "execBudgetMs": 180000,
+      "deadlineMs": 300000,
+      "leaseMs": 60000,
+      "note": "开发期 OS 点击探针(2026-09-03 立案),与 debug.osProbe 同族:独立原语,不改动任何生产原语的执行路径;脑侧无任何业务生产者,唯一派发入口是 /admin 手动端点,门禁盯着。它是 osProbe 的 reversibleToggle 靶子的一般化:靶子不再是枚举,而是 selector(+index)指着的任意元素,供考古者(人或 Claude 经诊断台)替代 CDP 点击——CDP 的点击没有 OS 轨迹,不够拟人。args 带 selector 是 debug.* 命名空间的显式例外,理由与边界见 debug.osScroll。两种模式:**move** 只把光标以拟人轨迹落到元素上、过落点确认就停,绝不点击(与 osProbe 的 landed 同一收场);**click** 在此之上复用 osProbe 至多一次点击的内核——命中测试(落点像素上就是该元素或其后代)、手服务光标核对、按一下、观测后置——不重试。**这是本轮唯一会点东西的探针,所以 platformSideEffect 声明为 none 是有条件的**:点击本身对页面做什么由靶子决定,不可逆控件(发送、确认、删除)点下去就是真副作用。防线四道,缺一不点:selector+index 命中唯一(不唯一且未给 index 即拒);expectText 给了就与元素 textContent(去首尾空白)逐字相等,不等即拒;命中测试在点击前最后一次读,落点上不是该元素或其后代即拒;元素矩形不在视口内即拒(先用 debug.osScroll 滚进来)。使用者仍须只对可逆或已裁决的控件用 click 模式——它是考古工具,不是授权。data 与 DebugOsProbeData 同形(mode 替代 target),只回诊断整数,不回显 selector,不带坐标、账号或候选人任何信息;元素签名(标签/类名链/尺寸/文本头几个字)走 detail。不声明 surface.im,理由同 debug.osScroll。leaseMs 必须声明。"
     },
     "debug.osProbe": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
