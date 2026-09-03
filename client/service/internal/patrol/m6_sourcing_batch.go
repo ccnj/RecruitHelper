@@ -35,7 +35,7 @@ const (
 	sourcingBlockNoProgress      = "windowNoProgress"
 	sourcingBlockJobStatusRead   = store.SourcingBatchGateReasonStatusRead
 	sourcingBlockJobNotOnline    = store.SourcingBatchGateReasonJobNotOnline
-	// sourcingBlockRecommendPageNotReady:切职位时推荐页未就绪且同轮重试一次仍
+	// sourcingBlockRecommendPageNotReady:切职位时推荐页未就绪且同轮重试 5 次仍
 	// 未就绪(手自证瞬时);从 positionSelectFailed 拆出以便 UI 精确提示。
 	sourcingBlockRecommendPageNotReady = store.SourcingBatchGateReasonRecommendPageNotReady
 	// sourcingBlockPlanFinalize:当日职位计划定稿失败(AGENTS.md 2026-09-01)。
@@ -128,7 +128,7 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		if err := a.setStage("selectingSourcingPosition"); err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
 		}
-		selected, err := a.selectSourcingPositionWithOneRetry(ctx, batch.BatchID, positionTitle)
+		selected, err := a.selectSourcingPositionWithRetries(ctx, batch.BatchID, positionTitle)
 		if err != nil {
 			reason := sourcingBlockPositionSelect
 			if transientPageNotReady(err) {
@@ -294,36 +294,43 @@ func (a *roundActor) waitSourcingPace(ctx context.Context) error {
 	return a.waitSourcingDelay(ctx, a.manager.config.SourcingPaceWait)
 }
 
-// selectSourcingPositionWithOneRetry 在 preparing 阶段、推荐流尚未绑定时切换
+// sourcingPositionSelectMaxRetries:切职位时推荐页未就绪(手自证瞬时)在同轮
+// 最多再发几次同款命令。2026-09-03 甲方裁决自 1 次提到 5 次(共 6 次尝试),同批
+// 把该原语的推荐页就绪等待放宽到 60 秒(AGENTS.md 条件等待上限同日修订)。
+const sourcingPositionSelectMaxRetries = 5
+
+// selectSourcingPositionWithRetries 在 preparing 阶段、推荐流尚未绑定时切换
 // 职位:手报 CTX_NOT_READY 且自证瞬时(retryable=afterRecovery/yes)就等一个交互
 // 节奏后同轮再发一次同款命令——原语自己会重新导航到推荐页并再等一个条件等待
-// 上限。只多这一次,不加持久化计数;第二次仍失败按原路径拦停批次。
+// 上限。至多重试 sourcingPositionSelectMaxRetries 次,不加持久化计数;最后一次
+// 仍失败按原路径拦停批次。
 // 立案:2026-09-02 尚虹02 真机切第二个职位时推荐页 9.8s 未就绪,整日计划因此
 // 少跑一个职位(47 份额);同款切换前一批 7.1s 成功。甲方 2026-09-02 裁决:这不是
 // AGENTS.md「批间接续失败……不自动重试」所指的自动重试,规格不改。本函数只服务
 // 职位尚未选定、推荐流尚未绑定的这一步,不得挪到之后任何会刷新推荐流的位置。
-func (a *roundActor) selectSourcingPositionWithOneRetry(
+func (a *roundActor) selectSourcingPositionWithRetries(
 	ctx context.Context,
 	batchID string,
 	positionTitle string,
 ) (protocol.CandidateSelectSourcingPositionData, error) {
 	args := protocol.CandidateSelectSourcingPositionArgs{PositionTitle: positionTitle}
-	selected, err := invokePrimitive[protocol.CandidateSelectSourcingPositionData](
-		ctx, a, protocol.PrimCandidateSelectSourcingPosition, args,
-	)
-	if err == nil || !transientPageNotReady(err) {
-		return selected, err
+	for attempt := 0; ; attempt++ {
+		selected, err := invokePrimitive[protocol.CandidateSelectSourcingPositionData](
+			ctx, a, protocol.PrimCandidateSelectSourcingPosition, args,
+		)
+		if err == nil || !transientPageNotReady(err) || attempt >= sourcingPositionSelectMaxRetries {
+			return selected, err
+		}
+		// 留痕(「错误收敛必须留痕」):每一次未就绪的完整判定现场进日志,最后
+		// 一次的结果走原有失败路径落批次原因。
+		slog.Warn("推荐页未就绪,切换职位同轮再试",
+			"batchId", batchID, "positionTitle", positionTitle,
+			"attempt", attempt+1, "maxRetries", sourcingPositionSelectMaxRetries,
+			"err", err.Error())
+		if paceErr := a.waitSourcingInteractionPace(ctx); paceErr != nil {
+			return selected, paceErr
+		}
 	}
-	// 留痕(「错误收敛必须留痕」):第一次的完整判定现场进日志,第二次的结果
-	// 走原有失败路径落批次原因。
-	slog.Warn("推荐页未就绪,切换职位同轮再试一次",
-		"batchId", batchID, "positionTitle", positionTitle, "err", err.Error())
-	if paceErr := a.waitSourcingInteractionPace(ctx); paceErr != nil {
-		return selected, paceErr
-	}
-	return invokePrimitive[protocol.CandidateSelectSourcingPositionData](
-		ctx, a, protocol.PrimCandidateSelectSourcingPosition, args,
-	)
 }
 
 // transientPageNotReady 只认手的协议级证词:CTX_NOT_READY 且 retryable 为

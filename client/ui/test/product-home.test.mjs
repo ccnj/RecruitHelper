@@ -29,7 +29,7 @@ const {
   const notReady = planSkipReasonParts(
     'batch:recommendPageNotReady|CTX_NOT_READY/pageBroken: 智联推荐页在期限内未就绪',
   )
-  assert.equal(notReady.label, '推荐页加载超时（已重试一次）')
+  assert.equal(notReady.label, '推荐页加载超时（已重试 5 次）')
   assert.equal(notReady.detail, 'CTX_NOT_READY/pageBroken: 智联推荐页在期限内未就绪')
   const absent = planSkipReasonParts('batch:positionSelectFailed|TARGET_NOT_FOUND: 后台绑定职位不在当前智联职位列表中')
   assert.equal(absent.label, '推荐页职位列表里找不到该职位或无法唯一确定')

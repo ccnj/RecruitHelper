@@ -32,7 +32,7 @@ func startPreparingSourcingBatch(t *testing.T, h *harness, tag string) *store.So
 	return &started.Batch
 }
 
-// 切职位时推荐页未就绪(手自证 afterRecovery)只在同轮多试一次;不走 ensureSurface
+// 切职位时推荐页未就绪(手自证 afterRecovery)在同轮重试,第二次成功即止;不走 ensureSurface
 // 救场链(它只认 pageAbsent/contentScriptDead 且导航去 IM 页)。2026-09-02 尚虹02
 // 真机:一次 9.8s 的慢加载让第二个职位当日份额全丢。
 func TestSourcingPositionSelectRetriesOnceWhenRecommendPageNotReady(t *testing.T) {
@@ -81,8 +81,9 @@ func TestSourcingPositionSelectRetriesOnceWhenRecommendPageNotReady(t *testing.T
 	}
 }
 
-// 第二次仍未就绪就按原路径拦停批次:只多一次,不加计数、不无界重试。
-func TestSourcingPositionSelectBlocksAfterSecondNotReady(t *testing.T) {
+// 重试耗尽(1 次首发 + sourcingPositionSelectMaxRetries 次重试)仍未就绪就按原
+// 路径拦停批次:不加持久化计数、不无界重试。
+func TestSourcingPositionSelectBlocksAfterRetriesExhausted(t *testing.T) {
 	h := newHarness(t)
 	batch := startPreparingSourcingBatch(t, h, "position-select-retry-exhausted")
 
@@ -100,15 +101,15 @@ func TestSourcingPositionSelectBlocksAfterSecondNotReady(t *testing.T) {
 		t.Fatalf("Tick: %v", tickErr)
 	}
 	if len(result.Rounds) != 1 || result.Rounds[0].Err == nil {
-		t.Fatalf("两次未就绪应以错误收束: %+v", result.Rounds)
+		t.Fatalf("重试耗尽仍未就绪应以错误收束: %+v", result.Rounds)
 	}
-	if selectCalls != 2 {
-		t.Fatalf("应恰好尝试两次职位选择,实际 %d 次: %v", selectCalls, h.runner.names())
+	if want := 1 + sourcingPositionSelectMaxRetries; selectCalls != want {
+		t.Fatalf("应恰好尝试 %d 次职位选择,实际 %d 次: %v", want, selectCalls, h.runner.names())
 	}
 	stored, err := h.db.SourcingBatchByID(batch.BatchID)
 	if err != nil || stored == nil || stored.Status != store.SourcingBatchBlocked ||
 		stored.Reason != store.SourcingBatchGateReasonRecommendPageNotReady {
-		t.Fatalf("第二次未就绪后批次应按 recommendPageNotReady blocked: batch=%+v err=%v", stored, err)
+		t.Fatalf("重试耗尽后批次应按 recommendPageNotReady blocked: batch=%+v err=%v", stored, err)
 	}
 	// 留痕:原因码收窄前的判定现场(错误码/原因/手报原话)随批次行落库。
 	if !strings.Contains(stored.ReasonDetail, "CTX_NOT_READY/pageBroken") ||

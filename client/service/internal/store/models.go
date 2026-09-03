@@ -318,7 +318,7 @@ const (
 	SourcingBatchGateReasonStatusRead     = "jobStatusReadFailed"
 	SourcingBatchGateReasonPositionSelect = "positionSelectFailed"
 	// SourcingBatchGateReasonRecommendPageNotReady:切职位时推荐页在条件等待上限
-	// 内未就绪(手自证瞬时,同轮已重试一次仍未就绪)。2026-09-02 甲方裁决从
+	// 内未就绪(手自证瞬时,同轮已重试 5 次仍未就绪)。2026-09-02 甲方裁决从
 	// positionSelectFailed 拆出:后者只留给"职位列表里找不到/无法唯一确定",
 	// 两者同为跳过类,行为不变,只为产品 UI 能精确提示错误类别。
 	SourcingBatchGateReasonRecommendPageNotReady = "recommendPageNotReady"
