@@ -1572,19 +1572,25 @@ async function readBossList(
   const wantUnread = args.filter === 'unread'
   ctx.checkpoint()
   await ensureBossListFilter(tab, ctx, fingerprint, wantUnread)
-  const read = await readBossListWindow(tab, ctx)
+  // 「未读」小页签是服务端查询:类名同步翻、数据异步回(平台事实 §十二)。类名翻了之后
+  // 数据层可能还是「全部」那份,所以按条件等待"窗内全部行未读数>0"(封顶 20s);超时按
+  // 规格 §12.6「零值不得单独导致整窗失败,也不得由手静默过滤」照常返回并留痕。
+  const allUnread = (read: BossListWindowRead): boolean =>
+    read.status !== 'ready' || read.rows.every((row) => row.newMsgCount > 0)
+  const settled = wantUnread
+    ? await pollUntil(ctx, () => readBossListWindow(tab, ctx), allUnread)
+    : { value: await readBossListWindow(tab, ctx), satisfied: true }
+  const read = settled.value
   if (read.status === 'missing') {
     throw new PlatformError('ELEMENT_UNRESOLVED',
       `会话列表数据层读不到(DOM 行 ${read.domRows},候选数组 ${read.candidates})`, 'afterRecovery')
   }
   const rows = read.status === 'ready' ? read.rows : []
   const total = read.status === 'ready' ? read.total : 0
-  if (wantUnread) {
-    const readRows = rows.filter((row) => row.newMsgCount <= 0)
-    if (readRows.length > 0) {
-      throw new PlatformError('ELEMENT_UNRESOLVED',
-        `未读筛选回读不一致:窗口内 ${readRows.length}/${rows.length} 行未读数为 0`, 'afterRecovery')
-    }
+  if (wantUnread && !settled.satisfied) {
+    const zero = rows.filter((row) => row.newMsgCount <= 0).length
+    reportHandLog('warn', 'unreadWindowHasReadRows',
+      `chat.readList(filter=unread) 窗内 ${zero}/${rows.length} 行未读数为 0,等待 ${READY_WAIT_MS}ms 未收敛,照常返回`)
   }
   const cutoffMs = args.filter === 'all'
     ? Date.now() - Math.min(30, Math.max(1, args.stopOlderThanDays ?? 8)) * 86_400_000
