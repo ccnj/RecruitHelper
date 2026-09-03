@@ -15614,6 +15614,20 @@ test('BOSS 判读:指纹上报算例行,其余码算命中,全局名差集单独
   assert.equal(bossCodeMeaning('550239').nearUniversal, true)
   assert.equal(bossCodeMeaning('550094').nearUniversal, undefined)
   assert.deepEqual(classifyBossEntry(aegis, null).hits, [])
+
+  // 行为层那一族绕开 isTrusted,是合成点击真正会踩的码 —— 面板不该把它们报成"新东西"。
+  assert.equal(bossCodeMeaning('700051').known, true, '2026-09-03 本机命中过一次')
+  for (const code of ['700028', '700053', '700061', '700071', '761005', '910015']) {
+    assert.equal(bossCodeMeaning(code).known, true, `${code} 该在码表里`)
+  }
+  // 首页(C 端)那套 SDK 的码与我们无关:端口探测同样是"1 秒内有反应"的坏判据,折进噪音。
+  assert.equal(bossCodeMeaning('410001').nearUniversal, true)
+  // 470000 是 C 端每次点击的基线码,不是命中。
+  const geek = classifyBossEntry(aegis, {
+    items: [{ action: 'web-event-click-geek', p2: '470000' }, { action: 'web-event-click-geek', p2: '470001' }],
+  })
+  assert.deepEqual(geek.routine.map((r) => r.code), ['470000'])
+  assert.deepEqual(geek.hits.map((h) => h.code), ['470001'], 'isTrusted 为假那条仍是命中')
 })
 
 // ---- 平台输入行为账本的解析 ----
