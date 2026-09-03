@@ -65,6 +65,10 @@ var darwinKeyCodes = map[string]uint16{
 
 	"Space":     0x31,
 	"ShiftLeft": 0x38,
+	// 编辑键:清空输入框走 cmd+A 加 Backspace(2026-09-03 裁决撤销 composer.empty)。
+	"Backspace":   0x33,
+	"MetaLeft":    0x37,
+	"ControlLeft": 0x3B,
 }
 
 // darwinKeyCode 查表。**没有兜底**——表外的 code 显式报错,不猜、不静默降级。

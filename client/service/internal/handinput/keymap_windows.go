@@ -51,6 +51,11 @@ var windowsKeyCodes = map[string]uint16{
 	"Space":     0x20, // VK_SPACE
 	"ShiftLeft": 0xA0, // VK_LSHIFT —— 不是 VK_SHIFT(0x10)。后者是"哪边都行"的
 	// 聚合码,SendInput 发它系统认不出是哪个物理键,扫描码也就映不出来。
+	// 编辑键:清空输入框走 ctrl+A 加 Backspace(2026-09-03 裁决撤销 composer.empty)。
+	// 刻意不收 MetaLeft:VK_LWIN 是扩展键,本表的扫描码路径没处理扩展标记,收了就是
+	// 半对的键;Windows 上全选本来也不用它。排版器发了它会在校验期显式报错。
+	"Backspace":   0x08, // VK_BACK
+	"ControlLeft": 0xA2, // VK_LCONTROL —— 同 ShiftLeft 的理由,不用聚合码 VK_CONTROL
 }
 
 func init() {

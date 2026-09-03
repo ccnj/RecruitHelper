@@ -23,6 +23,11 @@ var punctKeysFromUpstream = []string{
 // (甲方 2026-09-02 裁决),正常路径碰不到这里;留着是为了万一前门漏了。
 var refusedOnPurpose = []string{"Enter"}
 
+// 清空输入框的裸按键序列(插件 osinput.composeClearKeys,2026-09-03 裁决撤销 composer.empty)
+// 用到的编辑键:全选的修饰键与 Backspace。两张表都收 ControlLeft;darwin 的全选是 cmd+A,
+// MetaLeft 只进 darwin 表(见 keymap_darwin_test.go),windows 表刻意不收它(VK_LWIN 是扩展键)。
+var editingKeysFromClearSequence = []string{"Backspace", "ControlLeft"}
+
 // emittableKeyCodes 把全集**推出来**,不是从任何一张表里抄——抄一遍就成了
 // 自己跟自己比,表里少一个字母、期望里也少一个,测试照样绿。
 func emittableKeyCodes() map[string]bool {
@@ -35,6 +40,9 @@ func emittableKeyCodes() map[string]bool {
 	}
 	for _, p := range punctKeysFromUpstream {
 		want[p] = true
+	}
+	for _, e := range editingKeysFromClearSequence {
+		want[e] = true
 	}
 	return want
 }

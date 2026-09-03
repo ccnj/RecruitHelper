@@ -34,6 +34,7 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/handinput/landing", s.handleLanding)
 	mux.HandleFunc("/handinput/click", s.handleClick)
 	mux.HandleFunc("/handinput/type", s.handleType)
+	mux.HandleFunc("/handinput/keys", s.handleKeys)
 	mux.HandleFunc("/handinput/reseed", s.handleReseed)
 }
 
@@ -153,6 +154,21 @@ func (s *Service) handleType(w http.ResponseWriter, r *http.Request) {
 	res, err := s.Type(plan)
 	if err != nil {
 		// 校验不过与注入失败都回 500 并带上已发出的次数:插件要知道发出去多少。
+		res.Status = err.Error()
+		writeJSON(w, http.StatusInternalServerError, res)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// keys 播一段裸按键(清空输入框的全选加删除)。回包形状与 /type 相同。
+func (s *Service) handleKeys(w http.ResponseWriter, r *http.Request) {
+	var seq KeySequence
+	if !readJSON(w, r, &seq) {
+		return
+	}
+	res, err := s.Keys(seq)
+	if err != nil {
 		res.Status = err.Error()
 		writeJSON(w, http.StatusInternalServerError, res)
 		return

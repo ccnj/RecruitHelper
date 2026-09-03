@@ -10,6 +10,8 @@ import (
 
 func TestDarwinKeymapCoversWholeAlphabet(t *testing.T) {
 	want := emittableKeyCodes()
+	// macOS 的全选是 cmd+A:MetaLeft 只有 darwin 表收(清空序列的修饰键按操作系统选)。
+	want["MetaLeft"] = true
 
 	for code := range want {
 		if _, err := darwinKeyCode(code); err != nil {
