@@ -29,6 +29,9 @@ import { BlobChannelError, captureVisibleTabJpegDataUrl, putSessionBlob, session
 import { describeError, reportHandLog } from '../../base/handLog'
 import type { BlobPutOutcome } from '../../base/capture'
 import type {
+  CandidateReadResumeArgs,
+  CandidateReadResumeData,
+  CandidateResumeLabelValue,
   CaptureScreenshotData,
   ChatCaptureThreadScreenshotArgs,
   ChatIdentifyCurrentConversationData,
@@ -2036,8 +2039,155 @@ async function captureBossThreadScreenshot(
   }
 }
 
+
+// ── candidate.readResume(摘要级,零点击) ─────────────────────────────────────
+//
+// BOSS 的「在线简历」面板正文画在一个同源 iframe 的 canvas 上,DOM 与内存都没有描述文字
+// (平台事实 §十三,2026-09-03)。机器能拿到的简历是摘要级:右侧候选人信息区的
+// `conversation$` 里有年龄、年限、学历、城市、活跃时间、工作经历抬头与教育经历,
+// 打开会话即有,不需要点面板。自我评价填空串(智联缺它时同款)。期望分区为空:
+// `conversation$` 上的 toPosition/salaryDesc 是我方沟通职位与薪资,不是候选人期望。
+// 性别码(gender)与文案的对应未真机验证,按枚举面事实门不映射、整行省略。
+
+interface BossResumeRead {
+  status: 'ready' | 'none' | 'ambiguous' | 'mismatch'
+  name: string
+  ageDesc: string
+  year: string
+  edu: string
+  city: string
+  activeTimeDesc: string
+  work: Array<{ company: string; positionName: string; timeDesc: string }>
+  education: Array<{ school: string; major: string; degree: string; timeDesc: string }>
+}
+
+/** 页面里读当前会话的候选人摘要。自包含;只取平台事实 §十三 列出的字段。 */
+function mainReadBossResume(uid: number, friendSource: number): BossResumeRead {
+  type AnyRecord = Record<string, unknown>
+  const empty: BossResumeRead = {
+    status: 'none', name: '', ageDesc: '', year: '', edu: '', city: '', activeTimeDesc: '', work: [], education: [],
+  }
+  const str = (value: unknown): string => (typeof value === 'string' ? value : '')
+  const seen = new Set<unknown>()
+  const found = new Map<string, AnyRecord>()
+  for (const element of Array.from(document.querySelectorAll('*'))) {
+    const instance = (element as unknown as { __vue__?: AnyRecord }).__vue__
+    if (!instance || seen.has(instance)) continue
+    seen.add(instance)
+    if (!Object.prototype.hasOwnProperty.call(instance, 'conversation$')) continue
+    let conversation: unknown
+    try { conversation = instance['conversation$'] } catch { continue }
+    if (!conversation || typeof conversation !== 'object' || Array.isArray(conversation)) continue
+    const record = conversation as AnyRecord
+    if (typeof record.uid !== 'number' || typeof record.friendSource !== 'number') continue
+    const key = `${record.uid}-${record.friendSource}`
+    if (!found.has(key)) found.set(key, record)
+  }
+  if (found.size === 0) return empty
+  if (found.size > 1) return { ...empty, status: 'ambiguous' }
+  const record = [...found.values()][0]!
+  if (record.uid !== uid || record.friendSource !== friendSource) return { ...empty, status: 'mismatch' }
+  const list = (value: unknown): AnyRecord[] =>
+    Array.isArray(value) ? value.filter((item): item is AnyRecord => !!item && typeof item === 'object') : []
+  return {
+    status: 'ready',
+    name: str(record.name),
+    ageDesc: str(record.ageDesc),
+    year: str(record.year),
+    edu: str(record.edu),
+    city: str(record.city),
+    activeTimeDesc: str(record.activeTimeDesc),
+    work: list(record.workExpList).map((item) => ({
+      company: str(item.company), positionName: str(item.positionName), timeDesc: str(item.timeDesc),
+    })),
+    education: list(record.eduExpList).map((item) => ({
+      school: str(item.school), major: str(item.major), degree: str(item.degree), timeDesc: str(item.timeDesc),
+    })),
+  }
+}
+
+/**
+ * 摘要 → 契约五分区。标签名与智联对齐(脑侧评分按「工作经验」→工作年限、「现居地」→现居映射,
+ * 沉默追问按「年龄」「性别」取值——性别本平台读不到,那条链在 BOSS 上会缺参,已登记):
+ * 值为空的行整行省略,不填占位。
+ */
+export function projectBossResume(
+  read: BossResumeRead, conversationRef: string, platformUserRef: string, observedAt: number,
+): CandidateReadResumeData {
+  const clean = (value: string): string => normalizeBossMessageText(value)
+  const basic: CandidateResumeLabelValue[] = []
+  const push = (label: string, value: string): void => {
+    const cleaned = clean(value)
+    if (cleaned) basic.push({ label, value: cleaned })
+  }
+  push('姓名', read.name)
+  push('年龄', read.ageDesc)
+  push('工作经验', read.year)
+  push('最高学历', read.edu)
+  push('现居地', read.city)
+  push('活跃时间', read.activeTimeDesc)
+  const joinParts = (parts: string[]): string => parts.map(clean).filter(Boolean).join(' · ')
+  const workExperiences = read.work
+    .map((item) => [clean(item.timeDesc), joinParts([item.company, item.positionName])].filter(Boolean).join(' '))
+    .filter(Boolean)
+    .join('\n\n')
+  const education = read.education
+    .map((item) => [clean(item.timeDesc), joinParts([item.school, item.major, item.degree])].filter(Boolean).join(' '))
+    .filter(Boolean)
+    .join('\n\n')
+  return {
+    conversationRef,
+    platformUserRef,
+    observedAt,
+    basic,
+    expectations: [],
+    selfEvaluation: '',
+    education,
+    workExperiences,
+  }
+}
+
+async function readBossResume(
+  args: CandidateReadResumeArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<CandidateReadResumeData> {
+  if (validatePrimitiveArgs(PrimitiveName.CandidateReadResume, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '简历读取参数不符合当前契约', 'manualOnly')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  const parsed = parseBossConversationRef(args.conversationRef)
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+  if (args.platformUserRef !== String(parsed.uid)) {
+    throw new PlatformError('GUARD_FAILED', '候选人引用与会话引用不属于同一人', 'manualOnly')
+  }
+  const tab = await verifiedBossChatTab(fingerprint)
+  ctx.checkpoint()
+  // 摘要挂在当前会话对象上,会话没打开就读不到:与 readThread 同款,行未 selected 时自己点开。
+  await ensureBossThreadOpen(tab, ctx, fingerprint, args.conversationRef)
+  const settled = await pollUntil(ctx,
+    () => runInPage(BOSS_INJECT, tab.id!, mainReadBossResume, [parsed.uid, parsed.friendSource]),
+    (read) => read.status === 'ready' || read.status === 'ambiguous')
+  const read = settled.value
+  if (read.status !== 'ready') {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `当前会话的候选人摘要读不到(${read.status})`, 'afterRecovery')
+  }
+  const data = projectBossResume(read, args.conversationRef, args.platformUserRef, Date.now())
+  if (!data.workExperiences && !data.education && data.basic.length <= 1) {
+    // 只有姓名、其余全空:不像"这个人简历空",更像页面没填好;不返回一份空简历冒充读到。
+    throw new PlatformError('ELEMENT_UNRESOLVED', '候选人摘要除姓名外全空,拒绝返回空简历', 'afterRecovery')
+  }
+  if (jsonBytes(data) > 65_536) throw new PlatformError('PAYLOAD_LIMIT', '简历摘要超过内联载荷上限', 'manualOnly')
+  if (validatePrimitiveData(PrimitiveName.CandidateReadResume, 1, data).length !== 0) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '简历摘要不符合当前契约', 'manualOnly')
+  }
+  await verifiedBossChatTab(fingerprint)
+  ctx.progress('简历摘要读取完成', 100)
+  return data
+}
+
 /** 只为 Node 单测导出纯函数与页面函数;生产 bundle 无引用时被 tree-shake。 */
 export const bossTestHooks = Object.freeze({
+  mainReadBossResume,
+  projectBossResume,
   bossConversationRef,
   parseBossConversationRef,
   parseBossUnreadBadgeText,
@@ -2075,4 +2225,6 @@ export const bossAdapter = {
   openConversation: ({ args, ctx, fingerprint }) => openBossConversation(args, ctx, fingerprint),
   sendMessage: ({ args, guards, ctx, fingerprint }) => sendBossMessage(args, guards, ctx, fingerprint),
   captureThreadScreenshot: ({ args, ctx, fingerprint }) => captureBossThreadScreenshot(args, ctx, fingerprint),
+  // 建档后的简历补采(2026-09-03 甲方选 B):摘要级、零点击,见 readBossResume。
+  readResume: ({ args, ctx, fingerprint }) => readBossResume(args, ctx, fingerprint),
 } satisfies PlatformAdapter

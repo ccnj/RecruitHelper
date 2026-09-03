@@ -15756,8 +15756,8 @@ test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话
   assert.deepEqual(declared, [
     'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
     'osProbe', 'osType', 'probePlatform',
-    'readList', 'readThread', 'readUnreadTotal', 'sendMessage',
-  ], '适配器能力变了。这张名单每加一条都要先过出口')
+    'readList', 'readResume', 'readThread', 'readUnreadTotal', 'sendMessage',
+  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B,建档后补采是场景一的硬前置)')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'sendGreeting'), /未实现原语能力/)
@@ -15787,6 +15787,7 @@ test('hello 平台能力表:智联表等于并集,BOSS 表恰为平台无关四�
     assert.deepEqual(tables[0].caps, union.filter((c) => c !== 'debug.osType@1'),
       '智联表应等于并集减 debug.osType@1')
     assert.deepEqual(tables[1].caps, [
+      'candidate.readResume@1',
       'chat.captureThreadScreenshot@1', 'chat.identifyCurrentConversation@1', 'chat.openConversation@1',
       'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.sendMessage@1',
       'debug.osProbe@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
@@ -16094,6 +16095,44 @@ test('BOSS 发送前最后一道闸:落点是发送钮、选中行仍是目标�
     install({ composer: null })
     assert.equal(gate().onTarget, false, '输入框不见了就不点')
   } finally { globalThis.document = saved }
+})
+
+test('BOSS 简历摘要:从 conversation$ 拼五分区,标签与智联对齐,空值整行省略,期望与自我评价按事实为空', () => {
+  const read = { status: 'ready', name: ' 候选甲 ', ageDesc: '26岁', year: '10年以上', edu: '高中', city: '上海', activeTimeDesc: '刚刚活跃',
+    work: [{ company: '甲公司', positionName: '销售', timeDesc: '2023.10-2026.06' }, { company: '', positionName: '', timeDesc: '' }],
+    education: [{ school: '某中学', major: '', degree: '高中', timeDesc: '2015-2018' }] }
+  const data = bossTestHooks.projectBossResume(read, '11-0', '11', 1788402198000)
+  assert.deepEqual(data.basic, [
+    { label: '姓名', value: '候选甲' }, { label: '年龄', value: '26岁' }, { label: '工作经验', value: '10年以上' },
+    { label: '最高学历', value: '高中' }, { label: '现居地', value: '上海' }, { label: '活跃时间', value: '刚刚活跃' },
+  ])
+  assert.equal(data.workExperiences, '2023.10-2026.06 甲公司 · 销售', '空段落整段省略')
+  assert.equal(data.education, '2015-2018 某中学 · 高中', '空专业不留分隔符')
+  assert.deepEqual([data.expectations, data.selfEvaluation], [[], ''], 'BOSS 内存里没有候选人期望与自我评价,不猜')
+  assert.deepEqual([data.conversationRef, data.platformUserRef, data.observedAt], ['11-0', '11', 1788402198000])
+  const sparse = bossTestHooks.projectBossResume({ ...read, ageDesc: '', year: '', edu: '', city: '', activeTimeDesc: '', work: [], education: [] }, '11-0', '11', 1)
+  assert.deepEqual(sparse.basic, [{ label: '姓名', value: '候选甲' }])
+  assert.equal(sparse.workExperiences, '')
+})
+
+test('BOSS 简历摘要页面读:按形状找当前会话对象,uid 不对就 mismatch,没开会话就 none,职位薪资与性别码不出页面', () => {
+  const conversation = { uid: 11, friendSource: 0, name: '候选甲', ageDesc: '26岁', year: '10年以上', edu: '高中', city: '上海', activeTimeDesc: '刚刚活跃',
+    workExpList: [{ company: '甲公司', positionName: '销售', timeDesc: '2023.10-2026.06' }], eduExpList: [{ school: '某中学', major: '', degree: '高中', degreeCode: 206, timeDesc: '2015-2018' }],
+    toPosition: '销售经理', salaryDesc: '14-28K', gender: 1, token: 'must-not-leak' }
+  const page = installBossPageFixture({ instances: [{ 'conversation$': conversation }, { 'conversation$': conversation }] })
+  try {
+    const read = bossTestHooks.mainReadBossResume(11, 0)
+    assert.equal(read.status, 'ready')
+    assert.deepEqual(read.work, [{ company: '甲公司', positionName: '销售', timeDesc: '2023.10-2026.06' }])
+    assert.deepEqual(read.education, [{ school: '某中学', major: '', degree: '高中', timeDesc: '2015-2018' }])
+    const serialized = JSON.stringify(read)
+    for (const forbidden of ['must-not-leak', '销售经理', '14-28K', '"gender"']) {
+      assert.equal(serialized.includes(forbidden), false, `摘要不该带出:${forbidden}`)
+    }
+    assert.equal(bossTestHooks.mainReadBossResume(12, 0).status, 'mismatch', '当前会话不是目标就不交')
+  } finally { page.restore() }
+  const none = installBossPageFixture({ instances: [{ other: 1 }] })
+  try { assert.equal(bossTestHooks.mainReadBossResume(11, 0).status, 'none') } finally { none.restore() }
 })
 
 test('OS 注入的观测器装在 isolated world:落点/点击观测的每一次注入都不进 MAIN', async () => {
