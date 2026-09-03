@@ -121,6 +121,16 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 	return err
 }
 
+// skipTurnWithoutEngine 是"该用途没有可用引擎"的唯一出口:轮原状停在当前状态等配置,
+// 不写状态、不转人工,但必须留痕(错误收敛必须留痕,2026-08-26)。2026-09-03 BOSS 测试客户
+// 在后台没配客户级资源组,意向判断引擎为空,轮停在 collected 十几分钟、日志零行,人只能靠猜。
+func (a *roundActor) skipTurnWithoutEngine(turn store.DialogueTurn, purpose m5ai.CompletionPurpose) error {
+	slog.Warn("对话轮跳过:该用途没有可用的模型引擎(客户级或回复专用配置缺席),轮原状等配置",
+		"profileId", turn.ProfileID, "turnId", turn.TurnID, "turnStatus", turn.Status,
+		"purpose", purpose, "reason", "adviceEngineMissing")
+	return nil
+}
+
 func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.DialogueTurn) error {
 	turn := initial
 	for step := 0; step < 3; step++ {
@@ -197,7 +207,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
 			}
 			if a.manager.adviceFor(m5ai.PurposeIntent) == nil {
-				return nil
+				return a.skipTurnWithoutEngine(turn, m5ai.PurposeIntent)
 			}
 			if err := a.runM5IntentAdvice(ctx, turn, material, facts); err != nil {
 				return err
@@ -205,7 +215,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 		case store.DialogueTurnClassified:
 			if v4Owned && nextV4Advice == communication.V4AdviceServiceReply {
 				if a.manager.adviceFor(m5ai.PurposeServiceReply) == nil {
-					return nil
+					return a.skipTurnWithoutEngine(turn, m5ai.PurposeServiceReply)
 				}
 				if err := a.runM5ReplyAdvice(
 					ctx,
@@ -229,7 +239,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 					return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
 				}
 				if a.manager.adviceFor(m5ai.PurposeReply) == nil {
-					return nil
+					return a.skipTurnWithoutEngine(turn, m5ai.PurposeReply)
 				}
 				if err := a.runM5ReplyAdvice(
 					ctx,
@@ -252,7 +262,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 					return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
 				}
 				if a.manager.adviceFor(m5ai.PurposeReply) == nil {
-					return nil
+					return a.skipTurnWithoutEngine(turn, m5ai.PurposeReply)
 				}
 				if err := a.runM5ReplyAdvice(
 					ctx,
@@ -275,7 +285,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
 			}
 			if a.manager.adviceFor(m5ai.PurposeReply) == nil {
-				return nil
+				return a.skipTurnWithoutEngine(turn, m5ai.PurposeReply)
 			}
 			if err := a.runM5ReplyAdvice(
 				ctx,
