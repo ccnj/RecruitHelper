@@ -493,14 +493,17 @@ func PreferredProposalSlots(seed string, frozenNow time.Time, slots []string) []
 	}
 	sort.Strings(morning)
 	sort.Strings(afternoon)
+	// 上午、下午各取哈希的不同 8 字节,两个下标互相独立:同一个数除以常数再取模会在
+	// 特定表形(如上午 14 格、下午 2 格)下把配对锁死(定向审查发现,优化级)。
 	sum := sha256.Sum256([]byte(seed))
-	h := binary.BigEndian.Uint64(sum[:8])
+	morningHash := binary.BigEndian.Uint64(sum[:8])
+	afternoonHash := binary.BigEndian.Uint64(sum[8:16])
 	var picked []string
 	if len(morning) > 0 {
-		picked = append(picked, morning[int(h%uint64(len(morning)))])
+		picked = append(picked, morning[int(morningHash%uint64(len(morning)))])
 	}
 	if len(afternoon) > 0 {
-		picked = append(picked, afternoon[int((h/7)%uint64(len(afternoon)))])
+		picked = append(picked, afternoon[int(afternoonHash%uint64(len(afternoon)))])
 	}
 	return picked
 }
