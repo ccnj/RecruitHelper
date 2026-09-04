@@ -377,7 +377,30 @@ function pageInstallObserverAndReadViewport(key: string): ViewportFacts {
     state.y = e.clientY
   }
   document.addEventListener('mousemove', onMove, true)
-  state.off = (): void => document.removeEventListener('mousemove', onMove, true)
+  const offs: Array<() => void> = [(): void => document.removeEventListener('mousemove', onMove, true)]
+  // **同源 iframe 的文档也要装。** mousemove 派给光标所在的那个文档,顶层收不到 iframe 里的事件:
+  // 光标一进 iframe,顶层记住的就是它跨过边界前的最后一个点。2026-09-04 真机:BOSS 推荐页整张
+  // 列表画在 iframe 里,三趟落点全报成窗口右下角——那是光标进入顶层区域的入口,不是落点——
+  // 标定拿假样本越学越歪。iframe 里的 clientX/Y 是它自己视口的坐标,加上 iframe 在顶层的位置与
+  // 边框换算回顶层视口,与 domLocateBySelector 的 `A >>> B` 换算同一口径。跨域的读不到文档,跳过。
+  for (const frame of Array.from(document.querySelectorAll('iframe'))) {
+    let doc: Document | null = null
+    try {
+      doc = frame.contentDocument
+    } catch {
+      doc = null
+    }
+    if (!doc) continue
+    const onFrameMove = (e: MouseEvent): void => {
+      const r = frame.getBoundingClientRect()
+      state.x = e.clientX + r.left + frame.clientLeft
+      state.y = e.clientY + r.top + frame.clientTop
+    }
+    doc.addEventListener('mousemove', onFrameMove, true)
+    const frameDoc = doc
+    offs.push((): void => frameDoc.removeEventListener('mousemove', onFrameMove, true))
+  }
+  state.off = (): void => { for (const off of offs) off() }
   // enumerable:false —— Object.keys(window) 里看不见它。configurable:true 让
   // 读完之后的 delete 照常生效。
   Object.defineProperty(w, key, { value: state, enumerable: false, configurable: true, writable: true })
