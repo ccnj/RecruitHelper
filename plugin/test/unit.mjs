@@ -15949,7 +15949,7 @@ test('全文档观察器只给能读登录态的站点装:BOSS 上一个都不�
   }
 })
 
-test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话原语加场景二三条换微信原语,其余显式拒绝', () => {
+test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话原语加场景二三条换微信原语加场景三邀面卡一条,其余显式拒绝', () => {
   assert.equal(bossAdapter.id, 'boss')
   assert.equal(bossAdapter.hostMatch, bossSite.match, '适配器与站点表必须是同一个"BOSS 是谁"')
   // MAIN 是 2026-08-28 取数通道裁决的直接后果:isolated world 拿不到 user$ 与消息数组。
@@ -15964,21 +15964,21 @@ test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话
     .sort()
   // **这张名单只在过了出口之后才准变长。** 三条探针(2026-08-28/08-30/09-01 各自出口)之后,
   // 2026-09-03 甲方批准场景一出口,加了七条会话原语——恰好是「仅回复一轮闭环」要的那七条。
-  // 2026-09-04 甲方批准场景二出口,加了换微信线三条(sendWechatInvite/acceptWechat/readWechatExchangeOutcome)。
-  // 邀面卡、采集、招呼一条都没有:场景三与第二刀各自另过出口。
+  // 2026-09-04 甲方批准场景二出口,加了换微信线三条(sendWechatInvite/acceptWechat/readWechatExchangeOutcome);
+  // 同日批准场景三出口,加了邀面卡一条(sendInviteCard)。采集、招呼一条都没有:第二刀另过出口。
   assert.deepEqual(declared, [
     'acceptWechat', 'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
     'osClick', 'osProbe', 'osScroll', 'osType', 'probePlatform',
     'readList', 'readResume', 'readThread', 'readUnreadTotal', 'readWechatExchangeOutcome',
-    'sendMessage', 'sendWechatInvite',
-  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口)')
+    'sendInviteCard', 'sendMessage', 'sendWechatInvite',
+  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口;邀面卡:2026-09-04 场景三出口)')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'sendGreeting'), /未实现原语能力/)
-  assert.throws(() => requireCapability(bossAdapter, 'sendInviteCard'), /未实现原语能力/, '邀面卡是场景三,尚未过出口')
+  assert.throws(() => requireCapability(bossAdapter, 'readGreetingOutcome'), /未实现原语能力/, '招呼线是第二刀,尚未过出口')
 })
 
-test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表恰为平台无关四条加探针五条加场景一七条加场景二三条', async () => {
+test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表恰为平台无关四条加探针五条加场景一七条加场景二三条加场景三一条', async () => {
   // 原语的 capability 字段是与 handler 内 callPlatform 字面量并行的第二份声明;
   // 这两条断言把它钉住:漏填一条,BOSS 表会多出一条(第二条红);填错名字,
   // 智联表会少一条(第一条红)。
@@ -16006,7 +16006,7 @@ test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表�
       'candidate.readResume@1',
       'chat.acceptWechat@1', 'chat.captureThreadScreenshot@1', 'chat.identifyCurrentConversation@1', 'chat.openConversation@1',
       'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.readWechatExchangeOutcome@1',
-      'chat.sendMessage@1', 'chat.sendWechatInvite@1',
+      'chat.sendInviteCard@1', 'chat.sendMessage@1', 'chat.sendWechatInvite@1',
       'debug.osClick@1', 'debug.osProbe@1', 'debug.osScroll@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
       'debug.slowEcho@1', 'debug.switchWindow@1', 'probe.platform@1',
     ], 'BOSS 表变了:要么适配器长了能力(先过出口),要么某条原语漏填 capability')
@@ -16106,11 +16106,26 @@ test('BOSS 消息投影:只实现真机已见的 bizType,未见值归并 system 
   assert.equal(otherAsk.kind, 'text', '不带 aid 33 的 dialog 不是换微信请求,按既有文本路径走')
   const recalled = projectBossMessage({ ...base, status: 3, text: '' })
   assert.deepEqual([recalled.kind, recalled.text], ['system', '[消息已撤回]'])
-  for (const [bizType, condition, state, direction] of [[21130009, 1, 'pending', 'out'], [21130008, 3, 'accepted', 'in'], [21130006, 5, 'expired', 'out'], [21130009, 4, 'unknown', 'out']]) {
+  // 邀面卡三码按 bizType 分支(出口 §2.1,2026-09-04 真机两时机复核):我方发出投 unknown(意图行写 unknown,投 pending 会被
+  // 当成 unknown→pending 跃迁转人工);接受投 accepted;取消不论方向都投 system(出站会被读成又发一张,入站会判 unknownEvent)。
+  for (const [bizType, condition, state, direction, noisy] of [
+    [21130009, 1, 'unknown', 'out', false], [21130008, 3, 'accepted', 'in', false],
+    [21130009, 4, 'unknown', 'out', true], [21130008, 2, 'unknown', 'in', true],
+  ]) {
     const card = projectBossMessage({ ...base, bizType, bodyType: 14, direction, text: '发送了面试邀请', interviewCondition: condition })
     assert.deepEqual([card.kind, card.cardType, card.cardState, card.direction], ['card', 'interviewInvite', state, direction], `bizType=${bizType}`)
     assert.equal(card.hashInput, 'card\x1finterviewInvite', '契约包 1.2(2026-09-04):BOSS 卡无参数,投常量配方,状态分离在 cardState')
+    assert.equal(card.unrecognized !== undefined, noisy, `bizType=${bizType} condition=${condition}:未见 condition 只进日志`)
   }
+  for (const direction of ['out', 'in']) {
+    const cancel = projectBossMessage({ ...base, bizType: 21130006, bodyType: 14, direction, text: '取消了面试', interviewCondition: 5 })
+    assert.deepEqual([cancel.kind, cancel.cardType, cancel.direction, cancel.text, cancel.unrecognized], ['system', undefined, direction, '取消了面试', undefined],
+      `取消行(${direction})投 system 不投 card:脑侧对出站 interviewInvite 任何状态都读成又发一张,对入站非 accepted 判 unknownEvent`)
+  }
+  const cancelEmpty = projectBossMessage({ ...base, bizType: 21130006, bodyType: 14, direction: 'in', text: '', interviewCondition: 5 })
+  assert.equal(cancelEmpty.text, '[系统消息:21130006]')
+  const attachment = projectBossMessage({ ...base, bizType: 21050008, bodyType: 12, type: 'hyperLink', direction: 'in', text: '简历.pdf' })
+  assert.deepEqual([attachment.kind, attachment.unrecognized], ['system', undefined], '接受面试时自动发的附件简历已见,归 system 不再报 unrecognized')
   const wxReq = projectBossMessage({ ...base, bizType: 21050024, bodyType: 4, type: 'action', direction: 'out', text: '请求交换微信已发送', actionAid: 32 })
   assert.deepEqual([wxReq.kind, wxReq.cardType, wxReq.cardState, wxReq.hashInput], ['card', 'wechatExchange', 'pending', 'card\x1fwechatExchange'])
   const resumeReq = projectBossMessage({ ...base, bizType: 14, bodyType: 7, text: '对方请求发送附件简历' })
@@ -16200,6 +16215,323 @@ test('BOSS 接受前最后一道闸:只认换微信请求卡里的「同意」,�
   } finally {
     globalThis.document = saved
     globalThis.window = savedWindow
+  }
+})
+
+test('BOSS 邀面参数换算:按本机时区拆日期与起止,一律宽松时间;onsite 结束=开始+1h 只填表;不合格一律 invalid 不取整', () => {
+  const { planBossInterviewForm } = bossTestHooks
+  const now = new Date(2026, 8, 4, 12, 0).getTime()
+  const at = (d, h, m = 0, sec = 0) => new Date(2026, 8, d, h, m, sec).getTime()
+  const onsite = planBossInterviewForm({ method: 'onsite', startsAt: at(5, 10) }, now)
+  assert.equal(onsite.status, 'ok')
+  assert.deepEqual(
+    [onsite.plan.method, onsite.plan.radioText, onsite.plan.meetingText, onsite.plan.meetingCode, onsite.plan.date, onsite.plan.year, onsite.plan.month, onsite.plan.day, onsite.plan.isToday,
+      onsite.plan.startText, onsite.plan.endText, onsite.plan.firstEndText, onsite.plan.timeValue, onsite.plan.endSynthesized],
+    ['onsite', '线下面试', null, null, '2026-09-05', 2026, 9, 5, false, '10:00', '11:00', '11:00', '10:00-11:00', true],
+    '线下:契约无 endsAt,表单结束=开始+1 小时,只填表留痕')
+  const video = planBossInterviewForm({ method: 'wechatVideo', startsAt: at(4, 14, 30), endsAt: at(4, 16) }, now)
+  assert.equal(video.status, 'ok')
+  assert.deepEqual([video.plan.radioText, video.plan.meetingText, video.plan.meetingCode, video.plan.date, video.plan.isToday, video.plan.timeValue, video.plan.firstEndText, video.plan.endSynthesized],
+    ['线上面试', '微信视频', '8', '2026-09-04', true, '14:30-16:00', '15:30', false])
+  const edge = planBossInterviewForm({ method: 'wechatVideo', startsAt: at(5, 20), endsAt: at(5, 21) }, now)
+  assert.deepEqual([edge.status, edge.plan.timeValue], ['ok', '20:00-21:00'], '平台上下限 08:00 与 21:00 是闭区间')
+  const nextMonth = planBossInterviewForm({ method: 'onsite', startsAt: new Date(2026, 9, 3, 9).getTime() }, now)
+  assert.deepEqual([nextMonth.status, nextMonth.plan.year, nextMonth.plan.month, nextMonth.plan.day], ['ok', 2026, 10, 3], '下月:日历翻一页')
+  const jan = planBossInterviewForm({ method: 'onsite', startsAt: new Date(2027, 0, 5, 9).getTime() }, new Date(2026, 11, 20, 12).getTime())
+  assert.deepEqual([jan.status, jan.plan.year, jan.plan.month], ['ok', 2027, 1], '跨年也是翻一页')
+  const bad = (interview, when = now) => {
+    const r = planBossInterviewForm(interview, when)
+    assert.equal(r.status, 'invalid', JSON.stringify(interview))
+    return r.detail
+  }
+  assert.match(bad({ method: 'onsite', startsAt: at(5, 10, 15) }), /30 分钟格/)
+  assert.match(bad({ method: 'onsite', startsAt: at(5, 10, 0, 20) }), /30 分钟格/, '带秒也不取整')
+  assert.match(bad({ method: 'onsite', startsAt: at(5, 7, 30) }), /08:00–20:00/)
+  assert.match(bad({ method: 'onsite', startsAt: at(5, 20, 30) }), /08:00–20:00/)
+  assert.match(bad({ method: 'onsite', startsAt: at(5, 10), endsAt: at(5, 11) }), /不携带结束时间/, '契约:线下 endsAt 必须缺席')
+  assert.match(bad({ method: 'wechatVideo', startsAt: at(5, 10) }), /缺结束时间/)
+  assert.match(bad({ method: 'wechatVideo', startsAt: at(5, 10), endsAt: at(5, 10, 30) }), /早于开始/, '平台最小时长 1 小时')
+  assert.match(bad({ method: 'wechatVideo', startsAt: at(5, 20), endsAt: at(5, 21, 30) }), /超出平台 21:00/)
+  assert.match(bad({ method: 'wechatVideo', startsAt: at(5, 10), endsAt: at(5, 11, 10) }), /30 分钟格/)
+  assert.match(bad({ method: 'wechatVideo', startsAt: at(5, 10), endsAt: at(6, 11) }), /同一天/)
+  assert.match(bad({ method: 'onsite', startsAt: at(4, 11) }), /已过/, '开始时间不在未来')
+  assert.match(bad({ method: 'onsite', startsAt: new Date(2026, 10, 5, 9).getTime() }), /只翻一页/)
+  assert.match(bad({ method: 'phone', startsAt: at(5, 10) }), /不在本平台开放范围/)
+  assert.match(bad({ method: 'onsite', startsAt: 'x' }), /毫秒时间戳/)
+})
+
+test('BOSS 日历:月份头「2026年 九月」解析;目标格按数字挑,今天那格按 today 类挑(文本是「今」);零或多格都不猜', () => {
+  const { parseBossCalendarMonth, pickBossCalendarCell } = bossTestHooks
+  assert.deepEqual(parseBossCalendarMonth('2026年 九月'), { year: 2026, month: 9 })
+  assert.deepEqual(parseBossCalendarMonth('2026年十月'), { year: 2026, month: 10 })
+  assert.deepEqual(parseBossCalendarMonth('2027年 十一月'), { year: 2027, month: 11 })
+  assert.deepEqual(parseBossCalendarMonth(' 2026年 十二月 '), { year: 2026, month: 12 })
+  assert.equal(parseBossCalendarMonth('九月'), null)
+  assert.equal(parseBossCalendarMonth('2026年 9月'), null, '阿拉伯数字月份没见过,不猜')
+  const rect = { x: 0, y: 0, w: 32, h: 32 }
+  const cell = (index, text, over = {}) => ({ index, text, disabled: false, today: false, blank: false, rect, clip: rect, ...over })
+  const cells = [cell(0, '', { blank: true }), cell(1, '1', { disabled: true }), cell(2, '2', { disabled: true }), cell(3, '3', { disabled: true }),
+    cell(4, '今', { today: true }), cell(5, '5'), cell(6, '6'), cell(7, '7')]
+  assert.equal(pickBossCalendarCell(cells, 5, false).cell.index, 5)
+  assert.equal(pickBossCalendarCell(cells, 4, true).cell.index, 4, '今天那格按 today 类找,不按数字')
+  assert.deepEqual(pickBossCalendarCell(cells, 4, false), { cell: null, count: 0 }, '说目标不是今天却要 4 日:格文本是「今」,数字 4 不存在,不猜')
+  assert.deepEqual(pickBossCalendarCell(cells, 2, false), { cell: null, count: 0 }, '过去的日子 disabled 不选')
+  assert.equal(pickBossCalendarCell([...cells, cell(8, '5')], 5, false).count, 2, '两格同文不猜')
+})
+
+test('BOSS 时间列:项在可见区就点可见部分(半截露 20px 即可),不在就瞄合格区近侧边界+40px 滚;过头修正量 <100px 只走一格;到边无处可滚如实说', () => {
+  const { planBossTimeItemReach } = bossTestHooks
+  const list = { rect: { x: 100, y: 300, w: 107, h: 196 }, scrollTop: 0, scrollHeight: 1100, clientHeight: 196 }
+  const item = (i, scrollTop = 0) => ({ rect: { x: 100, y: 300 + i * 44 - scrollTop, w: 107, h: 44 } })
+  assert.deepEqual(planBossTimeItemReach(list, item(0), 20), { status: 'visible', rect: { x: 100, y: 300, w: 107, h: 44 } })
+  assert.deepEqual(planBossTimeItemReach(list, item(4), 20), { status: 'visible', rect: { x: 100, y: 476, w: 107, h: 20 } }, '第 5 项露 20px,点可见部分')
+  // 第 11 项(itemTop 440):合格区 [264,464],瞄 264+40。
+  assert.deepEqual(planBossTimeItemReach(list, item(10), 20), { status: 'scroll', direction: 'down', distancePx: 304 }, '瞄近侧边界+40,不瞄正中')
+  assert.deepEqual(planBossTimeItemReach({ ...list, scrollTop: 500 }, item(10, 500), 20), { status: 'scroll', direction: 'up', distancePx: 76 }, '过头 36px:修正量 <100 只走一格,不振荡')
+  assert.deepEqual(planBossTimeItemReach({ ...list, scrollTop: 480 }, item(10, 480), 20), { status: 'scroll', direction: 'up', distancePx: 56 },
+    '瞄正中时的经典振荡起点(480):现在只回 56px,一格 120 落到 360 仍在合格区')
+  assert.equal(planBossTimeItemReach({ ...list, scrollTop: 360 }, item(10, 360), 20).status, 'visible')
+  assert.equal(planBossTimeItemReach({ ...list, scrollTop: 904 }, item(24, 904), 20).status, 'visible', '到底后最后一项在可见区')
+  assert.deepEqual(planBossTimeItemReach(list, item(24), 20), { status: 'scroll', direction: 'down', distancePx: 904 }, '想瞄 920 只能到 904:按 maxTop 夹')
+  assert.equal(planBossTimeItemReach({ ...list, scrollHeight: 196 }, { rect: { x: 100, y: 900, w: 107, h: 44 } }, 20).status, 'unreachable')
+  assert.match(planBossTimeItemReach(list, { rect: { x: 900, y: 300, w: 107, h: 44 } }, 20).detail, /横向不相交/, '纵向已在合格区却不可见:滚动解决不了,不瞎滚')
+  // Mac 120px/格全程模拟:runOsScroll 每次调用起手按 100px/格估 ceil(d/100) 格(≤3 格时恰取该数,4~8 格随机取 3~cap),
+  // 对 25 个开始项各从 scrollTop=0 出发,最坏情况(每簇取 cap 格)也在 3 次内到可见区。
+  const NOTCH = 120
+  for (let i = 0; i < 25; i += 1) {
+    let scrollTop = 0
+    let attempts = 0
+    let reach = planBossTimeItemReach({ ...list, scrollTop }, item(i, scrollTop), 20)
+    while (reach.status === 'scroll') {
+      attempts += 1
+      assert.ok(attempts <= 3, `第 ${i} 项 ${attempts} 次仍未到:scrollTop=${scrollTop}`)
+      let remaining = reach.distancePx
+      let pxPerNotch = 100
+      let moved = 0
+      while (remaining > 0) {
+        const ticks = Math.min(8, Math.max(1, Math.ceil(remaining / pxPerNotch)))
+        const step = ticks * NOTCH * (reach.direction === 'down' ? 1 : -1)
+        const next = Math.min(904, Math.max(0, scrollTop + step))
+        moved += Math.abs(next - scrollTop)
+        if (next === scrollTop) break
+        scrollTop = next
+        pxPerNotch = NOTCH
+        remaining = reach.distancePx - moved
+      }
+      reach = planBossTimeItemReach({ ...list, scrollTop }, item(i, scrollTop), 20)
+    }
+    assert.equal(reach.status, 'visible', `第 ${i} 项最终应可见(scrollTop=${scrollTop})`)
+  }
+})
+
+test('BOSS 邀面发送前复核:模态/类型/平台/日期/时间/发送键六项逐字对,缺一列出;线下不看平台', () => {
+  const { bossInterviewFormMismatch } = bossTestHooks
+  const plan = { radioText: '线上面试', meetingText: '微信视频', meetingCode: '8', date: '2026-09-05', timeValue: '10:00-11:00' }
+  const ok = {
+    modal: 1, radios: [{ text: '线下面试', checked: false }, { text: '线上面试', checked: true }],
+    meeting: { selected: '微信视频', code: '8' }, date: { value: '2026-09-05' }, time: { value: '10:00-11:00' }, send: { found: true, disabled: false },
+  }
+  assert.deepEqual(bossInterviewFormMismatch(ok, plan), [])
+  assert.deepEqual(bossInterviewFormMismatch({ ...ok, meeting: { selected: '', code: '8' } }, plan), [], '下拉关着选中类没了,隐藏 input 的码 8 单独就算(或关系)')
+  assert.deepEqual(bossInterviewFormMismatch({ ...ok, meeting: { selected: '微信视频', code: '0' } }, plan), [], '文案单独也算')
+  assert.match(bossInterviewFormMismatch({ ...ok, modal: 0 }, plan).join(';'), /模态数 0/)
+  assert.match(bossInterviewFormMismatch({ ...ok, radios: [{ text: '线下面试', checked: true }, { text: '线上面试', checked: false }] }, plan).join(';'), /面试类型「线下面试」/)
+  assert.match(bossInterviewFormMismatch({ ...ok, meeting: { selected: 'BOSS视频面试间 (AI总结面试，推荐更精准)', code: '0' } }, plan).join(';'), /面试平台/)
+  assert.match(bossInterviewFormMismatch({ ...ok, date: { value: '2026-09-06' } }, plan).join(';'), /日期「2026-09-06」/)
+  assert.match(bossInterviewFormMismatch({ ...ok, time: { value: '10:00-11:30' } }, plan).join(';'), /时间「10:00-11:30」/)
+  assert.match(bossInterviewFormMismatch({ ...ok, send: { found: false, disabled: false } }, plan).join(';'), /发送键不在/)
+  assert.match(bossInterviewFormMismatch({ ...ok, send: { found: true, disabled: true } }, plan).join(';'), /disabled/)
+  const offline = { ...plan, radioText: '线下面试', meetingText: null, meetingCode: null }
+  assert.equal(bossInterviewFormMismatch({ ...ok, meeting: { selected: '', code: '' } }, offline).length, 1, '线下不看平台,只剩类型不对这一条')
+  assert.deepEqual(bossInterviewFormMismatch({ ...ok, radios: [{ text: '线下面试', checked: true }, { text: '线上面试', checked: false }], meeting: { selected: '', code: '' } }, offline), [])
+})
+
+test('BOSS 工具栏约面试钮:文案含 tooltip 副本按"含"分类,查看面试优先,恰一个才认;含版命中测试在点前一刻核文本', () => {
+  const { domReadBossInterviewButton, domHitTestContains } = bossTestHooks
+  const SEL = '.conversation-operate .operate-btn'
+  const btn = (text, disabled = false) => {
+    const el = {
+      tagName: 'DIV', textContent: text, classList: { contains: (c) => c === 'disabled' && disabled },
+      getBoundingClientRect: () => ({ x: 500, y: 80, width: 77, height: 24 }), contains: (n) => n === el,
+    }
+    return el
+  }
+  const saved = globalThis.document
+  const install = (buttons, at) => { globalThis.document = { querySelectorAll: (s) => (s === SEL ? buttons : []), elementFromPoint: () => at } }
+  try {
+    const invite = btn('约面试\n牛人接受面试后可查看电话\n约面试')
+    install([btn('换电话'), btn('换微信'), btn('求简历'), invite])
+    const read = domReadBossInterviewButton(SEL, '约面试', '查看面试')
+    assert.deepEqual([read.found, read.kind, read.index, read.disabled, read.rect], [true, 'invite', 3, false, { x: 500, y: 80, w: 77, h: 24 }])
+    install([btn('换电话'), btn('查看微信'), btn('求简历'), btn('查看面试')])
+    assert.equal(domReadBossInterviewButton(SEL, '约面试', '查看面试').kind, 'view')
+    install([btn('约面试'), btn('查看面试')])
+    assert.deepEqual([domReadBossInterviewButton(SEL, '约面试', '查看面试').found, domReadBossInterviewButton(SEL, '约面试', '查看面试').count], [false, 2], '两个都像就不猜')
+    install([btn('换电话')])
+    assert.equal(domReadBossInterviewButton(SEL, '约面试', '查看面试').count, 0)
+    install([btn('换电话'), btn('换微信'), btn('求简历'), btn('约面试', true)])
+    assert.equal(domReadBossInterviewButton(SEL, '约面试', '查看面试').disabled, true)
+    install([btn('换电话'), btn('换微信'), btn('求简历'), invite], invite)
+    assert.equal(domHitTestContains(SEL, 3, '约面试', '查看面试', 1, 1).onTarget, true)
+    const other = btn('换微信')
+    install([btn('换电话'), other, btn('求简历'), invite], other)
+    assert.match(domHitTestContains(SEL, 3, '约面试', '查看面试', 1, 1).found, /别的元素/)
+    const flipped = btn('查看面试')
+    install([btn('换电话'), btn('换微信'), btn('求简历'), flipped], flipped)
+    assert.match(domHitTestContains(SEL, 3, '约面试', '查看面试', 1, 1).found, /文本已变/, '点前一刻已变成「查看面试」就不点')
+    install([btn('换电话')], btn('换电话'))
+    assert.match(domHitTestContains(SEL, 3, '约面试', '查看面试', 1, 1).found, /不在原来的位置/)
+  } finally { globalThis.document = saved }
+})
+
+test('BOSS 邀面模态页面读与发送闸:可点的东西带全序列下标与矩形,时间列项归各自的 ul,成功弹窗按文案认;发送闸六项缺一不点', () => {
+  const { domReadBossInterviewModal, domBossInterviewSendGate, INTERVIEW_SEL: sel } = bossTestHooks
+  const hidden = { x: 0, y: 0, w: 0, h: 0 }
+  const mk = ({ text = '', classes = [], rect = { x: 10, y: 10, w: 50, h: 20 }, value, kids = [], scroll } = {}) => {
+    const el = {
+      tagName: 'DIV', textContent: text, classList: { contains: (c) => classes.includes(c) },
+      getBoundingClientRect: () => ({ x: rect.x, y: rect.y, width: rect.w, height: rect.h }),
+      contains: (n) => n === el || kids.includes(n),
+      getAttribute: () => null,
+      ...(value === undefined ? {} : { value }),
+      ...(scroll ?? {}),
+    }
+    return el
+  }
+  const startItems = Array.from({ length: 25 }, (_, i) => mk({
+    text: `${String(8 + Math.floor(i / 2)).padStart(2, '0')}:${i % 2 ? '30' : '00'}`, classes: i === 4 ? ['selected'] : [], rect: { x: 700, y: 400 + i * 44, w: 107, h: 44 },
+  }))
+  const endItems = Array.from({ length: 23 }, (_, i) => mk({
+    text: `${String(11 + Math.floor(i / 2)).padStart(2, '0')}:${i % 2 ? '30' : '00'}`, rect: { x: 807, y: 400 + i * 44, w: 107, h: 44 },
+  }))
+  const listRect = (x) => ({ x, y: 400, w: 107, h: 196 })
+  const startList = mk({ rect: listRect(700), kids: startItems, scroll: { scrollTop: 0, scrollHeight: 1100, clientHeight: 196 } })
+  const endList = mk({ rect: listRect(807), kids: endItems, scroll: { scrollTop: 88, scrollHeight: 1012, clientHeight: 196 } })
+  const hiddenList = mk({ rect: hidden, kids: [] })
+  const send = mk({ text: '发送', rect: { x: 900, y: 600, w: 74, h: 36 } })
+  const cancel = mk({ text: '取消', rect: { x: 820, y: 600, w: 74, h: 36 } })
+  const radios = [
+    mk({ text: '线下面试', rect: { x: 500, y: 200, w: 78, h: 20 } }),
+    mk({ text: '线上面试', classes: ['radio-checked'], rect: { x: 600, y: 200, w: 78, h: 20 } }),
+  ]
+  const meetingItems = [
+    mk({ text: 'BOSS视频面试间 (AI总结面试，推荐更精准)' }), mk({ text: '电话面试' }),
+    mk({ text: '微信视频', classes: ['ui-select-item-selected'] }), mk({ text: '其他方式（腾讯会议、钉钉、飞书）' }),
+  ]
+  const close = mk({ rect: { x: 1000, y: 100, w: 20, h: 20 } })
+  const popup = mk({ text: '面试邀请已发出 请您等待牛人接受面试邀请 转发面试', rect: { x: 0, y: 0, w: 1470, h: 746 }, kids: [close] })
+  const rows = [
+    { getAttribute: () => '11-0', classList: { contains: (c) => c === 'selected' } },
+    { getAttribute: () => '12-0', classList: { contains: () => false } },
+  ]
+  const modalRect = { x: 443, y: 105, w: 584, h: 536 }
+  const dateInput = (value) => [mk({ value, rect: { x: 600, y: 300, w: 210, h: 36 } })]
+  const timeInput = (value) => [mk({ value, rect: { x: 820, y: 300, w: 214, h: 36 } })]
+  const doc = {
+    [sel.modal]: [mk({ rect: modalRect })],
+    [sel.title]: [mk({ text: ' 线上面试邀请 ', rect: { x: 460, y: 110, w: 200, h: 30 } })],
+    [sel.radio]: radios,
+    [sel.address]: [],
+    [sel.meeting]: [mk({ classes: [], rect: { x: 600, y: 240, w: 210, h: 36 } })],
+    [sel.meetingItem]: meetingItems,
+    [sel.meetingHidden]: [mk({ value: '8', rect: hidden })],
+    [sel.dateWrap]: [mk({ classes: [] })],
+    [sel.dateInput]: dateInput('2026-09-05'),
+    [sel.dateMonth]: [], [sel.dateNext]: [], [sel.dateCell]: [],
+    [sel.timeContainer]: [mk({ classes: ['dropdown-menu-open'] })],
+    [sel.timeInput]: timeInput(''),
+    [sel.timeTab]: [mk({ text: '精准时间', rect: { x: 820, y: 350, w: 56, h: 22 } }), mk({ text: '宽松时间', classes: ['selected'], rect: { x: 900, y: 350, w: 56, h: 22 } })],
+    [sel.timeList]: [hiddenList, startList, endList],
+    [sel.timeItem]: [...startItems, ...endItems],
+    [sel.cancel]: [cancel],
+    [sel.send]: [send],
+    [sel.popup]: [],
+    [sel.popupClose]: [mk({ rect: hidden }), close],
+    '.geek-item': rows,
+  }
+  const saved = { document: globalThis.document, window: globalThis.window }
+  let at = send
+  globalThis.window = { innerWidth: 1470, innerHeight: 746 }
+  globalThis.document = { querySelectorAll: (s) => doc[s] ?? [], elementFromPoint: () => at }
+  try {
+    const read = domReadBossInterviewModal(sel)
+    assert.equal(read.modal, 1)
+    assert.deepEqual([read.title, read.titleIndex, read.titleRect], ['线上面试邀请', 0, { x: 460, y: 110, w: 200, h: 30 }])
+    assert.deepEqual(read.radios.map((r) => [r.index, r.text, r.checked]), [[0, '线下面试', false], [1, '线上面试', true]])
+    assert.equal(read.address, null, '线上没有地址行')
+    assert.deepEqual([read.meeting.present, read.meeting.index, read.meeting.open, read.meeting.selected, read.meeting.code], [true, 0, false, '微信视频', '8'])
+    assert.equal(read.meeting.items[2].index, 2)
+    assert.deepEqual([read.date.index, read.date.value, read.date.open, read.date.month, read.date.nextIndex, read.date.nextRect, read.date.cells],
+      [0, '2026-09-05', false, '', -1, null, []])
+    assert.deepEqual([read.time.index, read.time.value, read.time.open], [0, '', true])
+    assert.deepEqual(read.time.tabs.map((t) => [t.index, t.text, t.selected]), [[0, '精准时间', false], [1, '宽松时间', true]])
+    assert.equal(read.time.lists.length, 2, '隐藏的 ul 不算')
+    assert.deepEqual([read.time.lists[0].index, read.time.lists[0].scrollTop, read.time.lists[0].rect], [1, 0, { x: 700, y: 400, w: 107, h: 196 }])
+    assert.deepEqual([read.time.lists[1].index, read.time.lists[1].scrollTop, read.time.lists[1].items.length], [2, 88, 23])
+    assert.deepEqual(read.time.lists[0].items.slice(0, 5).map((i) => [i.index, i.text, i.selected]),
+      [[0, '08:00', false], [1, '08:30', false], [2, '09:00', false], [3, '09:30', false], [4, '10:00', true]])
+    assert.deepEqual([read.time.lists[1].items[0].index, read.time.lists[1].items[0].text], [25, '11:00'], '结束列项的下标接在开始列之后:全序列下标')
+    assert.deepEqual([read.cancel.found, read.cancel.index, read.send.found, read.send.index, read.send.disabled], [true, 0, true, 0, false])
+    assert.deepEqual(read.popup, { found: false, closeIndex: -1, closeRect: hidden })
+    assert.deepEqual(read.viewport, { w: 1470, h: 746 })
+
+    doc[sel.popup] = [popup]
+    assert.deepEqual(domReadBossInterviewModal(sel).popup, { found: true, closeIndex: 1, closeRect: { x: 1000, y: 100, w: 20, h: 20 } },
+      '成功弹窗按文案认,关闭键取它里面可见的那个')
+    doc[sel.popup] = []
+    doc[sel.address] = [mk({ value: ' 上海市静安区xx路1号 ' })]
+    assert.equal(domReadBossInterviewModal(sel).address, '上海市静安区xx路1号')
+    doc[sel.address] = [mk({ value: '' })]
+    assert.equal(domReadBossInterviewModal(sel).address, '', '地址行在但为空:平台未配地址')
+    doc[sel.dateWrap] = [mk({ classes: ['ui-datepicker-visible'] })]
+    doc[sel.dateMonth] = [mk({ text: '2026年 九月' })]
+    doc[sel.dateNext] = [mk({ rect: { x: 800, y: 340, w: 20, h: 20 } })]
+    doc[sel.dateCell] = [mk({ text: '', classes: ['blank'], rect: hidden }), mk({ text: '', classes: ['blank'] }), mk({ text: '今', classes: ['today'] }), mk({ text: '5', rect: { x: 700, y: 740, w: 32, h: 32 } })]
+    const calendar = domReadBossInterviewModal(sel).date
+    assert.deepEqual([calendar.open, calendar.month, calendar.nextIndex, calendar.nextRect], [true, '2026年 九月', 0, { x: 800, y: 340, w: 20, h: 20 }])
+    assert.deepEqual(calendar.cells.map((c) => [c.index, c.text, c.blank, c.today, c.clip.h]), [[1, '', true, false, 20], [2, '今', false, true, 20], [3, '5', false, false, 6]],
+      '零尺寸的格不算;下标是全序列下标;超出视口底的格 clip 只剩 6px')
+
+    const expect = { radioText: '线上面试', meetingText: '微信视频', meetingCode: '8', date: '2026-09-05', timeValue: '10:00-11:00' }
+    doc[sel.timeInput] = timeInput('10:00-11:00')
+    const gate = () => domBossInterviewSendGate(sel, expect, '.geek-item', '11-0', 'selected', 1, 1)
+    assert.deepEqual(gate(), { onTarget: true, found: '邀面发送键' })
+    at = cancel
+    assert.match(gate().found, /别的元素/, '落点偏到取消键上不点')
+    at = send
+    doc[sel.modal] = []
+    assert.match(gate().found, /模态数 0/)
+    doc[sel.modal] = [mk({ rect: modalRect })]
+    doc[sel.radio] = [mk({ text: '线下面试', classes: ['radio-checked'], rect: { x: 500, y: 200, w: 78, h: 20 } }), radios[1]]
+    assert.match(gate().found, /面试类型「线下面试\/线上面试」/, '两个都选中也不对')
+    doc[sel.radio] = radios
+    doc[sel.meetingItem] = [mk({ text: '电话面试', classes: ['ui-select-item-selected'] })]
+    doc[sel.meetingHidden] = [mk({ value: '1', rect: hidden })]
+    assert.match(gate().found, /面试平台「电话面试」\/码「1」/)
+    doc[sel.meetingItem] = [mk({ text: '电话面试' })]
+    doc[sel.meetingHidden] = [mk({ value: '8', rect: hidden })]
+    assert.deepEqual(gate(), { onTarget: true, found: '邀面发送键' }, '选中类没了但隐藏 input 码是 8:或关系,放行')
+    doc[sel.meetingItem] = meetingItems
+    doc[sel.dateInput] = dateInput('2026-09-06')
+    assert.match(gate().found, /日期「2026-09-06」/)
+    doc[sel.dateInput] = dateInput('2026-09-05')
+    doc[sel.timeInput] = timeInput('10:00-11:30')
+    assert.match(gate().found, /时间「10:00-11:30」/)
+    doc[sel.timeInput] = timeInput('10:00-11:00')
+    doc['.geek-item'] = [rows[1]]
+    assert.match(gate().found, /选中行不是目标会话/, '真人切走会话后不点')
+    doc['.geek-item'] = rows
+    doc[sel.send] = [mk({ text: '发送', rect: { x: 900, y: 600, w: 74, h: 36 }, classes: ['disabled'] })]
+    at = doc[sel.send][0]
+    assert.match(gate().found, /disabled/)
+    doc[sel.send] = [send]
+    at = send
+    assert.deepEqual(gate(), { onTarget: true, found: '邀面发送键' }, '全部复原后仍通过')
+    assert.equal(domBossInterviewSendGate(sel, { ...expect, radioText: '线下面试', meetingText: null, meetingCode: null }, '.geek-item', '11-0', 'selected', 1, 1).found,
+      '面试类型「线上面试」≠「线下面试」', '线下不看平台')
+  } finally {
+    globalThis.document = saved.document
+    globalThis.window = saved.window
   }
 })
 
