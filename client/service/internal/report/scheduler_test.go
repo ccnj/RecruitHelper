@@ -11,6 +11,13 @@ func at(hour, minute int) time.Time {
 	return time.Date(2026, 8, 1, hour, minute, 0, 0, time.Local)
 }
 
+// fixedSlot 把档期钉在每天的 hour:minute，让调度用例不受哈希抽取影响。
+func fixedSlot(hour, minute int) SlotPicker {
+	return func(d time.Time) time.Time {
+		return time.Date(d.Year(), d.Month(), d.Day(), hour, minute, 0, 0, d.Location())
+	}
+}
+
 // 触发时刻算错会导致同一秒里反复触发，或整天不触发。
 func TestNextDailyRun(t *testing.T) {
 	cases := []struct {
@@ -24,10 +31,44 @@ func TestNextDailyRun(t *testing.T) {
 		{"深夜", at(23, 59), at(0, 10).AddDate(0, 0, 1)},
 	}
 	for _, item := range cases {
-		got := nextDailyRun(item.now, 0, 10)
+		got := nextDailyRun(item.now, fixedSlot(0, 10), 0)
 		if !got.Equal(item.want) {
 			t.Errorf("%s: 期望 %v，得到 %v", item.name, item.want, got)
 		}
+	}
+}
+
+// 偏移要叠在档期上，且今天的档期过了要去问明天的——档期逐日重抽，不能把今天的
+// 直接加一天。
+func TestNextDailyRunAppliesOffsetAndAsksNextDay(t *testing.T) {
+	// 档期按日期变化：单日 00:20，双日 01:00。
+	varying := SlotPicker(func(d time.Time) time.Time {
+		minute := 20
+		if d.Day()%2 == 0 {
+			minute = 60
+		}
+		return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, d.Location()).Add(time.Duration(minute) * time.Minute)
+	})
+	// 8/1 是单日，档期 00:20，加 5 分钟偏移 = 00:25。
+	if got := nextDailyRun(at(0, 10), varying, 5*time.Minute); !got.Equal(at(0, 25)) {
+		t.Errorf("当天未到点：期望 00:25，得到 %v", got)
+	}
+	// 同一天过了点，必须去问 8/2（双日，档期 01:00 + 5 分钟 = 01:05），
+	// 而不是把今天的 00:25 加一天。
+	want := time.Date(2026, 8, 2, 1, 5, 0, 0, time.Local)
+	if got := nextDailyRun(at(9, 0), varying, 5*time.Minute); !got.Equal(want) {
+		t.Errorf("当天已过点：期望 %v，得到 %v", want, got)
+	}
+}
+
+// 顺延放弃时刻必须跟着触发时刻走。改造前钉死 02:00，档期抽到 01:30 时只剩半小时，
+// 会凭空多出一批"没等到静默"的失败。
+func TestDeferDeadlineFollowsRunAt(t *testing.T) {
+	if got := deferDeadline(at(1, 30)); !got.Equal(at(3, 30)) {
+		t.Errorf("期望 03:30，得到 %v", got)
+	}
+	if got := deferDeadline(at(0, 10)); !got.Equal(at(2, 10)) {
+		t.Errorf("期望 02:10，得到 %v", got)
 	}
 }
 
@@ -101,9 +142,10 @@ func TestSchedulerDefersUntilQuiet(t *testing.T) {
 	}
 }
 
-// 一直不静默，过了 02:00 就放弃，且必须留下可见的原因——当日不补传。
+// 一直不静默，过了顺延窗口就放弃，且必须留下可见的原因——当日不补传。
 func TestSchedulerGivesUpAfterDeadline(t *testing.T) {
-	now := at(1, 59)
+	// 触发 00:10，顺延窗口 2 小时 → 截止 02:10；此刻已是 02:09，下一次复查越界。
+	now := at(2, 9)
 	ran := false
 	var recordedOK bool
 	var recordedReason string
@@ -154,6 +196,7 @@ func TestSchedulerStopsOnContextCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		RunScheduler(ctx, SchedulerDeps{
+			Slot:    fixedSlot(0, 10),
 			Enabled: func() (bool, error) { return true, nil },
 			Quiet:   func() (bool, string) { return true, "" },
 			RunOnce: func(context.Context) error { return nil },
@@ -164,5 +207,29 @@ func TestSchedulerStopsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("ctx 取消后调度循环没有退出")
+	}
+}
+
+// 漏装档期时必须停掉该任务并响亮报错，绝不能静默退化成每天 00:00 开跑——
+// 那种错误在日志里看不出来，而且会把所有机器又聚回同一分钟。
+func TestSchedulerRefusesWithoutSlot(t *testing.T) {
+	ran := false
+	done := make(chan struct{})
+	go func() {
+		RunScheduler(context.Background(), SchedulerDeps{
+			Label:   "无档期任务",
+			Quiet:   func() (bool, string) { return true, "" },
+			RunOnce: func(context.Context) error { ran = true; return nil },
+			Now:     func() time.Time { return at(0, 0) },
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("漏装档期时调度循环必须立即返回")
+	}
+	if ran {
+		t.Error("漏装档期时不得执行任何任务")
 	}
 }

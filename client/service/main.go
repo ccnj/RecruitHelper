@@ -567,11 +567,22 @@ func main() {
 		return true, ""
 	}
 
+	// 三条凌晨任务共用的档期(2026-09-04 甲方裁决,见 report/slot.go)。共用一个
+	// picker 是必须的:各抽各的会让同一台机器的诊断包与聊天记录有概率撞在一起,
+	// 那正是本次要消掉的事。机器标识现取——脑启动时可能还没激活。
+	dailySlot := report.NewSlotPicker(func() string {
+		config, err := jobConfigSource.LoadConfig()
+		if err != nil || config == nil {
+			return ""
+		}
+		return config.MachineID
+	})
+
 	// 命令审计留存(AGENTS.md「全局约定·命令审计留存」,2026-08-07 甲方裁决)。
-	// 排在 00:05 而非上报的 00:10:清理先跑完,当天上传的诊断包就已经是瘦身后的,
+	// 排在档期起点、两条上报之前:清理先跑完,当天上传的诊断包就已经是瘦身后的,
 	// 一次凌晨把本地与服务器两头的膨胀一起收掉。常开无开关——它不外发任何东西。
 	go report.RunScheduler(appCtx, report.SchedulerDeps{
-		Hour: 0, Minute: 5,
+		Slot: dailySlot, Offset: report.OffsetCmdRetention,
 		Label: "命令审计留存",
 		Quiet: dbQuiet,
 		RunOnce: func(context.Context) error {
@@ -601,7 +612,7 @@ func main() {
 	// 每日自动上传(2026-07-31 补充裁决)。开关默认关闭且每轮重读——这个 goroutine
 	// 常驻,但只要没人在诊断台打开开关，它每天到点看一眼就继续睡。
 	go report.RunScheduler(appCtx, report.SchedulerDeps{
-		Hour: 0, Minute: 10,
+		Slot: dailySlot, Offset: report.OffsetFieldReport,
 		Label: "现场上报",
 		Enabled: func() (bool, error) {
 			setting, err := st.FieldReportSetting()
@@ -616,7 +627,8 @@ func main() {
 		},
 	})
 	// 聊天记录上报(AGENTS.md「全局约定·聊天记录上报」,2026-08-19 甲方裁决)。
-	// 排在 00:20:审计清理(00:05)与诊断包上传(00:10)之后,不跟它们抢静默窗口。
+	// 排在档期内最后:审计清理与诊断包上传之后,不跟它们抢静默窗口,也不跟同机的
+	// 大包抢上行带宽。
 	// 常开无开关;游标增量,失败当日放弃,水位不推进由次日自愈。
 	chatReportDeps := chatreport.Deps{
 		Store: st,
@@ -639,7 +651,7 @@ func main() {
 		return chatreport.RunOnce(ctx, chatReportDeps)
 	})
 	go report.RunScheduler(appCtx, report.SchedulerDeps{
-		Hour: 0, Minute: 20,
+		Slot: dailySlot, Offset: report.OffsetChatReport,
 		Label: "聊天记录上报",
 		Quiet: dbQuiet,
 		RunOnce: func(ctx context.Context) error {
