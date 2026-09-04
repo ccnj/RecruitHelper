@@ -6,39 +6,51 @@ import {
   type InterviewWindow,
 } from '../api'
 
-// 网格 08:00-21:00,每小时一格。最后一格是 20:00-21:00。
-const GRID_START_HOUR = 8
-const GRID_END_HOUR = 21
+// 网格 08:00-21:00,每半小时一格(2026-09-04 甲方裁决,此前每小时一格),最后一格是
+// 20:30-21:00。步长与脑侧 m5ai.InterviewSlotStepMinutes 同值,两端各存一份;
+// test/product-interview-schedule.test.mjs 里默认周表"共 63 小时"那条断言是对齐点。
+const GRID_START = '08:00'
+const GRID_END = '21:00'
+const STEP_MINUTES = 30
 
 const FALLBACK_WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 
-function hourLabels(): string[] {
-  const labels: string[] = []
-  for (let hour = GRID_START_HOUR; hour < GRID_END_HOUR; hour += 1) {
-    labels.push(`${String(hour).padStart(2, '0')}:00`)
+function toMinutes(clock: string): number {
+  return Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5))
+}
+
+function toClock(minutes: number): string {
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
+}
+
+/** 网格每一行的起点时刻:08:00、08:30 … 20:30。 */
+function cellStarts(): string[] {
+  const starts: string[] = []
+  for (let minutes = toMinutes(GRID_START); minutes < toMinutes(GRID_END); minutes += STEP_MINUTES) {
+    starts.push(toClock(minutes))
   }
-  return labels
+  return starts
 }
 
-function nextHour(clock: string): string {
-  const hour = Number(clock.slice(0, 2)) + 1
-  return `${String(hour).padStart(2, '0')}:00`
+function nextCell(clock: string): string {
+  return toClock(toMinutes(clock) + STEP_MINUTES)
 }
 
-/** 把窗口展开成"小时起点"集合,便于逐格判断选中态。 */
+/** 把窗口展开成"半小时格起点"集合,便于逐格判断选中态。 */
 export function expandToCells(windows: InterviewWindow[] | undefined): Set<string> {
   const cells = new Set<string>()
   for (const window of windows ?? []) {
     let clock = window.start
-    while (clock < window.end) {
+    // 24:00 是硬上界:起止格式坏掉时字符串比较可能永远为真,不能靠它收敛。
+    while (clock < window.end && toMinutes(clock) < 24 * 60) {
       cells.add(clock)
-      clock = nextHour(clock)
+      clock = nextCell(clock)
     }
   }
   return cells
 }
 
-/** 把小时起点集合合并回连续窗口,相邻小时并成一段。 */
+/** 把半小时格起点集合合并回连续窗口,相邻格并成一段。 */
 export function mergeToWindows(cells: string[]): InterviewWindow[] {
   if (cells.length === 0) return []
   const sorted = [...new Set(cells)].sort()
@@ -46,20 +58,26 @@ export function mergeToWindows(cells: string[]): InterviewWindow[] {
   let start = sorted[0]
   let last = sorted[0]
   for (let index = 1; index < sorted.length; index += 1) {
-    if (nextHour(last) === sorted[index]) {
+    if (nextCell(last) === sorted[index]) {
       last = sorted[index]
     } else {
-      windows.push({ start, end: nextHour(last) })
+      windows.push({ start, end: nextCell(last) })
       start = sorted[index]
       last = sorted[index]
     }
   }
-  windows.push({ start, end: nextHour(last) })
+  windows.push({ start, end: nextCell(last) })
   return windows
 }
 
+/** 已选小时数,半小时格计 0.5。 */
 export function countHours(schedule: InterviewSchedule, weekdays: string[]): number {
-  return weekdays.reduce((total, day) => total + expandToCells(schedule[day]).size, 0)
+  const cells = weekdays.reduce((total, day) => total + expandToCells(schedule[day]).size, 0)
+  return (cells * STEP_MINUTES) / 60
+}
+
+function formatHours(total: number): string {
+  return Number.isInteger(total) ? String(total) : total.toFixed(1)
 }
 
 /** 与脑侧 m5ai.DefaultInterviewSchedule 保持一致：七天全 09:00-18:00。 */
@@ -88,7 +106,7 @@ export function InterviewSchedulePanel() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' })
 
-  const hours = useMemo(() => hourLabels(), [])
+  const rows = useMemo(() => cellStarts(), [])
 
   useEffect(() => {
     let cancelled = false
@@ -148,8 +166,8 @@ export function InterviewSchedulePanel() {
         const day = weekdays[dayIndex]
         const cells = expandToCells(next[day])
         for (let rowIndex = rowFrom; rowIndex <= rowTo; rowIndex += 1) {
-          if (dragTurnsOn.current) cells.add(hours[rowIndex])
-          else cells.delete(hours[rowIndex])
+          if (dragTurnsOn.current) cells.add(rows[rowIndex])
+          else cells.delete(rows[rowIndex])
         }
         next[day] = mergeToWindows([...cells])
       }
@@ -166,7 +184,7 @@ export function InterviewSchedulePanel() {
     }
     window.addEventListener('mouseup', commit)
     return () => window.removeEventListener('mouseup', commit)
-  }, [dragOrigin, dragCurrent, schedule, weekdays, hours, persist])
+  }, [dragOrigin, dragCurrent, schedule, weekdays, rows, persist])
 
   function insideDragRect(day: string, rowIndex: number): boolean {
     if (!dragOrigin || !dragCurrent) return false
@@ -250,8 +268,8 @@ export function InterviewSchedulePanel() {
 
       <div className="rh-schedule-body">
         <p className="rh-schedule-hint">
-          按住鼠标拖过格子可连续选择或取消。AI 只会在这些格子里挑面试时间,改动立即生效,
-          对已经开始的那轮对话不追溯。
+          每格半小时,时间写在格子的分界线上。按住鼠标拖过格子可连续选择或取消。
+          AI 只会在这些格子里挑面试时间,改动立即生效,对已经开始的那轮对话不追溯。
         </p>
 
         <div className="rh-schedule-layout">
@@ -266,9 +284,12 @@ export function InterviewSchedulePanel() {
                 {day}
               </div>
             ))}
-            {hours.map((clock, rowIndex) => (
+            {rows.map((clock, rowIndex) => (
               <Fragment key={clock}>
-                <div className="rh-schedule-clock">{clock}</div>
+                {/* 标签压在本行上缘的缝上;半点标签淡一档,整点一眼能找到。 */}
+                <div className={'rh-schedule-clock' + (clock.endsWith(':30') ? ' is-half' : '')}>
+                  <span>{clock}</span>
+                </div>
                 {weekdays.map((day) => {
                   const selected = selectedCells[day]?.has(clock) ?? false
                   const dragging = insideDragRect(day, rowIndex)
@@ -277,7 +298,7 @@ export function InterviewSchedulePanel() {
                     <div
                       key={day}
                       role="gridcell"
-                      aria-label={`${day} ${clock}`}
+                      aria-label={`${day} ${clock}-${nextCell(clock)}`}
                       aria-selected={shown}
                       className={
                         'rh-schedule-cell' +
@@ -298,12 +319,19 @@ export function InterviewSchedulePanel() {
                 })}
               </Fragment>
             ))}
+            {/* 收尾一行高度为零,只为把 21:00 压在末格下缘的缝上。 */}
+            <div className="rh-schedule-clock is-end">
+              <span>{GRID_END}</span>
+            </div>
+            {weekdays.map((day) => (
+              <div key={day} className="rh-schedule-cell-end" aria-hidden="true" />
+            ))}
           </div>
           </div>
 
           <aside className="rh-schedule-summary">
             <span className="rh-section-label">已选时间</span>
-            <strong>共 {totalHours} 个小时</strong>
+            <strong>共 {formatHours(totalHours)} 个小时</strong>
             <div className="rh-schedule-summary-list">
               {weekdays.map((day) => {
                 const windows = schedule[day] ?? []

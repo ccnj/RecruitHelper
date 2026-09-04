@@ -728,6 +728,12 @@ func TestRoundUpToInterviewTimeGrid(t *testing.T) {
 	if V4InterviewDurationMs%V4InterviewTimeGridMs != 0 {
 		t.Fatalf("面试时长必须落在平台时间格上: duration=%d grid=%d", V4InterviewDurationMs, V4InterviewTimeGridMs)
 	}
+	// 推荐时段步长(m5ai,2026-09-04 起 30 分钟)必须是平台格的整数倍:否则 AI 命中的
+	// 时刻会在这里被向上取整,发出的卡与话术承诺的时间对不上。
+	if int64(m5ai.InterviewSlotStepMinutes)*60*1000%V4InterviewTimeGridMs != 0 {
+		t.Fatalf("推荐时段步长必须是平台时间格的整数倍: step=%dmin grid=%dms",
+			m5ai.InterviewSlotStepMinutes, V4InterviewTimeGridMs)
+	}
 }
 
 // 菜单与事后裁决必须同源(规格 v4 §五「客户端渲染期追加块」)。【本轮可选

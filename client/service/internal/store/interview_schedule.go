@@ -55,7 +55,7 @@ func (s *Store) InterviewSchedule() (m5ai.InterviewSchedule, error) {
 	return schedule, nil
 }
 
-// SetInterviewSchedule 整表替换。写入前必须通过校验——空表、非整点、起止倒置都
+// SetInterviewSchedule 整表替换。写入前必须通过校验——空表、不在半小时格上、起止倒置都
 // 在这里挡掉，不依赖调用方或 UI 先行把关。
 func (s *Store) SetInterviewSchedule(schedule m5ai.InterviewSchedule) error {
 	if err := m5ai.ValidateInterviewSchedule(schedule); err != nil {

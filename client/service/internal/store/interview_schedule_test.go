@@ -45,7 +45,7 @@ func TestSetInterviewScheduleRoundTrips(t *testing.T) {
 	}
 	want := m5ai.InterviewSchedule{
 		"周二": {{Start: "10:00", End: "12:00"}},
-		"周六": {{Start: "14:00", End: "16:00"}},
+		"周六": {{Start: "14:30", End: "16:00"}}, // 半点起(2026-09-04 裁决)
 	}
 	if err := s.SetInterviewSchedule(want); err != nil {
 		t.Fatalf("SetInterviewSchedule: %v", err)
@@ -54,7 +54,8 @@ func TestSetInterviewScheduleRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InterviewSchedule: %v", err)
 	}
-	if len(got) != 2 || got["周二"][0].Start != "10:00" || got["周六"][0].End != "16:00" {
+	if len(got) != 2 || got["周二"][0].Start != "10:00" ||
+		got["周六"][0].Start != "14:30" || got["周六"][0].End != "16:00" {
 		t.Fatalf("周表往返漂移: %+v", got)
 	}
 	// 再存一次必须是整表替换，不是叠加——单行 Save 天然满足，这里钉住它。
@@ -109,7 +110,7 @@ func TestSetInterviewScheduleRejectsEmptyTable(t *testing.T) {
 func TestInterviewScheduleNeverSilentlyFallsBackOnCorruptRow(t *testing.T) {
 	for _, corrupt := range []string{
 		`not json at all`,
-		`{"周一":[{"start":"09:30","end":"10:00"}]}`, // 非整点
+		`{"周一":[{"start":"09:15","end":"10:00"}]}`, // 不在半小时格上
 		`{"周八":[{"start":"09:00","end":"10:00"}]}`, // 非法星期
 		`{}`, // 空表：写入侧挡得住，读到了说明库被直接改过
 	} {
