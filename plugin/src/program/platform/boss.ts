@@ -762,6 +762,13 @@ async function bossOsType(
 //
 // 事实依据:docs/boss/BOSS平台事实-2026-08-28.md §二(消息形状与枚举)、§十一(输入区)、
 // §十二(列表数据层、打开会话的后置状态、message-list 持有者、「未读」小页签)。
+//
+// retryable 口径(2026-09-04 甲方逐条裁决,与场景二三同款):不可逆点击之前的失败一律 afterRecovery。
+// 只读原语抛进巡检的错误按 no/manualOnly 会被脑侧隔离会话(会话级命令)或停整个账号(readList 这类
+// 账号级命令),afterRecovery 只是本轮跳过、下一轮 readList(reset) 自带恢复;effectful 的 sendMessage
+// 脑侧只看 sideEffect,点前提示改的是口径。保留的两处:readList 职位范围不是「全部职位」仍 manualOnly
+// (人确实得切回去,停账号是唯一可见信号,直到把切回自动化);move=next 的 no 由脑侧专用分支识别为
+// 「翻不了窗」部分收束。POSTCONDITION_UNCONFIRMED 的 manualOnly 是点后路径,不动。
 // ============================================================================
 
 const RESULT_DATA_BUDGET = 60 * 1024
@@ -1795,7 +1802,7 @@ async function rowClickPlan(tabId: number, conversationRef: string): Promise<Cli
   const located = await runInPage(BOSS_DOM, tabId, domLocateBossRow,
     [ROW_SELECTOR, conversationRef, ROW_SELECTED_CLASS, ROW_BUBBLE_SELECTOR])
   if (located.count === 0) throw new PlatformError('TARGET_NOT_FOUND', '目标会话不在当前列表里', 'no')
-  if (located.count > 1) throw new PlatformError('ELEMENT_UNRESOLVED', '目标会话在列表里不唯一', 'manualOnly')
+  if (located.count > 1) throw new PlatformError('ELEMENT_UNRESOLVED', '目标会话在列表里不唯一', 'afterRecovery')
   if (!located.inViewport) {
     // BOSS 上没有滚动注入:行不在视口里就点不到。失效方向是不点,由下轮再来。
     throw new PlatformError('ELEMENT_UNRESOLVED', '目标行不在视口内,BOSS 尚无滚动注入', 'afterRecovery')
@@ -1873,10 +1880,10 @@ async function identifyBossCurrentConversation(fingerprint: string | undefined):
   const readCurrent = async (): Promise<string> => {
     const current = await runInPage(BOSS_INJECT, tab.id!, mainReadBossCurrentConversation, [])
     if (current.status === 'none') {
-      throw new PlatformError('ELEMENT_UNRESOLVED', '当前没有打开的会话', 'manualOnly')
+      throw new PlatformError('ELEMENT_UNRESOLVED', '当前没有打开的会话', 'afterRecovery')
     }
     if (current.status === 'ambiguous') {
-      throw new PlatformError('ELEMENT_UNRESOLVED', `页面同时呈现 ${current.count} 个当前会话`, 'manualOnly')
+      throw new PlatformError('ELEMENT_UNRESOLVED', `页面同时呈现 ${current.count} 个当前会话`, 'afterRecovery')
     }
     return bossConversationRef(current.uid, current.friendSource)
   }
@@ -1945,9 +1952,9 @@ async function readBossList(
   args: ChatReadListArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
 ): Promise<ChatReadListData> {
   if (validatePrimitiveArgs(PrimitiveName.ChatReadList, 1, args).length !== 0) {
-    throw new PlatformError('GUARD_FAILED', '会话列表读取参数不符合当前契约', 'manualOnly')
+    throw new PlatformError('GUARD_FAILED', '会话列表读取参数不符合当前契约', 'afterRecovery')
   }
-  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
   const tab = await verifiedBossChatTab(fingerprint)
   if (args.move === 'next') {
     // 窗口以数据层前 32 条为界,再往下要滚动列表——BOSS 上尚无滚轮注入。
@@ -1995,7 +2002,7 @@ async function readBossList(
   const crossedCutoff = stale > 0 && sessions.length === 0
   const data: ChatReadListData = { sessions, complete: total <= LIST_WINDOW_MAX || crossedCutoff }
   if (validatePrimitiveData(PrimitiveName.ChatReadList, 1, data).length !== 0) {
-    throw new PlatformError('ELEMENT_UNRESOLVED', '会话列表结果不符合当前契约', 'manualOnly')
+    throw new PlatformError('ELEMENT_UNRESOLVED', '会话列表结果不符合当前契约', 'afterRecovery')
   }
   if (jsonBytes(data) > RESULT_DATA_BUDGET) {
     throw new PlatformError('PAYLOAD_LIMIT', '会话窗口超过内联载荷上限')
@@ -2048,11 +2055,11 @@ async function openBossConversation(
   args: ChatOpenConversationArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
 ): Promise<ChatOpenConversationData> {
   if (validatePrimitiveArgs(PrimitiveName.ChatOpenConversation, 1, args).length !== 0) {
-    throw new PlatformError('GUARD_FAILED', '打开会话参数不符合当前契约', 'manualOnly')
+    throw new PlatformError('GUARD_FAILED', '打开会话参数不符合当前契约', 'afterRecovery')
   }
-  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
   if (!parseBossConversationRef(args.conversationRef)) {
-    throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+    throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'afterRecovery')
   }
   const tab = await verifiedBossChatTab(fingerprint)
   const tabId = tab.id!
@@ -2061,7 +2068,7 @@ async function openBossConversation(
   if (state.jobLabel !== JOB_ALL || state.labelSelected !== LABEL_ALL || state.subTabActive !== SUB_TAB_UNREAD) {
     throw new PlatformError('GUARD_FAILED',
       `当前列表不是「全部职位+未读」(职位「${state.jobLabel}」页签「${state.labelSelected}」小页签「${state.subTabActive}」)`,
-      'manualOnly')
+      'afterRecovery')
   }
   const performedClick = await ensureBossThreadOpen(tab, ctx, fingerprint, args.conversationRef)
   // 后置:行带 selected 且气泡消失;或行已离开未读列表。要连续两轮读到。
@@ -2131,11 +2138,11 @@ async function readBossThread(
   args: ChatReadThreadArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
 ): Promise<ChatReadThreadData> {
   if (validatePrimitiveArgs(PrimitiveName.ChatReadThread, 1, args).length !== 0) {
-    throw new PlatformError('GUARD_FAILED', '会话读取参数不符合当前契约', 'manualOnly')
+    throw new PlatformError('GUARD_FAILED', '会话读取参数不符合当前契约', 'afterRecovery')
   }
-  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
   const parsed = parseBossConversationRef(args.conversationRef)
-  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'afterRecovery')
   if (args.cursor) {
     // 本实现单页交付、从不签发游标;脑收到 CURSOR_INVALID 会丢弃聚合从无 cursor 重来一次。
     throw new PlatformError('CURSOR_INVALID', 'BOSS 会话读取不分页,不接受游标')
@@ -2186,7 +2193,7 @@ async function readBossThread(
   }
   const data: ChatReadThreadData = { messages, reachedTop, anchorMatched, complete, nextCursor: null, peer }
   if (validatePrimitiveData(PrimitiveName.ChatReadThread, 1, data).length !== 0) {
-    throw new PlatformError('ELEMENT_UNRESOLVED', '会话读取结果不符合当前契约', 'manualOnly', undefined, 'possible')
+    throw new PlatformError('ELEMENT_UNRESOLVED', '会话读取结果不符合当前契约', 'afterRecovery', undefined, 'possible')
   }
   if (jsonBytes(data) > RESULT_DATA_BUDGET) {
     throw new PlatformError('PAYLOAD_LIMIT', '会话读取结果超过内联载荷上限')
@@ -2201,10 +2208,10 @@ async function readBossThread(
 async function sendButtonClickPlan(tabId: number, conversationRef: string, expectedText: string): Promise<ClickPlan> {
   const button = await runInPage(BOSS_DOM, tabId, domReadBossSendButton, [SEND_BUTTON_SELECTOR])
   if (!button.found) {
-    throw new PlatformError('ELEMENT_UNRESOLVED', `发送钮认不出(命中 ${button.count} 个)`, 'manualOnly')
+    throw new PlatformError('ELEMENT_UNRESOLVED', `发送钮认不出(命中 ${button.count} 个)`, 'afterRecovery')
   }
   if (button.text !== '发送') {
-    throw new PlatformError('ELEMENT_UNRESOLVED', `发送钮文案不是「发送」(读到「${button.text}」)`, 'manualOnly')
+    throw new PlatformError('ELEMENT_UNRESOLVED', `发送钮文案不是「发送」(读到「${button.text}」)`, 'afterRecovery')
   }
   return {
     label: '发送钮',
@@ -2235,14 +2242,14 @@ async function clearBossComposerByKeys(
       throw new PlatformError('CTX_NOT_READY', '手服务不可用,清空输入框未开始', 'afterRecovery', 'pageBroken')
     }
     throw new PlatformError('ELEMENT_UNRESOLVED',
-      `清空输入框的按键半途失败:${describeError(error).slice(0, 300)}`, 'manualOnly')
+      `清空输入框的按键半途失败:${describeError(error).slice(0, 300)}`, 'afterRecovery')
   }
   const settled = await pollUntil(ctx,
     () => runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID]),
     (read) => read.found && read.text === '', CLEAR_WAIT_MS)
   if (!settled.satisfied) {
     throw new PlatformError('ELEMENT_UNRESOLVED',
-      `全选删除后输入框仍有 ${settled.value.text.length} 字,未清空`, 'manualOnly')
+      `全选删除后输入框仍有 ${settled.value.text.length} 字,未清空`, 'afterRecovery')
   }
   trace.push(`清掉 ${beforeLength} 字旧内容(${played.keys} 次按键)`)
   reportHandLog('warn', 'composerDraftCleared',
@@ -2252,11 +2259,11 @@ async function clearBossComposerByKeys(
 async function sendBossMessage(
   args: ChatSendMessageArgs, guards: ChatSendMessageGuards, ctx: PrimitiveContext, fingerprint: string | undefined,
 ): Promise<ChatSendMessageData> {
-  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
   const parsed = parseBossConversationRef(args.conversationRef)
-  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'afterRecovery')
   const normalizedText = normalizeBossMessageText(args.text)
-  if (!normalizedText) throw new PlatformError('GUARD_FAILED', '规范化后的消息为空,拒绝发送', 'manualOnly')
+  if (!normalizedText) throw new PlatformError('GUARD_FAILED', '规范化后的消息为空,拒绝发送', 'afterRecovery')
   const contentHash = await sha256Hex(normalizedText)
   const tab = await verifiedBossChatTab(fingerprint)
   const tabId = tab.id!
@@ -2272,13 +2279,13 @@ async function sendBossMessage(
   if ((await readCurrentRef()) !== args.conversationRef) {
     await ensureBossThreadOpen(tab, ctx, fingerprint, args.conversationRef, false)
     if ((await readCurrentRef()) !== args.conversationRef) {
-      throw new PlatformError('GUARD_FAILED', '点开目标后当前会话仍不是发送目标,已取消', 'manualOnly')
+      throw new PlatformError('GUARD_FAILED', '点开目标后当前会话仍不是发送目标,已取消', 'afterRecovery')
     }
   }
   // 输入框里已有的字不再挡路(2026-09-03 甲方裁决撤销 composer.empty):取到焦点、
   // Chrome 在前台之后用真实按键全选删除,回读为空再打。见下方 clearBossComposerByKeys。
   const composerBefore = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
-  if (!composerBefore.found) throw new PlatformError('ELEMENT_UNRESOLVED', '页面上找不到聊天输入框', 'manualOnly')
+  if (!composerBefore.found) throw new PlatformError('ELEMENT_UNRESOLVED', '页面上找不到聊天输入框', 'afterRecovery')
   // 基线:发前的消息身份集合,发后只认不在基线里的新行。expectedTail 只观测不拦(2026-08-04 裁决)。
   const baseline = await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)
   const baselineMids = new Set(baseline.rows.map((row) => row.mid))
@@ -2318,16 +2325,16 @@ async function sendBossMessage(
   }
   const { text: typedText, removed } = newlinesToSpaces(args.text)
   if (removed > 0) trace.push(`${removed} 个换行符换成空格`)
-  if (typedText === '') throw new PlatformError('GUARD_FAILED', '去掉换行之后没有内容可打', 'manualOnly')
+  if (typedText === '') throw new PlatformError('GUARD_FAILED', '去掉换行之后没有内容可打', 'afterRecovery')
   ctx.checkpoint()
   let composed
   try {
     composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0))
   } catch (error) {
-    throw new PlatformError('ELEMENT_UNRESOLVED', `排版器自身异常:${describeError(error).slice(0, 300)}`, 'manualOnly')
+    throw new PlatformError('ELEMENT_UNRESOLVED', `排版器自身异常:${describeError(error).slice(0, 300)}`, 'afterRecovery')
   }
   if (!composed.ok) {
-    throw new PlatformError('GUARD_FAILED', `文案排不出合格键序(${composed.tries} 次):${composed.reasons.join(';').slice(0, 300)}`, 'manualOnly')
+    throw new PlatformError('GUARD_FAILED', `文案排不出合格键序(${composed.tries} 次):${composed.reasons.join(';').slice(0, 300)}`, 'afterRecovery')
   }
   // 从这里起输入框会被写入。任何失败都留着草稿,所以都是 manualOnly:人来清。
   let played
@@ -2335,7 +2342,7 @@ async function sendBossMessage(
     played = await playTypePlan(composed.plan)
   } catch (error) {
     if (isHandServiceDown(error)) throw new PlatformError('CTX_NOT_READY', '手服务不可用,打字未开始', 'afterRecovery', 'pageBroken')
-    throw new PlatformError('ELEMENT_UNRESOLVED', `打字半途失败,输入框可能残留草稿:${describeError(error).slice(0, 300)}`, 'manualOnly')
+    throw new PlatformError('ELEMENT_UNRESOLVED', `打字半途失败,输入框可能残留草稿:${describeError(error).slice(0, 300)}`, 'afterRecovery')
   }
   trace.push(`发了 ${played.keys} 次按键${played.words ? ` | ${played.words}` : ''}`)
   const typed = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
@@ -2344,14 +2351,14 @@ async function sendBossMessage(
   if (normalizeBossMessageText(typed.text) !== normalizeBossMessageText(typedText)) {
     // 上屏的不是这句话,不发:候选人看到的必须是脑写的那句。草稿留给人清。
     throw new PlatformError('GUARD_FAILED',
-      `上屏文本与文案不同,已停在草稿:期望 ${typedText.length} 字,实得「${typed.text.slice(0, 200)}」`, 'manualOnly')
+      `上屏文本与文案不同,已停在草稿:期望 ${typedText.length} 字,实得「${typed.text.slice(0, 200)}」`, 'afterRecovery')
   }
   // 最后一道闸之后立即唯一一次点击发送。
   const plan = await sendButtonClickPlan(tabId, args.conversationRef, typedText)
   ctx.checkpoint()
   await verifiedBossChatTab(fingerprint)
   if (Date.now() > ctx.irreversibleNotAfterMs) {
-    throw new PlatformError('CTX_LOST_DURING_EXEC', '不可逆动作窗口已过,已停在草稿', 'manualOnly')
+    throw new PlatformError('CTX_LOST_DURING_EXEC', '不可逆动作窗口已过,已停在草稿', 'afterRecovery')
   }
   await ctx.beforeSideEffect()
   const dispatchedAt = Date.now()
@@ -2359,7 +2366,7 @@ async function sendBossMessage(
   if (probe.outcome !== 'clicked') {
     throw new PlatformError(
       probe.outcome === 'handServiceUnavailable' ? 'CTX_NOT_READY' : 'ELEMENT_UNRESOLVED',
-      `发送钮未点击,已停在草稿:${probe.detail ?? probe.outcome}`, 'manualOnly')
+      `发送钮未点击,已停在草稿:${probe.detail ?? probe.outcome}`, 'afterRecovery')
   }
   trace.push(`点了发送 ${probe.detail ?? ''}`)
   // 发后正证:验证读窗口里出现一条方向 out、文本哈希相等、不在基线里、时间不早于派发的行。
