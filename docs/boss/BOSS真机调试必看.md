@@ -23,6 +23,7 @@
    ```bash
    osascript -e 'tell application "Google Chrome" to activate' -e 'tell application "Google Chrome" to repeat with w in windows' -e 'set i to 0' -e 'repeat with t in tabs of w' -e 'set i to i + 1' -e 'if URL of t contains "zhipin.com" then' -e 'set active tab index of w to i' -e 'set index of w to 1' -e 'return' -e 'end if' -e 'end repeat' -e 'end repeat' -e 'end tell'
    ```
+5. **手服务里可能残留上一块屏的标定。** 脑进程不重启，手服务的标定就一直在；窗口换了显示器（09-04：08-28 在副屏学到的 OffsetX≈2560 留到了主屏），每趟都把光标推出屏幕右缘，页面只观察到光标被钉在边上的入口点，冷启动三趟都报同一个落点、永不收敛。判据：`POST /handinput/state`（JSON `{}`）看 `cursorCssX/Y` 荒谬（负几千或超视口）且 `samples>0 residualPx` 很大。解法一条：`POST /handinput/reseed` 带当前窗口粗估 `{"hint":{"screenX":0,"screenY":33,"dpr":2}}`（`screenX/Y` 取 `window.screenX/Y`），随后第一条 move 走冷启动两趟即收敛。
 
 ## 2. 读：Claude Chrome 插件
 
