@@ -3,7 +3,6 @@ package m5ai
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -29,15 +28,11 @@ func SilenceFollowupPrompt(revision ContextRevision) (string, error) {
 	if count != 1 || strings.TrimSpace(prompt) == "" {
 		return "", errors.New("missingSilenceFollowupPrompt")
 	}
-	if err := requireInputTokens(silenceFollowupDocType, prompt, "姓名", "年龄", "性别", "简历"); err != nil {
-		return "", err
-	}
 	return prompt, nil
 }
 
-// RenderSilenceFollowupPrompt binds the four and only four approved inputs.
-// Replacement scans the original template once, so token-looking resume text
-// cannot become a second template pass.
+// RenderSilenceFollowupPrompt 按统一渲染规则绑定沉默追问的四个输入:正文占位符换
+// 指针、数据落尾部子块;姓名固定为中性值「候选人」,年龄与性别只取简历事实。
 func RenderSilenceFollowupPrompt(prompt, canonicalResumeJSON string) (string, error) {
 	if !utf8.ValidString(canonicalResumeJSON) || !json.Valid([]byte(canonicalResumeJSON)) {
 		return "", errors.New("invalidSilenceFollowupResume")
@@ -57,35 +52,14 @@ func RenderSilenceFollowupPrompt(prompt, canonicalResumeJSON string) (string, er
 		return "", err
 	}
 
-	values := map[string]string{
+	rendered, err := renderPromptWithInputs(silenceFollowupDocType, prompt, map[string]string{
 		"姓名": "候选人",
 		"年龄": age,
 		"性别": gender,
 		"简历": canonicalResumeJSON,
-	}
-	counts := map[string]int{"姓名": 0, "年龄": 0, "性别": 0, "简历": 0}
-	var builder strings.Builder
-	cursor := 0
-	for _, match := range activeTokenPattern.FindAllStringSubmatchIndex(prompt, -1) {
-		name := prompt[match[2]:match[3]]
-		value, ok := values[name]
-		if !ok {
-			return "", fmt.Errorf("unknownTemplateToken: %s", name)
-		}
-		counts[name]++
-		builder.WriteString(prompt[cursor:match[0]])
-		builder.WriteString(value)
-		cursor = match[1]
-	}
-	builder.WriteString(prompt[cursor:])
-	for _, name := range []string{"姓名", "年龄", "性别", "简历"} {
-		if counts[name] != 1 {
-			return "", errors.New("invalidSilenceFollowupPrompt")
-		}
-	}
-	rendered := builder.String()
-	if strings.TrimSpace(rendered) == "" {
-		return "", errors.New("missingRenderedSilenceFollowupPrompt")
+	})
+	if err != nil {
+		return "", err
 	}
 	// 现实边界紧凑版(2026-08-14 甲方裁决,详见 render.go 完整版注释):追问
 	// 话术同样是候选人可见正文,不许承诺到场或编造地址。

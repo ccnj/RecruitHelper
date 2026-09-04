@@ -38,9 +38,11 @@ func TestRenderSilenceFollowupPromptUsesNeutralNameAndCanonicalResumeFacts(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(rendered, "姓名=候选人\n年龄=30岁\n性别=女\n简历=") ||
-		!strings.HasSuffix(rendered, resume+"\n\n"+realityBoundaryCompactPolicy) {
-		t.Fatalf("沉默追问渲染错误: %s", rendered)
+	want := "姓名=姓名(见下方输入参数-姓名)\n年龄=年龄(见下方输入参数-年龄)\n性别=性别(见下方输入参数-性别)\n简历=简历(见下方输入参数-简历)\n\n" +
+		"【输入参数】\n\n【输入参数-姓名】\n候选人\n\n【输入参数-年龄】\n30岁\n\n【输入参数-性别】\n女\n\n【输入参数-简历】\n" + resume +
+		"\n\n" + realityBoundaryCompactPolicy
+	if rendered != want {
+		t.Fatalf("沉默追问渲染漂移:\n got=%q\nwant=%q", rendered, want)
 	}
 }
 
@@ -50,21 +52,30 @@ func TestRenderSilenceFollowupPromptUsesUnknownForMissingAgeAndGender(t *testing
 		"{姓名}|{年龄}|{性别}|{简历}",
 		resume,
 	)
-	if err != nil || !strings.HasPrefix(rendered, "候选人|未知|未知|") {
+	if err != nil || !strings.Contains(rendered, "【输入参数-年龄】\n未知\n") ||
+		!strings.Contains(rendered, "【输入参数-性别】\n未知\n") {
 		t.Fatalf("缺失事实未保守渲染: rendered=%q err=%v", rendered, err)
 	}
 }
 
-func TestRenderSilenceFollowupPromptRejectsTemplateAndResumeAmbiguity(t *testing.T) {
+// 2026-09-03 统一渲染:模板缺占位符、多占位符、带陌生占位符都不拒绝——必填输入恒
+// 追加、陌生的原样保留;仍拒绝的只有简历事实自相矛盾。
+func TestRenderSilenceFollowupPromptToleratesTemplateDefectsButRejectsResumeAmbiguity(t *testing.T) {
 	resume := canonicalSilenceResume(t, []resumeLabelValue{{Label: "年龄", Value: "30岁"}})
 	for _, prompt := range []string{
 		"{姓名}{年龄}{性别}",
 		"{姓名}{年龄}{性别}{简历}{动作}",
 		"{姓名}{姓名}{年龄}{性别}{简历}",
 	} {
-		if rendered, err := RenderSilenceFollowupPrompt(prompt, resume); err == nil || rendered != "" {
-			t.Fatalf("非法模板未拒绝: prompt=%q rendered=%q err=%v", prompt, rendered, err)
+		rendered, err := RenderSilenceFollowupPrompt(prompt, resume)
+		if err != nil || strings.Count(rendered, "【输入参数-姓名】\n候选人\n") != 1 ||
+			strings.Count(rendered, "【输入参数-简历】\n"+resume) != 1 {
+			t.Fatalf("模板缺陷不得拒绝且数据各只一份: prompt=%q rendered=%q err=%v", prompt, rendered, err)
 		}
+	}
+	rendered, err := RenderSilenceFollowupPrompt("{姓名}{年龄}{性别}{简历}{动作}", resume)
+	if err != nil || !strings.HasPrefix(rendered, "姓名(见下方输入参数-姓名)年龄(见下方输入参数-年龄)性别(见下方输入参数-性别)简历(见下方输入参数-简历){动作}\n\n") {
+		t.Fatalf("陌生占位符必须原样保留: rendered=%q err=%v", rendered, err)
 	}
 	ambiguous := canonicalSilenceResume(t, []resumeLabelValue{
 		{Label: "年龄", Value: "30岁"},

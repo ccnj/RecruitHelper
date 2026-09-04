@@ -50,15 +50,16 @@ func DeriveSourcingView(source JobConfigDocumentPackage) (SourcingView, error) {
 	}
 
 	scoring := documents["打分"]
-	if strings.TrimSpace(scoring) == "" || strings.Count(scoring, "{resume_json}") != 1 {
+	// 占位符出现次数不再校验(2026-09-03 统一渲染):必填输入恒追加到尾部子块,
+	// 模板缺引用或多引用都不该让职位掉出有效集。
+	if strings.TrimSpace(scoring) == "" {
 		return SourcingView{}, ErrInvalidSourcingView
 	}
 	greeting, usePlatformDefaultGreeting, err := deriveGreetingConfig(documents["招呼语"])
 	if err != nil {
 		return SourcingView{}, ErrInvalidSourcingView
 	}
-	if strings.TrimSpace(greeting) == "" || strings.Count(greeting, "{resume_summary_json}") != 1 ||
-		strings.Count(greeting, "{career_state}") != 1 {
+	if strings.TrimSpace(greeting) == "" {
 		return SourcingView{}, ErrInvalidSourcingView
 	}
 

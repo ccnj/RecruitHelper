@@ -3,19 +3,15 @@ package m5ai
 import (
 	"encoding/json"
 	"errors"
-	"strings"
 )
 
-const scoringResumePlaceholder = "{resume_json}"
+const scoringResumeToken = "resume_json"
 
-// RenderScoringPrompt binds one immutable resume JSON value to one scoring
-// prompt. It never truncates either input. The provider-reported token usage is
-// the authoritative input-budget boundary.
+// RenderScoringPrompt 按统一渲染规则把一份不可变简历 JSON 绑进打分文档:正文
+// {resume_json} 换指针、数据落尾部【输入参数-简历】子块,从不截断。provider 上报
+// 的 token 用量才是输入预算的权威边界。
 func RenderScoringPrompt(prompt, resumeJSON string) (string, error) {
-	if strings.Count(prompt, scoringResumePlaceholder) != 1 {
-		return "", errors.New("invalidScoringPrompt")
-	}
-	return strings.Replace(prompt, scoringResumePlaceholder, resumeJSON, 1), nil
+	return renderPromptWithInputs("打分", prompt, map[string]string{scoringResumeToken: resumeJSON})
 }
 
 // ParseScoringSuggestion interprets only the score needed by deterministic
