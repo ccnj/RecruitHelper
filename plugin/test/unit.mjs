@@ -3669,6 +3669,18 @@ function installM6SourcingFilterFixture(options = {}) {
   selector.query.set('.filter-select-two__start .km-select', [startSelect])
   selector.query.set('.filter-select-two__end .km-select', [endSelect])
 
+  // 模拟"点击被平台吞掉":click() 照常派发、页面照常记一次交互,但选中态纹丝不动。
+  // 2026-09-03/09-04 客户机年龄格现场即为此形态,肉眼就是"点了没反应"。
+  const swallowedClicks = new Map()
+  const swallowClick = (key, label) => {
+    const spec = options.swallowClicks
+    if (spec === undefined || spec.key !== key || spec.label !== label) return false
+    const seen = swallowedClicks.get(`${key}/${label}`) ?? 0
+    if (seen >= spec.times) return false
+    swallowedClicks.set(`${key}/${label}`, seen + 1)
+    return true
+  }
+
   const buildGroup = (key, spec) => {
     const group = node()
     const title = node(spec.title)
@@ -3694,6 +3706,7 @@ function installM6SourcingFilterFixture(options = {}) {
       setSelected(initialSelections[key].includes(label))
       option.click = () => {
         interact(`click-${key}-${label}`)
+        if (swallowClick(key, label)) return
         if (spec.control === 'radio' || key === 'age') {
           for (const candidate of optionNodes) candidate.setSelected(candidate === option)
           return
@@ -3917,6 +3930,58 @@ test('candidate.applySourcingFilters MAIN 年龄组初读后被重建仍点得�
     assert.ok(names.includes('choose-range-start-25'))
     assert.ok(names.includes('choose-range-end-45'))
     assert.equal(fixture.state.confirms, 1, '筛选命令仍只点一次确定')
+  } finally {
+    fixture.restore()
+  }
+})
+
+// 2026-09-03 与 09-04 客户机现场:点「自定义」那一下被吞,页面上年龄格仍是「不限」,
+// 旧实现只看"我点了"、照旧返回 true,直到后面找自定义区间下拉才以
+// custom_selector_unavailable 报错——09-04 那次废掉当日剩余 3 个职位 53 个名额。
+test('candidate.applySourcingFilters MAIN 首次点击被吞时回读发现并补点', async () => {
+  const fixture = installM6SourcingFilterFixture({
+    swallowClicks: { key: 'age', label: '自定义', times: 1 },
+  })
+  try {
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      structuredClone(m6SourcingFilterTarget),
+    )
+    assert.equal(result.status, 'ready', '点击被吞必须由回读发现并补点,不能拖到下拉才失败')
+    const names = fixture.state.interactions.map(([name]) => name)
+    assert.equal(names.filter((name) => name === 'click-age-自定义').length, 2,
+      '恰好补点一次:回读已达目标态就不再点,不能把 checkbox 又 toggle 回去')
+    assert.ok(names.includes('choose-range-start-25'))
+    assert.ok(names.includes('choose-range-end-45'))
+    assert.equal(fixture.state.confirms, 1, '筛选命令仍只点一次确定')
+    for (let index = 1; index < fixture.state.interactions.length; index += 1) {
+      const elapsed =
+        fixture.state.interactions[index][1] - fixture.state.interactions[index - 1][1]
+      assert.ok(elapsed >= 1_000, `补点也须守平台节奏下限(第 ${index + 1} 个动作)`)
+    }
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.applySourcingFilters MAIN 点击持续被吞时按选项失配收场且补点有界', async () => {
+  const fixture = installM6SourcingFilterFixture({
+    swallowClicks: { key: 'age', label: '自定义', times: 99 },
+  })
+  try {
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      structuredClone(m6SourcingFilterTarget),
+    )
+    assert.equal(result.status, 'failed')
+    assert.equal(result.reason, 'option_set_mismatch',
+      '点不中就是点不中,要在这一步响亮失败,不许带着「不限」往下走')
+    const names = fixture.state.interactions.map(([name]) => name)
+    assert.equal(names.filter((name) => name === 'click-age-自定义').length, 3, '补点至多三次')
+    assert.equal(fixture.state.confirms, 0, '没点中不得提交')
+    assert.equal(fixture.state.drawerOpen, false, '失败也要把抽屉收干净')
   } finally {
     fixture.restore()
   }
