@@ -303,3 +303,21 @@ func TestInterviewProjectionRejectsUnknownMethodAndBadOnsiteEnds(t *testing.T) {
 		})
 	}
 }
+
+func TestInterviewInviteNeutralContentHashIsFrozenAndAccepted(t *testing.T) {
+	neutral := InterviewInviteNeutralContentHash()
+	if neutral != hashCanonical("card\x1finterviewInvite") || len(neutral) != 64 {
+		t.Fatalf("常量投影配方漂移: %q", neutral)
+	}
+	if neutral == InterviewInviteContentHash(1000, 2000, "wechatVideo") {
+		t.Fatal("常量投影不得与任何参数配方相撞")
+	}
+	if !InterviewInviteContentHashAccepted(neutral, 1000, 2000, "wechatVideo") ||
+		!InterviewInviteContentHashAccepted(InterviewInviteContentHash(1000, 0, "onsite"), 1000, 0, "onsite") {
+		t.Fatal("参数配方与常量投影都应被接受")
+	}
+	if InterviewInviteContentHashAccepted(InterviewInviteContentHash(1000, 2000, "wechatVideo"), 1000, 3000, "wechatVideo") ||
+		InterviewInviteContentHashAccepted("", 1000, 2000, "wechatVideo") {
+		t.Fatal("别的 hash 或空串不得被接受")
+	}
+}

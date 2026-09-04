@@ -142,6 +142,37 @@ func TestCardResultsAtomicallyCreateBusinessFacts(t *testing.T) {
 		assertCardBusinessFact(t, st, key, command.IntentID, "interviewInvite", "unknown",
 			hash, sourceKey, &interview)
 	})
+
+	t.Run("interview invite neutral hash", func(t *testing.T) {
+		// 2026-09-04 契约包 1.2:卡上不带参数的平台回常量投影,账本行 hash 取该观察值、
+		// 面试字段仍取意图参数;意图指纹仍是参数配方,收编不得判冲突。
+		d, st, hand := newDisp(t)
+		key := seedSendTarget(t, st, hand, "acct-card-interview-neutral", "conv-card-interview-neutral")
+		interview := protocol.InterviewDetails{
+			StartsAt: 1_722_000_000_000, EndsAt: 1_722_001_800_000,
+			Method: protocol.InterviewMethodWechatVideo,
+		}
+		hash := syncledger.InterviewInviteContentHash(
+			interview.StartsAt, interview.EndsAt, string(interview.Method),
+		)
+		_, command := seedCardEffectIntent(
+			t, st, key, protocol.PrimChatSendInviteCard,
+			protocol.ChatSendInviteCardArgs{ConversationRef: key.ConversationRef, Interview: interview},
+			hash, 1,
+		)
+		sourceKey := strings.Repeat("e", 64)
+		result := validInviteCardResult(command.MsgID, key.ConversationRef, sourceKey, interview)
+		var data protocol.ChatSendInviteCardData
+		_ = json.Unmarshal(result.Data, &data)
+		data.ContentHash = syncledger.InterviewInviteNeutralContentHash()
+		result.Data, _ = protocol.Encode(data)
+		outcome, _, err := d.applyResultMessage("hand-send", "result-card-interview-neutral", result)
+		if err != nil || outcome != ocDone {
+			t.Fatalf("常量投影的邀面卡 result 入账失败: outcome=%v err=%v", outcome, err)
+		}
+		assertCardBusinessFact(t, st, key, command.IntentID, "interviewInvite", "unknown",
+			syncledger.InterviewInviteNeutralContentHash(), sourceKey, &interview)
+	})
 }
 
 func assertCardBusinessFact(

@@ -1763,7 +1763,7 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "conversation.tracked", "witness/1"],
       "execBudgetMs": 240000, "deadlineMs": 600000, "leaseMs": 30000,
       "verification": { "primitive": "chat.readThread", "ver": 1, "maxRounds": 3 },
-      "note": "只向既有 tracked 会话发送一次邀面卡,method 支持 wechatVideo 与 onsite:wechatVideo 必须带 endsAt 且大于 startsAt,onsite 必须缺席 endsAt(平台对现场面试不提供结束时间,不得由 startsAt 合成或以占位值冒充)。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;准备步骤不得产生候选人可见副作用,最终发送至多调用一次。成功只接受相对基线恰好新增一条服务端确认的我方 card/interviewInvite/unknown,稳定 sourceKey 与该形态下的邀面参数全部精确相等(onsite 的 contentHash 按配方把缺席的 endsAt 投影为空串);平台 state=0 不得解释业务状态。任何阴性只进入 chat.readThread 验证或 suspect,禁止第二次动作"
+      "note": "只向既有 tracked 会话发送一次邀面卡,method 支持 wechatVideo 与 onsite:wechatVideo 必须带 endsAt 且大于 startsAt,onsite 必须缺席 endsAt(平台对现场面试不提供结束时间,不得由 startsAt 合成或以占位值冒充)。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;准备步骤不得产生候选人可见副作用,最终发送至多调用一次。成功按「发后页面可见」(2026-09-04):验证读窗口内存在方向 out、card/interviewInvite、稳定 sourceKey、时间不早于派发的行;卡上带邀面参数时参数须与命令逐项相等且 contentHash 等于参数配方(onsite 把缺席的 endsAt 投影为空串),卡上不带参数(interview 缺席)时以方向、类型、派发窗口三项判成功且 contentHash 等于无参数常量投影 sha256(\"card\\x1finterviewInvite\");平台私有状态值不得解释业务状态。任何阴性只进入 chat.readThread 验证或 suspect,禁止第二次动作"
     },
     "chat.acceptWechat": {
       "ver": 1, "class": "effectful", "batch": "X",
@@ -1772,14 +1772,14 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "conversation.tracked", "witness/1"],
       "execBudgetMs": 120000, "deadlineMs": 600000, "leaseMs": 30000,
       "verification": { "primitive": "chat.readWechatExchangeOutcome", "ver": 1, "maxRounds": 3 },
-      "note": "只接受当前 tracked 会话中由 requestSourceKey 精确锚定的候选人主动微信请求。preflight 与最终 click 前必须字面调用同一 evaluator,核对账号、目标、expectedTail、稳定消息基线、唯一 105/in/originType=2/success 请求、唯一可见且非 done 的标准同意动作;原语内只 click 一次且不重试。成功正证是同一张请求卡上的可见后置状态:标准同意动作消失、卡片转入已完成形态,按可见文本判定,类名只作定位提示。259/out/originType=2/success 是可选加成而非成功前提:窗口内唯一到达且双微信字段齐全才一并返回 exchangeSourceKey 与候选人 peerWechat,零匹配、多匹配、方向或 originType 不符、字段不全时两者一并缺席但不推翻正证;号可由 chat.readWechatExchangeOutcome 延迟收编。可见后置状态读不到、读不清、目标换绑或身份复核失败才是未确认,进入专门 outcome 读或 suspect,禁止第二次接受"
+      "note": "只接受当前 tracked 会话中由 requestSourceKey 精确锚定的候选人主动微信请求。preflight 与最终 click 前必须字面调用同一 evaluator,核对账号、目标、expectedTail、稳定消息基线、唯一由 requestSourceKey 锚定的候选人主动请求卡(平台判别子见平台事实文档)、唯一可见且未答的标准同意动作;原语内只 click 一次且不重试。成功正证是该请求卡转入已答/已完成形态,或平台权威字段显示微信已换成(取各平台事实文档钉住的、就地回读与重开会话都可见的持久化信号,类名只作定位提示)。服务端确认的交换结果消息是可选加成而非成功前提:窗口内唯一到达且候选人微信可读才一并返回 exchangeSourceKey 与候选人 peerWechat,零匹配、多匹配、归属或方向不符、微信读不到时两者一并缺席但不推翻正证;号可由 chat.readWechatExchangeOutcome 延迟收编。可见后置状态读不到、读不清、目标换绑或身份复核失败才是未确认,进入专门 outcome 读或 suspect,禁止第二次接受"
     },
     "chat.readWechatExchangeOutcome": {
       "ver": 1, "class": "readonly", "batch": "X",
       "argsSchema": "ChatReadWechatExchangeOutcomeArgs", "dataSchema": "ChatReadWechatExchangeOutcomeData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"],
       "execBudgetMs": 30000, "deadlineMs": 300000,
-      "note": "微信交换结果专门只读面,也是 chat.acceptWechat 的唯一配套验证读;只读真人当前已打开且公开路由精确匹配的会话实时消息源,不定位、不点击、不滚动、不发送。两形态共用同一条结果消息判据:259/success、from 与 originType 构成已证实配对之一(from=候选人+originType=1,或 from=招聘方+originType=2)、且双方微信字段齐全;即结果消息恒归属点同意的一方,originType 恒等于发起方(2026-07-28 生产页面双样本直读)。带锚形态(requestSourceKey 存在)是 chat.acceptWechat 的配套验证读专用形态:锚定已证实的两种请求之一(105/in/originType=2/success 或 105/out/originType=1/success),匹配结果必须位于下一条 105 之前且窗口内恰好一条。无锚形态(requestSourceKey 缺省)是独立 ContactAsset 收编读面:不锚请求卡、不划请求窗口,取当前会话可见消息中满足同一判据的最新一条;它不得用于任何 effectful 动作的成功判定或补记,只服务 ContactAsset 收编(2026-08-06 甲方裁决:请求卡随对话变长滚出平台会话首屏窗口,而结果消息始终在尾部,锚请求卡使收号随对话增长而必然失败)。两形态匹配成立才 confirmed=true 并只返回候选人 peerWechat。false 仅表示本轮正证不足,不得证明未接受或授权任何动作"
+      "note": "微信交换结果专门只读面,也是 chat.acceptWechat 的唯一配套验证读;只读真人当前已打开且公开路由精确匹配的会话实时消息源,不定位、不点击、不滚动、不发送。两形态共用同一条结果消息判据:服务端确认的交换结果消息、归属与发起方向符合该平台已证实的配对、且候选人微信可从平台权威字段读到;各平台的消息类型码、配对规则与权威字段位置记在各自平台事实文档,不进契约(2026-09-04 契约包 1.4 外迁)。带锚形态(requestSourceKey 存在)是 chat.acceptWechat 的配套验证读专用形态:锚定平台已证实的请求卡(候选人主动请求或我方邀请),匹配结果必须位于该锚之后、下一张请求卡之前且窗口内恰好一条。无锚形态(requestSourceKey 缺省)是独立 ContactAsset 收编读面:不锚请求卡、不划请求窗口,取当前会话可见消息中满足同一判据的最新一条;它不得用于任何 effectful 动作的成功判定或补记,只服务 ContactAsset 收编(2026-08-06 甲方裁决:请求卡随对话变长滚出平台会话首屏窗口,而结果消息始终在尾部,锚请求卡使收号随对话增长而必然失败)。两形态匹配成立才 confirmed=true 并只返回候选人 peerWechat。false 仅表示本轮正证不足,不得证明未接受或授权任何动作"
     },
     "chat.captureThreadScreenshot": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
