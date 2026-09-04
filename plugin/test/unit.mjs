@@ -16013,6 +16013,60 @@ test('BOSS 换微信线纯函数:待答请求筛选与结果行选取(带锚恰�
   assert.equal(selectBossExchangeResult([num('9'), num('3')], null).row.mid, '9', '按 mid 数值排序取最新,不按数组顺序')
 })
 
+test('BOSS 接受前最后一道闸:只认换微信请求卡里的「同意」,附件简历请求卡的同意键不算;落点、可用、卡文案、选中行四者缺一不点', () => {
+  const { domReadBossAcceptButton, domAcceptGate } = bossTestHooks
+  const mkBtn = (text, cardText, disabled = false, w = 111) => {
+    const card = { textContent: `${cardText} 拒绝 ${text}` }
+    const btn = {
+      tagName: 'SPAN', textContent: text,
+      classList: { contains(c) { return c === 'disabled' && disabled } },
+      getBoundingClientRect() { return { x: 700, y: 500, width: w, height: 34, left: 700, top: 500, right: 700 + w, bottom: 534 } },
+      closest(sel) { return sel === '.message-item' ? card : null },
+      contains(node) { return node === btn },
+    }
+    return btn
+  }
+  const resumeAgree = mkBtn('同意', '对方请求发送附件简历')
+  const wxAgree = mkBtn('同意', '我想要和您交换微信，您是否同意')
+  const wxRefuse = mkBtn('拒绝', '我想要和您交换微信，您是否同意')
+  const rows = [
+    { getAttribute() { return '11-0' }, classList: { contains(c) { return c === 'selected' } } },
+    { getAttribute() { return '12-0' }, classList: { contains() { return false } } },
+  ]
+  const saved = globalThis.document
+  const savedWindow = globalThis.window
+  const install = (buttons, overrides = {}) => {
+    globalThis.document = {
+      querySelectorAll(selector) { return selector === '.message-card-buttons .card-btn' ? buttons : selector === '.geek-item' ? (overrides.rows ?? rows) : [] },
+      elementFromPoint() { return overrides.at === undefined ? wxAgree : overrides.at },
+    }
+    globalThis.window = { innerWidth: 1470, innerHeight: 800 }
+  }
+  try {
+    install([resumeAgree, wxRefuse, wxAgree])
+    const read = domReadBossAcceptButton('.message-card-buttons .card-btn', '.message-item', '交换微信')
+    assert.deepEqual([read.found, read.count, read.index, read.clipOk], [true, 1, 2, true], '简历请求卡的同意键不算,换微信卡的才算')
+    install([resumeAgree, wxRefuse, mkBtn('同意', '我想要和您交换微信，您是否同意', true)])
+    assert.deepEqual(domReadBossAcceptButton('.message-card-buttons .card-btn', '.message-item', '交换微信').count, 0, '已 disabled 的不算')
+    install([resumeAgree, wxAgree, mkBtn('同意', '交换微信(第二张)')])
+    assert.equal(domReadBossAcceptButton('.message-card-buttons .card-btn', '.message-item', '交换微信').found, false, '两张换微信卡都可用时不猜')
+
+    const gate = (buttons, index, overrides) => {
+      install(buttons, overrides)
+      return domAcceptGate('.message-card-buttons .card-btn', index, 1, 1, '.message-item', '交换微信', '.geek-item', '11-0', 'selected')
+    }
+    assert.equal(gate([resumeAgree, wxRefuse, wxAgree], 2).onTarget, true)
+    assert.match(gate([resumeAgree, wxRefuse, wxAgree], 0, { at: resumeAgree }).found, /不是换微信请求卡/, '落到简历请求卡的同意键上不点')
+    assert.match(gate([resumeAgree, wxRefuse, wxAgree], 2, { at: wxRefuse }).found, /别的元素/, '落点偏到拒绝键上不点')
+    assert.match(gate([resumeAgree, wxRefuse, wxAgree], 1).found, /文案已变/, 'index 指到拒绝键不点')
+    assert.match(gate([resumeAgree, wxRefuse, wxAgree], 2, { rows: [rows[1]] }).found, /选中行不是目标会话/, '真人切走会话后不点')
+    assert.match(gate([resumeAgree, wxRefuse], 2).found, /不在原来的位置/, '卡片重排后 index 落空不点')
+  } finally {
+    globalThis.document = saved
+    globalThis.window = savedWindow
+  }
+})
+
 test('BOSS 锚尾匹配:唯一命中才给起点,零命中与重复命中都不裁', () => {
   const { matchAnchorTail } = bossTestHooks
   const h = (c) => c.repeat(64)

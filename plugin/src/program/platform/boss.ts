@@ -2405,6 +2405,8 @@ const EXCHANGE_CONFIRM_SELECTOR = '.exchange-tooltip .boss-btn-primary'
 const EXCHANGE_CANCEL_SELECTOR = '.exchange-tooltip .boss-btn-outline'
 const WECHAT_MODAL_SELECTOR = '.dialog-wrap.active, .add-wx-wrap'
 const CARD_BUTTON_SELECTOR = '.message-card-buttons .card-btn'
+const CARD_ITEM_SELECTOR = '.message-item'
+const WECHAT_CARD_TEXT = '交换微信'
 const WECHAT_ACCEPT_AID = 33
 const WECHAT_REQUEST_SENT_AID = 32
 const WECHAT_REQUEST_SENT_BIZ = 21050024
@@ -2492,13 +2494,21 @@ function domReadBossExchangeTooltip(
   }
 }
 
-/** 卡内「同意」card-btn:可见、不带 disabled、文案恰「同意」的,恰一个才认出;clipOk = 视口内可见部分够落光标。 */
-function domReadBossAcceptButton(selector: string): { found: boolean; count: number; index: number; rect: BossRect; clipOk: boolean } {
+/**
+ * 卡内「同意」card-btn:可见、不带 disabled、文案恰「同意」、且所在消息卡文案含「交换微信」的,恰一个才认出;
+ * clipOk = 视口内可见部分够落光标。附件简历请求等别的 dialog 卡同样带「同意」键(出口审查发现 1),
+ * 所以按卡文案筛,不按页面唯一。
+ */
+function domReadBossAcceptButton(selector: string, cardSelector: string, cardText: string): {
+  found: boolean; count: number; index: number; rect: BossRect; clipOk: boolean
+} {
   const all = Array.from(document.querySelectorAll(selector))
   const hits: Array<{ index: number; el: Element }> = []
   all.forEach((el, index) => {
     if ((el.textContent ?? '').trim() !== '同意') return
     if (el.classList.contains('disabled')) return
+    const card = el.closest(cardSelector)
+    if (!card || !(card.textContent ?? '').includes(cardText)) return
     const r = el.getBoundingClientRect()
     if (r.width === 0 || r.height === 0) return
     hits.push({ index, el })
@@ -2509,6 +2519,35 @@ function domReadBossAcceptButton(selector: string): { found: boolean; count: num
   const w = Math.min(window.innerWidth, r.right) - Math.max(0, r.left)
   const h = Math.min(window.innerHeight, r.bottom) - Math.max(0, r.top)
   return { found: true, count: 1, index, rect: { x: r.x, y: r.y, w: r.width, h: r.height }, clipOk: w >= 24 && h >= 24 }
+}
+
+/**
+ * 接受前最后一道闸(sendMessage 的 domSendGate 同款):落点是那个「同意」键、它仍可用、所在卡仍是换微信请求卡、
+ * 选中行仍是目标会话——四者缺一不点。真人在 preflight 之后切走会话,末条恰好也是带「同意」的卡时,
+ * 只查 index 会点到别人的卡(出口审查发现 1 序列二)。
+ */
+function domAcceptGate(
+  buttonSelector: string, index: number, x: number, y: number,
+  cardSelector: string, cardText: string,
+  rowSelector: string, conversationRef: string, selectedClass: string,
+): { onTarget: boolean; found: string } {
+  const target = Array.from(document.querySelectorAll(buttonSelector))[index]
+  const at = document.elementFromPoint(x, y)
+  const problems: string[] = []
+  if (!target) problems.push('靶子已经不在原来的位置上')
+  else {
+    if (!at) problems.push('落点上什么都没有')
+    else if (!(at === target || target.contains(at))) problems.push(`落点上是别的元素 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 8)}」`)
+    if ((target.textContent ?? '').trim() !== '同意') problems.push(`靶子文案已变「${(target.textContent ?? '').trim().slice(0, 8)}」`)
+    if (target.classList.contains('disabled')) problems.push('同意键已 disabled')
+    const card = target.closest(cardSelector)
+    if (!card || !(card.textContent ?? '').includes(cardText)) problems.push('所在卡不是换微信请求卡')
+  }
+  const selectedRows = Array.from(document.querySelectorAll(rowSelector)).filter((el) => el.classList.contains(selectedClass))
+  if (!(selectedRows.length === 1 && selectedRows[0]!.getAttribute('data-id') === conversationRef)) {
+    problems.push(`选中行不是目标会话(选中 ${selectedRows.length} 行)`)
+  }
+  return problems.length === 0 ? { onTarget: true, found: '同意键' } : { onTarget: false, found: problems.join(';') }
 }
 
 /** 对方待答的换微信请求行:入站 dialog、带 aid 33、未答过。 */
@@ -2809,7 +2848,7 @@ async function acceptBossWechat(
   if (pending.length !== 1 || pending[0]!.mid !== anchor.mid) {
     throw new PlatformError('ELEMENT_UNRESOLVED', `待答的换微信请求不唯一(${pending.length} 条),不猜`, 'manualOnly')
   }
-  const button = await runInPage(BOSS_DOM, tabId, domReadBossAcceptButton, [CARD_BUTTON_SELECTOR])
+  const button = await runInPage(BOSS_DOM, tabId, domReadBossAcceptButton, [CARD_BUTTON_SELECTOR, CARD_ITEM_SELECTOR, WECHAT_CARD_TEXT])
   if (!button.found) {
     throw new PlatformError('ELEMENT_UNRESOLVED', `卡内同意钮认不出(可用 ${button.count} 个)`, button.count > 1 ? 'manualOnly' : 'afterRecovery')
   }
@@ -2817,9 +2856,10 @@ async function acceptBossWechat(
   const plan: ClickPlan = {
     label: '卡内同意钮',
     rect: button.rect,
-    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [CARD_BUTTON_SELECTOR, button.index, '同意', x, y]),
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domAcceptGate,
+      [CARD_BUTTON_SELECTOR, button.index, x, y, CARD_ITEM_SELECTOR, WECHAT_CARD_TEXT, ROW_SELECTOR, args.conversationRef, ROW_SELECTED_CLASS]),
     observe: async (): Promise<ClickObservation> => {
-      const after = await runInPage(BOSS_DOM, tabId, domReadBossAcceptButton, [CARD_BUTTON_SELECTOR])
+      const after = await runInPage(BOSS_DOM, tabId, domReadBossAcceptButton, [CARD_BUTTON_SELECTOR, CARD_ITEM_SELECTOR, WECHAT_CARD_TEXT])
       return { trusted: null, onTarget: null, eventDriftPx: null, after: `可用同意钮=${after.count}` }
     },
   }
@@ -3167,6 +3207,7 @@ export const bossTestHooks = Object.freeze({
   domReadBossWechatButton,
   domReadBossExchangeTooltip,
   domReadBossAcceptButton,
+  domAcceptGate,
   mainReadBossWechatState,
   matchAnchorTail,
   summarizeBossListRow,
