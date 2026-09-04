@@ -44,9 +44,15 @@ import type {
   ChatReadThreadArgs,
   ChatReadThreadData,
   ChatReadUnreadTotalData,
+  ChatAcceptWechatArgs,
+  ChatAcceptWechatData,
+  ChatReadWechatExchangeOutcomeArgs,
+  ChatReadWechatExchangeOutcomeData,
   ChatSendMessageArgs,
   ChatSendMessageData,
   ChatSendMessageGuards,
+  ChatSendWechatInviteArgs,
+  ChatSendWechatInviteData,
   ConversationSummary,
   DebugOsClickArgs,
   DebugOsClickData,
@@ -1196,6 +1202,12 @@ export interface BossRawMessage {
   text: string
   interviewCondition: number | null
   actionAid: number | null
+  /** body.templateId:微信号消息恒为 5(平台事实 §十四),普通文本为 1 或缺席。 */
+  templateId: number | null
+  /** body.dialog.operated:请求对话卡答过没有;非 dialog 行为 null。 */
+  dialogOperated: boolean | null
+  /** body.dialog.buttons[].url 里的 aid 码(33 同意 / 34 拒绝);非 dialog 行为空数组。 */
+  dialogAids: number[]
 }
 
 type BossThreadRead =
@@ -1273,6 +1285,16 @@ function mainReadBossThread(uid: number, friendSource: number): BossThreadRead {
     const topText = typeof message.text === 'string' ? message.text : ''
     const interview = asRecord(body?.interview)
     const action = asRecord(body?.action)
+    const dialog = asRecord(body?.dialog)
+    const dialogAids: number[] = []
+    if (dialog && Array.isArray(dialog.buttons)) {
+      for (const button of dialog.buttons as unknown[]) {
+        const record = asRecord(button)
+        const url = typeof record?.url === 'string' ? record.url : ''
+        const match = /[?&]aid=(\d+)/u.exec(url)
+        if (match) dialogAids.push(Number(match[1]))
+      }
+    }
     rows.push({
       mid: String(mid),
       direction,
@@ -1284,6 +1306,9 @@ function mainReadBossThread(uid: number, friendSource: number): BossThreadRead {
       text: bodyText || topText,
       interviewCondition: num(interview?.condition),
       actionAid: num(action?.aid),
+      templateId: num(body?.templateId),
+      dialogOperated: dialog ? dialog.operated === true : null,
+      dialogAids,
     })
   }
   return {
@@ -1320,6 +1345,22 @@ export function projectBossMessage(raw: BossRawMessage): BossProjectedMessage {
   const bizType = raw.bizType
   if (raw.status === 3) {
     return { kind: 'system', direction: raw.direction, text: text || '[消息已撤回]', hashInput: text || '[消息已撤回]' }
+  }
+  // 换微信线(平台事实 §十四,2026-09-04 真机):对方主动请求是 bizType 12 的 dialog 卡,按钮 aid 33=同意 / 34=拒绝。
+  // 答过之后仍投 pending——与智联 105 请求卡同构,完成态由独立的微信号消息表达,已换成事件只触发一次(出口 §四 第 2 条)。
+  if (bizType === 12 && raw.bodyType === 7 && raw.dialogAids.includes(33)) {
+    return {
+      kind: 'card', direction: raw.direction, text: '[交换微信请求]',
+      cardType: 'wechatExchange', cardState: 'pending', hashInput: 'card\x1fwechatExchange',
+    }
+  }
+  // 微信号消息 templateId=5:正文含号码,投影用固定文案。号只经 readWechatExchangeOutcome 的 peerWechat 出去,
+  // 不进 text / evidence / 日志(AGENTS「AI provider 数据边界」)。
+  if (bizType === 12 && raw.bodyType === 1 && raw.templateId === 5) {
+    return {
+      kind: 'card', direction: raw.direction, text: '[微信交换成功]',
+      cardType: 'wechatExchange', cardState: 'accepted', hashInput: 'card\x1fwechatExchange',
+    }
   }
   const plainText = bizType === 101 || bizType === 12 || (bizType === null && raw.bodyType === 1)
   if (plainText && text !== '') {
@@ -2350,6 +2391,537 @@ async function sendBossMessage(
     'manualOnly', undefined, 'possible')
 }
 
+
+// ── 换微信线(场景二,2026-09-04 出口) ───────────────────────────────────────────
+//
+// 判据按甲方两条原则(出口 §〇):每个判定只认一两个最标志的信号,且信号在「刚做完动作回读」与
+// 「重开会话再读」两个时机都可见。已换成只认 conversation$.weixin 落值;我方请求已发出只认 aid=32
+// 出站行;对方待答只认 operated=false 且带 aid 33 的入站 dialog 行。weixinVisible、按钮文案、快捷条
+// 只进 detail 当观测。脑侧零改动:三种形态投成契约三种形状,三条原语按契约 data 回值。
+
+const TOOLBAR_BUTTON_SELECTOR = '.conversation-operate .operate-btn'
+const EXCHANGE_TOOLTIP_SELECTOR = '.exchange-tooltip'
+const EXCHANGE_CONFIRM_SELECTOR = '.exchange-tooltip .boss-btn-primary'
+const EXCHANGE_CANCEL_SELECTOR = '.exchange-tooltip .boss-btn-outline'
+const WECHAT_MODAL_SELECTOR = '.dialog-wrap.active, .add-wx-wrap'
+const CARD_BUTTON_SELECTOR = '.message-card-buttons .card-btn'
+const WECHAT_ACCEPT_AID = 33
+const WECHAT_REQUEST_SENT_AID = 32
+const WECHAT_REQUEST_SENT_BIZ = 21050024
+const WECHAT_NUMBER_TEMPLATE_ID = 5
+const HARVEST_WAIT_MS = 5_000
+
+type BossRect = { x: number; y: number; w: number; h: number }
+
+type BossWechatStateRead =
+  | { status: 'ready'; weixin: string | null; weixinVisible: number | null; requestWeiXin: number | null; bothTalked: boolean }
+  | { status: 'missing' }
+  | { status: 'binding_mismatch' }
+
+/**
+ * 当前会话对象上的微信线字段。只取这几个,不整块 dump(user$ 旁边挨着 token,凭据不落纸)。
+ * weixin 是候选人微信号,只交给原语装进 typed data 的 peerWechat,不进日志。
+ */
+function mainReadBossWechatState(uid: number, friendSource: number): BossWechatStateRead {
+  type AnyRecord = Record<string, unknown>
+  const seen = new Set<unknown>()
+  let mismatch = false
+  for (const element of Array.from(document.querySelectorAll('*'))) {
+    const instance = (element as unknown as { __vue__?: AnyRecord }).__vue__
+    if (!instance || seen.has(instance)) continue
+    seen.add(instance)
+    if (!Object.prototype.hasOwnProperty.call(instance, 'conversation$')) continue
+    let conversation: unknown
+    try { conversation = instance['conversation$'] } catch { continue }
+    if (!conversation || typeof conversation !== 'object' || Array.isArray(conversation)) continue
+    const record = conversation as AnyRecord
+    if (typeof record.uid !== 'number') continue
+    if (record.uid !== uid || record.friendSource !== friendSource) { mismatch = true; continue }
+    const weixin = typeof record.weixin === 'string' && record.weixin.trim() !== '' ? record.weixin.trim() : null
+    const numOf = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null)
+    return {
+      status: 'ready', weixin,
+      weixinVisible: numOf(record.weixinVisible), requestWeiXin: numOf(record.requestWeiXin),
+      bothTalked: record.bothTalked === true,
+    }
+  }
+  return mismatch ? { status: 'binding_mismatch' } : { status: 'missing' }
+}
+
+/** 工具栏「换微信」钮:按文案认(换微信 / 换微信 请求中 / 查看微信 三种真机已见形态),恰一个才算认出。 */
+function domReadBossWechatButton(selector: string): {
+  found: boolean; count: number; index: number; text: string; disabled: boolean; rect: BossRect
+} {
+  const all = Array.from(document.querySelectorAll(selector))
+  const hits: Array<{ index: number; el: Element; text: string }> = []
+  all.forEach((el, index) => {
+    const text = (el.textContent ?? '').replace(/\s+/gu, ' ').trim()
+    if (text === '换微信' || text === '换微信 请求中' || text === '查看微信') hits.push({ index, el, text })
+  })
+  if (hits.length !== 1) return { found: false, count: hits.length, index: -1, text: '', disabled: false, rect: { x: 0, y: 0, w: 0, h: 0 } }
+  const { index, el, text } = hits[0]!
+  const r = el.getBoundingClientRect()
+  return { found: true, count: 1, index, text, disabled: el.classList.contains('disabled'), rect: { x: r.x, y: r.y, w: r.width, h: r.height } }
+}
+
+/**
+ * 内联确认 tooltip:可见且文案含「交换微信」的那份。页面常驻一份「求简历」的同类 tooltip(display none),
+ * 所以确定/取消键要按"在可见那份里"筛,返回它们在各自 selector 列表里的 index 给命中测试用。
+ */
+function domReadBossExchangeTooltip(
+  tooltipSelector: string, confirmSelector: string, cancelSelector: string, modalSelector: string,
+): { visible: boolean; text: string; confirmIndex: number; cancelIndex: number; confirmRect: BossRect; cancelRect: BossRect; modal: number } {
+  const zero = { x: 0, y: 0, w: 0, h: 0 }
+  const modal = document.querySelectorAll(modalSelector).length
+  const tip = Array.from(document.querySelectorAll(tooltipSelector)).find((el) =>
+    getComputedStyle(el).display !== 'none' && (el.textContent ?? '').includes('交换微信'))
+  if (!tip) return { visible: false, text: '', confirmIndex: -1, cancelIndex: -1, confirmRect: zero, cancelRect: zero, modal }
+  const rectOf = (el: Element | undefined): BossRect => {
+    if (!el) return zero
+    const r = el.getBoundingClientRect()
+    return { x: r.x, y: r.y, w: r.width, h: r.height }
+  }
+  const confirms = Array.from(document.querySelectorAll(confirmSelector))
+  const cancels = Array.from(document.querySelectorAll(cancelSelector))
+  const confirmIndex = confirms.findIndex((el) => tip.contains(el) && (el.textContent ?? '').trim() === '确定')
+  const cancelIndex = cancels.findIndex((el) => tip.contains(el) && (el.textContent ?? '').trim() === '取消')
+  return {
+    visible: true, text: (tip.textContent ?? '').replace(/\s+/gu, ' ').trim().slice(0, 40),
+    confirmIndex, cancelIndex,
+    confirmRect: rectOf(confirms[confirmIndex]), cancelRect: rectOf(cancels[cancelIndex]), modal,
+  }
+}
+
+/** 卡内「同意」card-btn:可见、不带 disabled、文案恰「同意」的,恰一个才认出;clipOk = 视口内可见部分够落光标。 */
+function domReadBossAcceptButton(selector: string): { found: boolean; count: number; index: number; rect: BossRect; clipOk: boolean } {
+  const all = Array.from(document.querySelectorAll(selector))
+  const hits: Array<{ index: number; el: Element }> = []
+  all.forEach((el, index) => {
+    if ((el.textContent ?? '').trim() !== '同意') return
+    if (el.classList.contains('disabled')) return
+    const r = el.getBoundingClientRect()
+    if (r.width === 0 || r.height === 0) return
+    hits.push({ index, el })
+  })
+  if (hits.length !== 1) return { found: false, count: hits.length, index: -1, rect: { x: 0, y: 0, w: 0, h: 0 }, clipOk: false }
+  const { index, el } = hits[0]!
+  const r = el.getBoundingClientRect()
+  const w = Math.min(window.innerWidth, r.right) - Math.max(0, r.left)
+  const h = Math.min(window.innerHeight, r.bottom) - Math.max(0, r.top)
+  return { found: true, count: 1, index, rect: { x: r.x, y: r.y, w: r.width, h: r.height }, clipOk: w >= 24 && h >= 24 }
+}
+
+/** 对方待答的换微信请求行:入站 dialog、带 aid 33、未答过。 */
+export function pendingBossWechatRequests(rows: BossRawMessage[]): BossRawMessage[] {
+  return rows.filter((row) => row.direction === 'in' && row.bizType === 12 && row.bodyType === 7 &&
+    row.dialogAids.includes(WECHAT_ACCEPT_AID) && row.dialogOperated === false)
+}
+
+function isBossWechatRequestRow(row: BossRawMessage): boolean {
+  return row.direction === 'in' && row.bizType === 12 && row.bodyType === 7 && row.dialogAids.includes(WECHAT_ACCEPT_AID)
+}
+
+function isBossWechatNumberRow(row: BossRawMessage): boolean {
+  return row.direction === 'in' && row.bizType === 12 && row.bodyType === 1 && row.templateId === WECHAT_NUMBER_TEMPLATE_ID
+}
+
+/**
+ * 微信号结果行的选取(契约 §4.3 两形态在 BOSS 上的同构):带锚取锚后、下一条请求卡之前恰一条;
+ * 无锚取当前可见的最新一条。零条或多条都不猜。
+ */
+export function selectBossExchangeResult(
+  rows: BossRawMessage[], anchorMid: string | null,
+): { status: 'one'; row: BossRawMessage } | { status: 'none' } | { status: 'many'; count: number } | { status: 'anchor_missing' } {
+  const ordered = [...rows].sort((a, b) => (Number(a.mid) < Number(b.mid) ? -1 : Number(a.mid) > Number(b.mid) ? 1 : 0))
+  if (anchorMid === null) {
+    const results = ordered.filter(isBossWechatNumberRow)
+    return results.length === 0 ? { status: 'none' } : { status: 'one', row: results[results.length - 1]! }
+  }
+  const start = ordered.findIndex((row) => row.mid === anchorMid)
+  if (start < 0 || !isBossWechatRequestRow(ordered[start]!)) return { status: 'anchor_missing' }
+  const span: BossRawMessage[] = []
+  for (const row of ordered.slice(start + 1)) {
+    if (isBossWechatRequestRow(row)) break
+    if (isBossWechatNumberRow(row)) span.push(row)
+  }
+  if (span.length === 1) return { status: 'one', row: span[0]! }
+  return span.length === 0 ? { status: 'none' } : { status: 'many', count: span.length }
+}
+
+async function bossSourceKey(mid: string): Promise<string> {
+  return sha256Hex(`source-v1|${mid}`)
+}
+
+async function findBossRowBySourceKey(rows: BossRawMessage[], sourceKey: string): Promise<BossRawMessage | null> {
+  for (const row of rows) {
+    if (await bossSourceKey(row.mid) === sourceKey) return row
+  }
+  return null
+}
+
+async function readBossWechatState(
+  tab: chrome.tabs.Tab, parsed: { uid: number; friendSource: number },
+): Promise<Extract<BossWechatStateRead, { status: 'ready' }>> {
+  const read = await runInPage(BOSS_INJECT, tab.id!, mainReadBossWechatState, [parsed.uid, parsed.friendSource])
+  if (read.status === 'ready') return read
+  if (read.status === 'binding_mismatch') {
+    throw new PlatformError('CTX_LOST_DURING_EXEC', '当前会话对象绑定的不是目标会话', 'afterRecovery')
+  }
+  throw new PlatformError('ELEMENT_UNRESOLVED', '页面上读不到目标会话对象', 'afterRecovery')
+}
+
+/** 目标绑定:当前会话必须是目标,不是就自己点开(sendMessage 同款),点开后仍不是就拒。 */
+async function ensureBossSendTarget(
+  tab: chrome.tabs.Tab, ctx: PrimitiveContext, fingerprint: string, conversationRef: string,
+): Promise<void> {
+  const readCurrentRef = async (): Promise<string> => {
+    const current = await runInPage(BOSS_INJECT, tab.id!, mainReadBossCurrentConversation, [])
+    return current.status === 'ready' ? bossConversationRef(current.uid, current.friendSource) : ''
+  }
+  if ((await readCurrentRef()) === conversationRef) return
+  await ensureBossThreadOpen(tab, ctx, fingerprint, conversationRef, false)
+  if ((await readCurrentRef()) !== conversationRef) {
+    throw new PlatformError('GUARD_FAILED', '点开目标后当前会话仍不是动作目标,已取消', 'manualOnly')
+  }
+}
+
+/** expectedTail 只观测不拦(2026-08-04 裁决),与 sendMessage 同款记法。 */
+async function observeBossExpectedTail(rows: BossRawMessage[], guards: ChatSendMessageGuards, what: string): Promise<void> {
+  if (guards.expectedTail.length === 0) return
+  const projected = await projectBossThread([...rows].sort((a, b) => (Number(a.mid) < Number(b.mid) ? -1 : 1)))
+  const tail = projected.slice(Math.max(0, projected.length - guards.expectedTail.length))
+  const matched = guards.expectedTail.length === tail.length &&
+    guards.expectedTail.every((anchor, i) => anchor.direction === tail[i]!.direction && anchor.contentHash === tail[i]!.contentHash)
+  if (!matched) {
+    reportHandLog('warn', 'sendBaselineDrift',
+      `${what} 基线已变(观测模式,照常执行):期望尾 ${guards.expectedTail.length} 行,实际尾 ${tail.map((m) => m.direction).join(',')}`)
+  }
+}
+
+function paceBeforeClick(): Promise<void> {
+  return sleep(1_000 + Math.floor(Math.random() * 401))
+}
+
+async function readBossExchangeTooltip(tabId: number) {
+  return runInPage(BOSS_DOM, tabId, domReadBossExchangeTooltip,
+    [EXCHANGE_TOOLTIP_SELECTOR, EXCHANGE_CONFIRM_SELECTOR, EXCHANGE_CANCEL_SELECTOR, WECHAT_MODAL_SELECTOR])
+}
+
+/** 收回内联确认:点「取消」。它只关 tooltip、无副作用;收不回也只记日志,tooltip 留着无害。 */
+async function cancelBossExchangeTooltip(tabId: number, ctx: PrimitiveContext, why: string): Promise<void> {
+  try {
+    const tip = await readBossExchangeTooltip(tabId)
+    if (!tip.visible || tip.cancelIndex < 0) return
+    await paceBeforeClick()
+    await osClickOnce(tabId, ctx, {
+      label: '换微信取消键',
+      rect: tip.cancelRect,
+      hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [EXCHANGE_CANCEL_SELECTOR, tip.cancelIndex, '取消', x, y]),
+      observe: async (): Promise<ClickObservation> => {
+        const after = await readBossExchangeTooltip(tabId)
+        return { trusted: null, onTarget: null, eventDriftPx: null, after: `tooltip 可见=${after.visible}` }
+      },
+    }, '点换微信取消键')
+    reportHandLog('warn', 'wechatInviteCancelled', `BOSS 换微信内联确认已取消:${why}`)
+  } catch (error) {
+    reportHandLog('warn', 'wechatInviteCancelFailed', `BOSS 换微信内联确认未能取消(${why}):${describeError(error).slice(0, 200)}`)
+  }
+}
+
+// ── chat.sendWechatInvite ────────────────────────────────────────────────────
+
+/**
+ * 生产机己方微信号一律预配,所以只有两步:点工具栏「换微信」→ 点内联 tooltip「确定」(平台事实 §十四)。
+ * 并发形态(对方先发请求、脑随后按流程邀请)被平台执行成"接受":两道同 evaluator 检查——点按钮前与按确定前
+ * 各读一次消息数组,读到对方待答请求就不点/点取消,交由脑下一轮走 acceptWechat;残余按记录级走 suspect
+ * (2026-09-04 甲方裁决方案 1)。
+ */
+async function sendBossWechatInvite(
+  args: ChatSendWechatInviteArgs, guards: ChatSendMessageGuards, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<ChatSendWechatInviteData> {
+  if (validatePrimitiveArgs(PrimitiveName.ChatSendWechatInvite, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '换微信邀请参数不符合当前契约', 'manualOnly')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  const parsed = parseBossConversationRef(args.conversationRef)
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+  const contentHash = await sha256Hex('card\x1fwechatExchange')
+  const tab = await verifiedBossChatTab(fingerprint)
+  const tabId = tab.id!
+  await ensureBossSendTarget(tab, ctx, fingerprint, args.conversationRef)
+
+  // 世界状态核对一:会话级。已换成 / 未双向对话都是脑预期之外,干净失败不点。
+  const wechat = await readBossWechatState(tab, parsed)
+  if (wechat.weixin !== null) throw new PlatformError('GUARD_FAILED', '该会话微信已换成,不再发起邀请', 'no')
+  if (!wechat.bothTalked) throw new PlatformError('GUARD_FAILED', '双方尚未都说过话,平台不开放换微信(bothTalked=false)', 'no')
+  // 基线 + 世界状态核对二:对方是否已有待答请求(并发前置第一道)。
+  const baseline = await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)
+  await observeBossExpectedTail(baseline.rows, guards, 'chat.sendWechatInvite')
+  if (pendingBossWechatRequests(baseline.rows).length > 0) {
+    throw new PlatformError('GUARD_FAILED', '对方已有待答的换微信请求,本轮不发起邀请,由 acceptWechat 接手', 'no')
+  }
+  const baselineMids = new Set(baseline.rows.map((row) => row.mid))
+  // 工具栏按钮:文案必须恰为「换微信」且不带 disabled。「换微信 请求中」= 我方已有待答请求,「查看微信」= 已换成。
+  const button = await runInPage(BOSS_DOM, tabId, domReadBossWechatButton, [TOOLBAR_BUTTON_SELECTOR])
+  if (!button.found) throw new PlatformError('ELEMENT_UNRESOLVED', `工具栏换微信钮认不出(命中 ${button.count} 个)`, 'afterRecovery')
+  if (button.text === '查看微信') throw new PlatformError('GUARD_FAILED', '工具栏已是「查看微信」,微信已换成', 'no')
+  if (button.disabled || button.text !== '换微信') {
+    throw new PlatformError('GUARD_FAILED', `换微信钮不可用(读到「${button.text}」${button.disabled ? ',disabled' : ''})`, 'no')
+  }
+  const trace: string[] = []
+  // 第一步:点「换微信」。可逆——只弹内联 tooltip,有取消键。
+  const buttonPlan: ClickPlan = {
+    label: '工具栏换微信钮',
+    rect: button.rect,
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [TOOLBAR_BUTTON_SELECTOR, button.index, '换微信', x, y]),
+    observe: async (): Promise<ClickObservation> => {
+      const after = await readBossExchangeTooltip(tabId)
+      return { trusted: null, onTarget: null, eventDriftPx: null, after: `tooltip 可见=${after.visible} 模态=${after.modal}` }
+    },
+  }
+  ctx.checkpoint()
+  await paceBeforeClick()
+  await verifiedBossChatTab(fingerprint)
+  trace.push(`点了换微信 ${await osClickOnce(tabId, ctx, buttonPlan, '点换微信')}`)
+  const tipWait = await pollUntil(ctx, () => readBossExchangeTooltip(tabId), (tip) => tip.visible || tip.modal > 0)
+  const tip = tipWait.value
+  if (tip.modal > 0) {
+    // 己方微信号未配才会弹模态(平台事实 §六 第 2 步)。不填、不点,人去平台配一次。
+    throw new PlatformError('ELEMENT_UNRESOLVED', '点换微信后弹出模态(己方微信号未配置?),未填号、未确认', 'manualOnly')
+  }
+  if (!tip.visible || tip.confirmIndex < 0) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `点换微信后未见内联确认(可见=${tip.visible} 确定键=${tip.confirmIndex})`, 'afterRecovery')
+  }
+  // 最后一道闸:同一 evaluator 再读一次(并发前置第二道)。这时才出现的待答请求 → 点取消、干净拒绝。
+  const again = await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)
+  if (pendingBossWechatRequests(again.rows).length > 0) {
+    await cancelBossExchangeTooltip(tabId, ctx, '确认前读到对方刚发来的换微信请求')
+    throw new PlatformError('GUARD_FAILED', '确认前读到对方刚发来的换微信请求,已取消,由 acceptWechat 接手', 'no')
+  }
+  const wechatAgain = await readBossWechatState(tab, parsed)
+  if (wechatAgain.weixin !== null) {
+    await cancelBossExchangeTooltip(tabId, ctx, '确认前微信已落值')
+    throw new PlatformError('GUARD_FAILED', '确认前读到微信已换成,已取消', 'no')
+  }
+  const confirmPlan: ClickPlan = {
+    label: '换微信确定键',
+    rect: tip.confirmRect,
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [EXCHANGE_CONFIRM_SELECTOR, tip.confirmIndex, '确定', x, y]),
+    observe: async (): Promise<ClickObservation> => {
+      const after = await readBossExchangeTooltip(tabId)
+      return { trusted: null, onTarget: null, eventDriftPx: null, after: `tooltip 可见=${after.visible}` }
+    },
+  }
+  ctx.checkpoint()
+  await verifiedBossChatTab(fingerprint)
+  if (Date.now() > ctx.irreversibleNotAfterMs) {
+    await cancelBossExchangeTooltip(tabId, ctx, '不可逆动作窗口已过')
+    throw new PlatformError('CTX_LOST_DURING_EXEC', '不可逆动作窗口已过,已取消', 'afterRecovery')
+  }
+  await ctx.beforeSideEffect()
+  const dispatchedAt = Date.now()
+  const probe = await runOsProbe(BOSS_INJECT, tabId, ctx, confirmPlan)
+  if (probe.outcome !== 'clicked') {
+    // 闸在按下之前拒:没点。tooltip 留着无害,下轮重来。
+    throw new PlatformError(
+      probe.outcome === 'handServiceUnavailable' ? 'CTX_NOT_READY' : 'ELEMENT_UNRESOLVED',
+      `确定键未点击:${probe.detail ?? probe.outcome}`, 'afterRecovery')
+  }
+  trace.push(`点了确定 ${probe.detail ?? ''}`)
+  // 正证(判据表第一行):新增 aid=32 出站行,服务端确认(status 1/2),时间不早于派发。
+  const deadline = Date.now() + READY_WAIT_MS
+  let lastSeen = ''
+  await sleep(500)
+  while (Date.now() < deadline) {
+    ctx.checkpoint()
+    try {
+      const after = await runInPage(BOSS_INJECT, tabId, mainReadBossThread, [parsed.uid, parsed.friendSource])
+      if (after.status === 'ready') {
+        const hits = after.rows.filter((row) => !baselineMids.has(row.mid) && row.direction === 'out' &&
+          row.bizType === WECHAT_REQUEST_SENT_BIZ && row.actionAid === WECHAT_REQUEST_SENT_AID &&
+          (row.status === 1 || row.status === 2) &&
+          !(row.time !== null && row.time < dispatchedAt - SEND_CLOCK_TOLERANCE_MS))
+        lastSeen = `新行 ${after.rows.filter((row) => !baselineMids.has(row.mid)).length},命中 ${hits.length}`
+        if (hits.length >= 1) {
+          const hit = hits.reduce((best, next) => (Number(next.mid) > Number(best.mid) ? next : best))
+          await verifiedBossChatTab(fingerprint)
+          ctx.progress('已从当前消息列表确认换微信请求已发出', 100)
+          console.info('[RecruitHelper] boss_send_wechat_invite', trace.join(' | '))
+          return {
+            conversationRef: args.conversationRef,
+            contentHash,
+            sourceKey: await bossSourceKey(hit.mid),
+            observedAt: Date.now(),
+            ...(hit.time !== null && hit.time > 0 ? { tsApprox: hit.time } : {}),
+          }
+        }
+        // 残余并发(甲方 2026-09-04 裁决方案 1,记录级):对方在最后一次读之后才发请求,确定被平台执行成接受。
+        // 没有我方邀请行,只有微信落值——如实回未确认,走既有 suspect;业务线由 accepted 卡推到已换成。
+        const state = await runInPage(BOSS_INJECT, tabId, mainReadBossWechatState, [parsed.uid, parsed.friendSource])
+        if (state.status === 'ready' && state.weixin !== null) {
+          throw new PlatformError('POSTCONDITION_UNCONFIRMED',
+            `对方待答请求已被本次确定接受,微信已落值;无我方邀请行(${lastSeen};${trace.join(' | ')})`,
+            'manualOnly', undefined, 'possible')
+        }
+      } else {
+        lastSeen = `消息列表 ${after.status}`
+      }
+    } catch (error) {
+      if (error instanceof PlatformError) throw error
+      lastSeen = `读取异常 ${describeError(error).slice(0, 120)}`
+    }
+    await sleep(500)
+  }
+  throw new PlatformError('POSTCONDITION_UNCONFIRMED',
+    `只点击了一次确定,但未在消息列表确认换微信请求行(${lastSeen};${trace.join(' | ')})`,
+    'manualOnly', undefined, 'possible')
+}
+
+// ── chat.acceptWechat ────────────────────────────────────────────────────────
+
+/**
+ * 接受对方主动发来的换微信请求:点卡内「同意」(与 requestSourceKey 那条消息绑定,不用页面级快捷条)。
+ * 正证只认 conversation$.weixin 落值,或锚行 dialog.operated=true(两时机都可见,平台事实 §十四)。
+ */
+async function acceptBossWechat(
+  args: ChatAcceptWechatArgs, guards: ChatSendMessageGuards, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<ChatAcceptWechatData> {
+  if (validatePrimitiveArgs(PrimitiveName.ChatAcceptWechat, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '接受微信参数不符合当前契约', 'manualOnly')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  const parsed = parseBossConversationRef(args.conversationRef)
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+  const tab = await verifiedBossChatTab(fingerprint)
+  const tabId = tab.id!
+  await ensureBossSendTarget(tab, ctx, fingerprint, args.conversationRef)
+  const rows = (await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)).rows
+  await observeBossExpectedTail(rows, guards, 'chat.acceptWechat')
+  const anchor = await findBossRowBySourceKey(rows, args.requestSourceKey)
+  if (!anchor) throw new PlatformError('GUARD_FAILED', '请求锚在当前消息数组里找不到', 'afterRecovery')
+  if (!isBossWechatRequestRow(anchor)) {
+    throw new PlatformError('GUARD_FAILED', '请求锚不是对方的换微信请求卡(方向/类型/按钮码不符)', 'manualOnly')
+  }
+  if (anchor.dialogOperated === true) throw new PlatformError('GUARD_FAILED', '该请求已答过,不再点击', 'no')
+  const wechat = await readBossWechatState(tab, parsed)
+  if (wechat.weixin !== null) throw new PlatformError('GUARD_FAILED', '该会话微信已换成,不再点击', 'no')
+  const pending = pendingBossWechatRequests(rows)
+  if (pending.length !== 1 || pending[0]!.mid !== anchor.mid) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `待答的换微信请求不唯一(${pending.length} 条),不猜`, 'manualOnly')
+  }
+  const button = await runInPage(BOSS_DOM, tabId, domReadBossAcceptButton, [CARD_BUTTON_SELECTOR])
+  if (!button.found) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `卡内同意钮认不出(可用 ${button.count} 个)`, button.count > 1 ? 'manualOnly' : 'afterRecovery')
+  }
+  if (!button.clipOk) throw new PlatformError('ELEMENT_UNRESOLVED', '请求卡不在视口内,本轮不滚动、不点', 'afterRecovery')
+  const plan: ClickPlan = {
+    label: '卡内同意钮',
+    rect: button.rect,
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [CARD_BUTTON_SELECTOR, button.index, '同意', x, y]),
+    observe: async (): Promise<ClickObservation> => {
+      const after = await runInPage(BOSS_DOM, tabId, domReadBossAcceptButton, [CARD_BUTTON_SELECTOR])
+      return { trusted: null, onTarget: null, eventDriftPx: null, after: `可用同意钮=${after.count}` }
+    },
+  }
+  ctx.checkpoint()
+  await paceBeforeClick()
+  await verifiedBossChatTab(fingerprint)
+  if (Date.now() > ctx.irreversibleNotAfterMs) {
+    throw new PlatformError('CTX_LOST_DURING_EXEC', '不可逆动作窗口已过,未点击', 'afterRecovery')
+  }
+  await ctx.beforeSideEffect()
+  const probe = await runOsProbe(BOSS_INJECT, tabId, ctx, plan)
+  if (probe.outcome !== 'clicked') {
+    throw new PlatformError(
+      probe.outcome === 'handServiceUnavailable' ? 'CTX_NOT_READY' : 'ELEMENT_UNRESOLVED',
+      `同意钮未点击:${probe.detail ?? probe.outcome}`, 'afterRecovery')
+  }
+  // 正证:weixin 落值 或 锚行 operated=true(两者任一,两时机都可见)。
+  type Snap = { weixin: string | null; anchorOperated: boolean | null; rows: BossRawMessage[] }
+  const snapshot = async (): Promise<Snap> => {
+    const state = await runInPage(BOSS_INJECT, tabId, mainReadBossWechatState, [parsed.uid, parsed.friendSource])
+    const thread = await runInPage(BOSS_INJECT, tabId, mainReadBossThread, [parsed.uid, parsed.friendSource])
+    const list = thread.status === 'ready' ? thread.rows : []
+    const anchorNow = list.find((row) => row.mid === anchor.mid)
+    return {
+      weixin: state.status === 'ready' ? state.weixin : null,
+      anchorOperated: anchorNow ? anchorNow.dialogOperated : null,
+      rows: list,
+    }
+  }
+  await sleep(500)
+  const confirmed = await pollUntil(ctx, snapshot, (snap) => snap.weixin !== null || snap.anchorOperated === true)
+  if (!confirmed.satisfied) {
+    throw new PlatformError('POSTCONDITION_UNCONFIRMED',
+      `只点击了一次同意,但未确认微信落值或请求卡已答(weixin=${confirmed.value.weixin !== null} operated=${confirmed.value.anchorOperated})`,
+      'manualOnly', undefined, 'possible')
+  }
+  // 可选加成:号 + 结果行同时齐才带,否则一并缺席,由 readWechatExchangeOutcome 延迟收编;不推翻正证。
+  const harvested = await pollUntil(ctx, snapshot,
+    (snap) => snap.weixin !== null && selectBossExchangeResult(snap.rows, anchor.mid).status === 'one', HARVEST_WAIT_MS)
+  const result = selectBossExchangeResult(harvested.value.rows, anchor.mid)
+  const data: ChatAcceptWechatData = harvested.value.weixin !== null && result.status === 'one'
+    ? {
+        conversationRef: args.conversationRef, requestSourceKey: args.requestSourceKey,
+        exchangeSourceKey: await bossSourceKey(result.row.mid), peerWechat: harvested.value.weixin,
+        observedAt: Date.now(),
+      }
+    : { conversationRef: args.conversationRef, requestSourceKey: args.requestSourceKey, observedAt: Date.now() }
+  if (validatePrimitiveData(PrimitiveName.ChatAcceptWechat, 1, data).length !== 0) {
+    throw new PlatformError('POSTCONDITION_UNCONFIRMED', '微信接受结果不符合当前契约', 'manualOnly', undefined, 'possible')
+  }
+  await verifiedBossChatTab(fingerprint)
+  ctx.progress(data.peerWechat ? '已接受对方换微信请求并取到号' : '已接受对方换微信请求(号待收编)', 100)
+  return data
+}
+
+// ── chat.readWechatExchangeOutcome ───────────────────────────────────────────
+
+/** 零点击、不定位:当前会话必须已是目标。判据只认 conversation$.weixin 落值;结果行按 selectBossExchangeResult 选。 */
+async function readBossWechatExchangeOutcome(
+  args: ChatReadWechatExchangeOutcomeArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<ChatReadWechatExchangeOutcomeData> {
+  if (validatePrimitiveArgs(PrimitiveName.ChatReadWechatExchangeOutcome, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '微信交换结果读取参数不符合当前契约', 'manualOnly')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  const parsed = parseBossConversationRef(args.conversationRef)
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+  const tab = await verifiedBossChatTab(fingerprint)
+  await assertBossCurrent(tab, args.conversationRef, 'none')
+  const rows = (await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)).rows
+  const wechat = await readBossWechatState(tab, parsed)
+  let data: ChatReadWechatExchangeOutcomeData = { confirmed: false, observedAt: Date.now() }
+  let why = wechat.weixin === null ? '微信未落值' : ''
+  if (wechat.weixin !== null) {
+    let anchorMid: string | null = null
+    let anchorOk = true
+    if (args.requestSourceKey) {
+      const anchor = await findBossRowBySourceKey(rows, args.requestSourceKey)
+      if (!anchor || !isBossWechatRequestRow(anchor)) {
+        anchorOk = false
+        why = anchor ? '请求锚不是对方的换微信请求卡' : '请求锚在当前消息数组里找不到'
+      } else {
+        anchorMid = anchor.mid
+      }
+    }
+    if (anchorOk) {
+      const result = selectBossExchangeResult(rows, anchorMid)
+      if (result.status === 'one') {
+        data = { confirmed: true, exchangeSourceKey: await bossSourceKey(result.row.mid), peerWechat: wechat.weixin, observedAt: Date.now() }
+      } else {
+        why = `微信已落值但结果行${result.status === 'none' ? '未到' : result.status === 'many' ? `不唯一(${result.count})` : '锚缺失'}`
+      }
+    }
+  }
+  if (validatePrimitiveData(PrimitiveName.ChatReadWechatExchangeOutcome, 1, data).length !== 0) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '微信交换结果结构不符合当前契约', 'manualOnly')
+  }
+  await assertBossCurrent(tab, args.conversationRef, 'none')
+  ctx.progress(data.confirmed ? '已确认微信交换结果' : `本轮未确认微信交换结果(${why})`, 100)
+  return data
+}
+
 // ── chat.captureThreadScreenshot ────────────────────────────────────────────
 
 async function decodeFrame(dataUrl: string): Promise<ImageBitmap> {
@@ -2590,6 +3162,12 @@ export const bossTestHooks = Object.freeze({
   parseBossConversationRef,
   parseBossUnreadBadgeText,
   projectBossMessage,
+  pendingBossWechatRequests,
+  selectBossExchangeResult,
+  domReadBossWechatButton,
+  domReadBossExchangeTooltip,
+  domReadBossAcceptButton,
+  mainReadBossWechatState,
   matchAnchorTail,
   summarizeBossListRow,
   newlinesToSpaces,
@@ -2625,6 +3203,10 @@ export const bossAdapter = {
   identifyCurrentConversation: ({ fingerprint }) => identifyBossCurrentConversation(fingerprint),
   openConversation: ({ args, ctx, fingerprint }) => openBossConversation(args, ctx, fingerprint),
   sendMessage: ({ args, guards, ctx, fingerprint }) => sendBossMessage(args, guards, ctx, fingerprint),
+  // 场景二的三条(2026-09-04 出口):换微信线。
+  sendWechatInvite: ({ args, guards, ctx, fingerprint }) => sendBossWechatInvite(args, guards, ctx, fingerprint),
+  acceptWechat: ({ args, guards, ctx, fingerprint }) => acceptBossWechat(args, guards, ctx, fingerprint),
+  readWechatExchangeOutcome: ({ args, ctx, fingerprint }) => readBossWechatExchangeOutcome(args, ctx, fingerprint),
   captureThreadScreenshot: ({ args, ctx, fingerprint }) => captureBossThreadScreenshot(args, ctx, fingerprint),
   // 建档后的简历补采(2026-09-03 甲方选 B):摘要级、零点击,见 readBossResume。
   readResume: ({ args, ctx, fingerprint }) => readBossResume(args, ctx, fingerprint),
