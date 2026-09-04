@@ -2689,6 +2689,11 @@ async function cancelBossExchangeTooltip(tabId: number, ctx: PrimitiveContext, w
 }
 
 // ── chat.sendWechatInvite ────────────────────────────────────────────────────
+//
+// retryable 口径(2026-09-04 甲方裁决,与场景三同款):不可逆点击之前的一切失败都是零副作用,一律
+// afterRecovery(本轮跳过、下轮重来);manualOnly 只留给已点过确定/同意而正证读不到的那条路。
+// 脑侧对 effectful 失败结果只看 sideEffect=none 就按 §8.4 重铸,这里的提示改的是口径而不是结果;
+// 只读的 readWechatExchangeOutcome 抛进巡检的错误则真会按 no/manualOnly 隔离会话,更不能写它。
 
 /**
  * 生产机己方微信号一律预配,所以只有两步:点工具栏「换微信」→ 点内联 tooltip「确定」(平台事实 §十四)。
@@ -2700,11 +2705,11 @@ async function sendBossWechatInvite(
   args: ChatSendWechatInviteArgs, guards: ChatSendMessageGuards, ctx: PrimitiveContext, fingerprint: string | undefined,
 ): Promise<ChatSendWechatInviteData> {
   if (validatePrimitiveArgs(PrimitiveName.ChatSendWechatInvite, 1, args).length !== 0) {
-    throw new PlatformError('GUARD_FAILED', '换微信邀请参数不符合当前契约', 'manualOnly')
+    throw new PlatformError('GUARD_FAILED', '换微信邀请参数不符合当前契约', 'afterRecovery')
   }
-  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
   const parsed = parseBossConversationRef(args.conversationRef)
-  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'afterRecovery')
   const contentHash = await sha256Hex('card\x1fwechatExchange')
   const tab = await verifiedBossChatTab(fingerprint)
   const tabId = tab.id!
@@ -2712,21 +2717,21 @@ async function sendBossWechatInvite(
 
   // 世界状态核对一:会话级。已换成 / 未双向对话都是脑预期之外,干净失败不点。
   const wechat = await readBossWechatState(tab, parsed)
-  if (wechat.weixin !== null) throw new PlatformError('GUARD_FAILED', '该会话微信已换成,不再发起邀请', 'no')
-  if (!wechat.bothTalked) throw new PlatformError('GUARD_FAILED', '双方尚未都说过话,平台不开放换微信(bothTalked=false)', 'no')
+  if (wechat.weixin !== null) throw new PlatformError('GUARD_FAILED', '该会话微信已换成,不再发起邀请', 'afterRecovery')
+  if (!wechat.bothTalked) throw new PlatformError('GUARD_FAILED', '双方尚未都说过话,平台不开放换微信(bothTalked=false)', 'afterRecovery')
   // 基线 + 世界状态核对二:对方是否已有待答请求(并发前置第一道)。
   const baseline = await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)
   await observeBossExpectedTail(baseline.rows, guards, 'chat.sendWechatInvite')
   if (pendingBossWechatRequests(baseline.rows).length > 0) {
-    throw new PlatformError('GUARD_FAILED', '对方已有待答的换微信请求,本轮不发起邀请,由 acceptWechat 接手', 'no')
+    throw new PlatformError('GUARD_FAILED', '对方已有待答的换微信请求,本轮不发起邀请,由 acceptWechat 接手', 'afterRecovery')
   }
   const baselineMids = new Set(baseline.rows.map((row) => row.mid))
   // 工具栏按钮:文案必须恰为「换微信」且不带 disabled。「换微信 请求中」= 我方已有待答请求,「查看微信」= 已换成。
   const button = await runInPage(BOSS_DOM, tabId, domReadBossWechatButton, [TOOLBAR_BUTTON_SELECTOR])
   if (!button.found) throw new PlatformError('ELEMENT_UNRESOLVED', `工具栏换微信钮认不出(命中 ${button.count} 个)`, 'afterRecovery')
-  if (button.text === '查看微信') throw new PlatformError('GUARD_FAILED', '工具栏已是「查看微信」,微信已换成', 'no')
+  if (button.text === '查看微信') throw new PlatformError('GUARD_FAILED', '工具栏已是「查看微信」,微信已换成', 'afterRecovery')
   if (button.disabled || button.text !== '换微信') {
-    throw new PlatformError('GUARD_FAILED', `换微信钮不可用(读到「${button.text}」${button.disabled ? ',disabled' : ''})`, 'no')
+    throw new PlatformError('GUARD_FAILED', `换微信钮不可用(读到「${button.text}」${button.disabled ? ',disabled' : ''})`, 'afterRecovery')
   }
   const trace: string[] = []
   // 第一步:点「换微信」。可逆——只弹内联 tooltip,有取消键。
@@ -2746,8 +2751,11 @@ async function sendBossWechatInvite(
   const tipWait = await pollUntil(ctx, () => readBossExchangeTooltip(tabId), (tip) => tip.visible || tip.modal > 0)
   const tip = tipWait.value
   if (tip.modal > 0) {
-    // 己方微信号未配才会弹模态(平台事实 §六 第 2 步)。不填、不点,人去平台配一次。
-    throw new PlatformError('ELEMENT_UNRESOLVED', '点换微信后弹出模态(己方微信号未配置?),未填号、未确认', 'manualOnly')
+    // 己方微信号未配才会弹模态(平台事实 §六 第 2 步;生产机一律预配,§十四)。不填、不点;配置不完美一律降级
+    // 不转人工(2026-09-04 甲方),人在平台配一次号即自愈。模态的关闭控件没有事实记录,按事实门不点,留着;
+    // 它会挡住后续点击直到真人关掉——非生产路径,记录级。
+    reportHandLog('warn', 'wechatInviteModalUnexpected', 'BOSS 点换微信后弹出填号模态(己方微信号未配置?),未填号、未确认,本轮不发')
+    throw new PlatformError('ELEMENT_UNRESOLVED', '点换微信后弹出模态(己方微信号未配置?),未填号、未确认', 'afterRecovery')
   }
   if (!tip.visible || tip.confirmIndex < 0) {
     throw new PlatformError('ELEMENT_UNRESOLVED', `点换微信后未见内联确认(可见=${tip.visible} 确定键=${tip.confirmIndex})`, 'afterRecovery')
@@ -2756,12 +2764,12 @@ async function sendBossWechatInvite(
   const again = await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)
   if (pendingBossWechatRequests(again.rows).length > 0) {
     await cancelBossExchangeTooltip(tabId, ctx, '确认前读到对方刚发来的换微信请求')
-    throw new PlatformError('GUARD_FAILED', '确认前读到对方刚发来的换微信请求,已取消,由 acceptWechat 接手', 'no')
+    throw new PlatformError('GUARD_FAILED', '确认前读到对方刚发来的换微信请求,已取消,由 acceptWechat 接手', 'afterRecovery')
   }
   const wechatAgain = await readBossWechatState(tab, parsed)
   if (wechatAgain.weixin !== null) {
     await cancelBossExchangeTooltip(tabId, ctx, '确认前微信已落值')
-    throw new PlatformError('GUARD_FAILED', '确认前读到微信已换成,已取消', 'no')
+    throw new PlatformError('GUARD_FAILED', '确认前读到微信已换成,已取消', 'afterRecovery')
   }
   const confirmPlan: ClickPlan = {
     label: '换微信确定键',
@@ -2847,11 +2855,11 @@ async function acceptBossWechat(
   args: ChatAcceptWechatArgs, guards: ChatSendMessageGuards, ctx: PrimitiveContext, fingerprint: string | undefined,
 ): Promise<ChatAcceptWechatData> {
   if (validatePrimitiveArgs(PrimitiveName.ChatAcceptWechat, 1, args).length !== 0) {
-    throw new PlatformError('GUARD_FAILED', '接受微信参数不符合当前契约', 'manualOnly')
+    throw new PlatformError('GUARD_FAILED', '接受微信参数不符合当前契约', 'afterRecovery')
   }
-  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
   const parsed = parseBossConversationRef(args.conversationRef)
-  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'afterRecovery')
   const tab = await verifiedBossChatTab(fingerprint)
   const tabId = tab.id!
   await ensureBossSendTarget(tab, ctx, fingerprint, args.conversationRef)
@@ -2860,18 +2868,18 @@ async function acceptBossWechat(
   const anchor = await findBossRowBySourceKey(rows, args.requestSourceKey)
   if (!anchor) throw new PlatformError('GUARD_FAILED', '请求锚在当前消息数组里找不到', 'afterRecovery')
   if (!isBossWechatRequestRow(anchor)) {
-    throw new PlatformError('GUARD_FAILED', '请求锚不是对方的换微信请求卡(方向/类型/按钮码不符)', 'manualOnly')
+    throw new PlatformError('GUARD_FAILED', '请求锚不是对方的换微信请求卡(方向/类型/按钮码不符)', 'afterRecovery')
   }
-  if (anchor.dialogOperated === true) throw new PlatformError('GUARD_FAILED', '该请求已答过,不再点击', 'no')
+  if (anchor.dialogOperated === true) throw new PlatformError('GUARD_FAILED', '该请求已答过,不再点击', 'afterRecovery')
   const wechat = await readBossWechatState(tab, parsed)
-  if (wechat.weixin !== null) throw new PlatformError('GUARD_FAILED', '该会话微信已换成,不再点击', 'no')
+  if (wechat.weixin !== null) throw new PlatformError('GUARD_FAILED', '该会话微信已换成,不再点击', 'afterRecovery')
   const pending = pendingBossWechatRequests(rows)
   if (pending.length !== 1 || pending[0]!.mid !== anchor.mid) {
-    throw new PlatformError('ELEMENT_UNRESOLVED', `待答的换微信请求不唯一(${pending.length} 条),不猜`, 'manualOnly')
+    throw new PlatformError('ELEMENT_UNRESOLVED', `待答的换微信请求不唯一(${pending.length} 条),不猜`, 'afterRecovery')
   }
   const button = await runInPage(BOSS_DOM, tabId, domReadBossAcceptButton, [CARD_BUTTON_SELECTOR, CARD_ITEM_SELECTOR, WECHAT_CARD_TEXT])
   if (!button.found) {
-    throw new PlatformError('ELEMENT_UNRESOLVED', `卡内同意钮认不出(可用 ${button.count} 个)`, button.count > 1 ? 'manualOnly' : 'afterRecovery')
+    throw new PlatformError('ELEMENT_UNRESOLVED', `卡内同意钮认不出(可用 ${button.count} 个)`, 'afterRecovery')
   }
   if (!button.clipOk) throw new PlatformError('ELEMENT_UNRESOLVED', '请求卡不在视口内,本轮不滚动、不点', 'afterRecovery')
   const plan: ClickPlan = {
@@ -2943,11 +2951,11 @@ async function readBossWechatExchangeOutcome(
   args: ChatReadWechatExchangeOutcomeArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
 ): Promise<ChatReadWechatExchangeOutcomeData> {
   if (validatePrimitiveArgs(PrimitiveName.ChatReadWechatExchangeOutcome, 1, args).length !== 0) {
-    throw new PlatformError('GUARD_FAILED', '微信交换结果读取参数不符合当前契约', 'manualOnly')
+    throw new PlatformError('GUARD_FAILED', '微信交换结果读取参数不符合当前契约', 'afterRecovery')
   }
-  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
   const parsed = parseBossConversationRef(args.conversationRef)
-  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'afterRecovery')
   const tab = await verifiedBossChatTab(fingerprint)
   await assertBossCurrent(tab, args.conversationRef, 'none')
   const rows = (await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)).rows
@@ -2976,7 +2984,7 @@ async function readBossWechatExchangeOutcome(
     }
   }
   if (validatePrimitiveData(PrimitiveName.ChatReadWechatExchangeOutcome, 1, data).length !== 0) {
-    throw new PlatformError('ELEMENT_UNRESOLVED', '微信交换结果结构不符合当前契约', 'manualOnly')
+    throw new PlatformError('ELEMENT_UNRESOLVED', '微信交换结果结构不符合当前契约', 'afterRecovery')
   }
   await assertBossCurrent(tab, args.conversationRef, 'none')
   ctx.progress(data.confirmed ? '已确认微信交换结果' : `本轮未确认微信交换结果(${why})`, 100)
