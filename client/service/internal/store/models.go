@@ -309,7 +309,8 @@ const (
 )
 
 // 批前闸终局原因:patrol 写入 SourcingBatch.Reason 的公开口径,当日职位计划
-// 的收口扫描按前三值判定「跳过类」(AGENTS.md 2026-09-01)。字符串已随批次行
+// 的收口扫描据此判定「跳过类」(AGENTS.md 2026-09-01,跳过类成员以
+// productworkflow.planSkipClassBatchReason 为准)。字符串已随批次行
 // 持久化,是稳定事实口径;patrol 与 productworkflow 都从这里引用,不得各自
 // 手抄字面值(2026-09-01 审查修复:字符串跨包漂移会让跳过类静默失配,把单
 // 职位离线放大成整日计划终止)。
@@ -322,7 +323,13 @@ const (
 	// positionSelectFailed 拆出:后者只留给"职位列表里找不到/无法唯一确定",
 	// 两者同为跳过类,行为不变,只为产品 UI 能精确提示错误类别。
 	SourcingBatchGateReasonRecommendPageNotReady = "recommendPageNotReady"
-	SourcingBatchGateReasonPlanFinalize          = "dailyPlanFinalizeFailed"
+	// SourcingBatchGateReasonFiltersApply:采集前的六组筛选没能完整覆盖并回读
+	// 确认(含本地职位配置导不出筛选视图)。2026-09-04 甲方裁决自"其余原因→
+	// 计划终止"改判跳过类,同日自 patrol 本地字面值提升到这里——它此前正是本
+	// 注释警告的那个形状:同一个字符串在 patrol 手抄一份、跳过类名单里没有,
+	// 一次点击落空就把当日剩余职位全废掉(09-04 客户机 53 个名额)。
+	SourcingBatchGateReasonFiltersApply = "filtersApplyFailed"
+	SourcingBatchGateReasonPlanFinalize = "dailyPlanFinalizeFailed"
 )
 
 // SourcingBatch 是一次正式采集的不可变范围与可恢复状态。PositionRef 在

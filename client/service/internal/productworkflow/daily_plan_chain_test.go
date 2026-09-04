@@ -328,6 +328,65 @@ func TestDailyPlanSkipsGateStoppedEntryAndChains(t *testing.T) {
 	_ = actor
 }
 
+// 筛选设置失败只跳过该条目并接续下一条目(2026-09-04 甲方裁决自"其余原因→
+// 计划终止"改判跳过类)。2026-09-04 客户机现场:条目二切过去后点年龄「自定义」
+// 落空,当日剩余 3 个职位共 53 个名额随整份计划一起报废。手侧补点三次与 patrol
+// 同轮重试都耗尽之后才会走到这里。
+func TestDailyPlanSkipsFiltersApplyFailedEntryAndChains(t *testing.T) {
+	db, key, manager, _, clock, _, revB := dailyPlanChainFixture(t)
+	runA, err := manager.StartFullDailyPlan(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := finalizeActivePlanBothOnline(t, db, key, clock.now)
+	// failSourcingBatch 的落账形态:批次 blocked(filtersApplyFailed)带判定现场。
+	detail := "CTX_NOT_READY/pageBroken: 智联筛选面或推荐列表尚未稳定" +
+		"（option_click_exhausted；age/自定义=选中）"
+	if _, err := db.BlockSourcingBatch(store.BlockSourcingBatchRequest{
+		BatchID: *runA.SourcingBatchID, Reason: store.SourcingBatchGateReasonFiltersApply,
+		Detail: detail, BlockedAt: clock.now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
+		RunID: runA.RunID,
+		From:  workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusRunning},
+		To:    workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusFailed},
+		At:    clock.now, Stage: store.ProductWorkflowStageFailed,
+		Failure: "产品工作流批次推进状态无效: filtersApplyFailed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
+		t.Fatalf("收口扫描: %v", err)
+	}
+	var closed store.DailyJobPlan
+	if err := dbPlanByID(db, plan.PlanID, &closed); err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status == store.DailyJobPlanAborted {
+		t.Fatalf("筛选失败不得再终止整份计划: %+v", closed)
+	}
+	_, entries, err := db.ActiveDailyJobPlan(key)
+	if err != nil || entries[0].Status != store.DailyJobPlanEntrySkipped ||
+		entries[0].SkipReason != "batch:"+store.SourcingBatchGateReasonFiltersApply+"|"+detail {
+		t.Fatalf("条目一未按跳过类带现场留痕: %+v err=%v", entries, err)
+	}
+	active, err := db.ActiveProductWorkflowRun()
+	if err != nil || active == nil || active.SourcingBatchID == nil {
+		t.Fatalf("未接续条目二: %+v err=%v", active, err)
+	}
+	batch, err := db.SourcingBatchByID(*active.SourcingBatchID)
+	if err != nil || batch.ContextRevisionHash != revB.RevisionHash {
+		t.Fatalf("接续批次错误: %+v err=%v", batch, err)
+	}
+	if stale, err := db.SourcingBatchByID(*runA.SourcingBatchID); err != nil ||
+		stale == nil || stale.EndedAt == nil {
+		t.Fatalf("跳过后不得残留未终局批次: %+v err=%v", stale, err)
+	}
+}
+
 // 非跳过类失败终止整个计划,并终局化残留 blocked 批次——防止次日被当成存量
 // 批次收养后按配置全额跑掉(超发方向,必须堵死)。
 func TestDailyPlanAbortsOnNonSkipFailureAndTerminalizesBatch(t *testing.T) {

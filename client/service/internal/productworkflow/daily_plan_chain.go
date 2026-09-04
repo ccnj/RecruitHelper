@@ -25,16 +25,24 @@ const (
 
 var ErrDailyPlanQuotaExhausted = errors.New("当日职位计划没有可执行条目")
 
-// planSkipClassBatchReason:批前闸口径由 store 统一导出,只有这三类允许
-// "跳过该条目、接续下一条目"(甲方裁决清单第 4 条+出口「允许的失败」);
-// 其余原因可能是账号级故障(掉登录、手离线),逐条目盲试只会连环空转,
+// planSkipClassBatchReason:批前闸口径由 store 统一导出,只有这几类允许
+// "跳过该条目、接续下一条目"(AGENTS.md「当日职位计划与招呼配额分摊」跳过类
+// 枚举);其余原因可能是账号级故障(掉登录、手离线),逐条目盲试只会连环空转,
 // 一律终止计划(dailyPlanFinalizeFailed 同理,是计划级故障)。
+//
+// filtersApplyFailed 于 2026-09-04 甲方裁决自"其余原因"移入:它是页面交互脆断,
+// 不是账号级故障——换个职位重来大概率就成(近 20 次真机 18 成 2 败)。09-03 与
+// 09-04 各触发一次,后者把当日剩余 3 个职位共 53 个名额一起废掉。手侧补点与
+// patrol 的同轮重试都失败之后才会走到这里,此时跳过该职位是"重试→仍不行→跳过"
+// 的最后一档。用户暂停、每日边界与 ctx 取消不经此路:preservesSourcingBatch
+// 让它们原样保留批次、根本不写 blocked 原因。
 func planSkipClassBatchReason(reason string) bool {
 	switch reason {
 	case store.SourcingBatchGateReasonJobNotOnline,
 		store.SourcingBatchGateReasonStatusRead,
 		store.SourcingBatchGateReasonPositionSelect,
-		store.SourcingBatchGateReasonRecommendPageNotReady:
+		store.SourcingBatchGateReasonRecommendPageNotReady,
+		store.SourcingBatchGateReasonFiltersApply:
 		return true
 	}
 	return false

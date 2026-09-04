@@ -21,7 +21,7 @@ const sourcingWindowNoProgressLimit = 3
 const (
 	sourcingBlockInvalidState       = "invalidBatchState"
 	sourcingBlockPositionSelect     = store.SourcingBatchGateReasonPositionSelect
-	sourcingBlockFiltersApply       = "filtersApplyFailed"
+	sourcingBlockFiltersApply       = store.SourcingBatchGateReasonFiltersApply
 	sourcingBlockWindowReadFailed   = "windowReadFailed"
 	sourcingBlockPositionBindFailed = "positionBindFailed"
 	sourcingBlockPositionChanged    = "positionChanged"
