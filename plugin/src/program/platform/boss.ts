@@ -1717,7 +1717,15 @@ function domLocateBySelector(selector: string, index: number): DomLocated {
   const i = index < 0 ? 0 : index
   const el = all[i]
   if (!el) return { status: 'out_of_range', count: all.length, detail: `index ${i} 越界,只命中 ${all.length} 个` }
-  const r0 = el.getBoundingClientRect()
+  // 靶子是文档本身(html / body)时,矩形按 scrollingElement 的内容高度合成:html/body 的
+  // getBoundingClientRect 只有视口那么高、滚过一屏后整个矩形跑到视口上方,可见部分算成 0,
+  // 第二次滚就被当 offscreen 拒掉(2026-09-04 真机,BOSS 推荐页 iframe 文档滚 720 后)。
+  const own = el.ownerDocument
+  const isDoc = !!own && (el === own.documentElement || el === own.body)
+  const se = isDoc && own ? own.scrollingElement : null
+  const r0 = isDoc && se
+    ? { x: 0, y: -se.scrollTop, width: se.clientWidth, height: se.scrollHeight, left: 0, top: -se.scrollTop, right: se.clientWidth, bottom: se.scrollHeight - se.scrollTop }
+    : el.getBoundingClientRect()
   const r = { x: r0.x + offX, y: r0.y + offY, width: r0.width, height: r0.height, left: r0.left + offX, top: r0.top + offY, right: r0.right + offX, bottom: r0.bottom + offY }
   const left = Math.max(view.left, r.left)
   const top = Math.max(view.top, r.top)
