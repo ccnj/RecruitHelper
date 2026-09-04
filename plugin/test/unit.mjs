@@ -3976,8 +3976,10 @@ test('candidate.applySourcingFilters MAIN 点击持续被吞时按选项失配�
       structuredClone(m6SourcingFilterTarget),
     )
     assert.equal(result.status, 'failed')
-    assert.equal(result.reason, 'option_set_mismatch',
-      '点不中就是点不中,要在这一步响亮失败,不许带着「不限」往下走')
+    assert.equal(result.reason, 'option_click_exhausted',
+      '点不中就是点不中,要在这一步响亮失败,不许带着「不限」往下走;'
+      + '且要与「平台改版、选项集不认识」的 option_set_mismatch 分开')
+    assert.ok(String(result.scene).includes('age/自定义'), '失败要带上是哪一格没点动')
     const names = fixture.state.interactions.map(([name]) => name)
     assert.equal(names.filter((name) => name === 'click-age-自定义').length, 3, '补点至多三次')
     assert.equal(fixture.state.confirms, 0, '没点中不得提交')
@@ -4160,6 +4162,75 @@ test('candidate.applySourcingFilters MAIN 列表不稳定或二次回读漂移�
     } finally {
       fixture.restore()
     }
+  }
+})
+
+// 分档决定脑侧敢不敢再跑一趟:CTX_NOT_READY + afterRecovery 才进
+// patrol.transientPageNotReady 的重试链,manualOnly 一律停工。2026-09-04 起
+// "点不动/下拉没出来"归瞬时档,"平台选项集不认识"仍归人工档。
+test('candidate.applySourcingFilters outer 按成因分档:点不动是瞬时,选项集不认识才要人工', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = '8'.repeat(64)
+  const cases = [
+    ['option_click_exhausted', 'CTX_NOT_READY', 'afterRecovery'],
+    ['custom_selector_unavailable', 'CTX_NOT_READY', 'afterRecovery'],
+    ['option_set_mismatch', 'ELEMENT_UNRESOLVED', 'manualOnly'],
+    ['selection_unreadable', 'ELEMENT_UNRESOLVED', 'manualOnly'],
+  ]
+  try {
+    for (const [reason, expectedCode, expectedRetryable] of cases) {
+      globalThis.chrome = {
+        tabs: {
+          async query() {
+            return [{
+              id: 601,
+              active: true,
+              status: 'complete',
+              url: 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-filter-job',
+            }]
+          },
+        },
+        scripting: {
+          async executeScript({ func }) {
+            if (func.name === 'mainProbeZhilian') {
+              return [{ result: {
+                pageKind: 'recommend',
+                loginState: 'in',
+                principalFingerprint: fingerprint,
+                imListVisible: false,
+              } }]
+            }
+            return [{ result: { status: 'failed', reason, scene: 'age/自定义=选中' } }]
+          },
+        },
+      }
+      const context = {
+        signal: new AbortController().signal,
+        cmdMsgId: 'apply-sourcing-filter-class-fixture',
+        deadlineMs: Date.now() + 10_000,
+        irreversibleNotAfterMs: Date.now() + 10_000,
+        commandContext: undefined,
+        guards: undefined,
+        checkpoint() {},
+        async beforeSideEffect() {},
+        async progress() {},
+      }
+      await assert.rejects(
+        applyZhilianSourcingFilters({
+          positionRef: 'fixture-filter-job',
+          positionTitle: '合成筛选职位',
+          filters: structuredClone(m6SourcingFilterTarget),
+        }, context, fingerprint),
+        (error) => {
+          assert.equal(error.code, expectedCode, `${reason} 应判 ${expectedCode}`)
+          assert.equal(error.retryable, expectedRetryable, `${reason} 应判 ${expectedRetryable}`)
+          assert.ok(String(error.message).includes(reason), '判定现场必须随消息带出')
+          return true
+        },
+      )
+    }
+  } finally {
+    globalThis.chrome = originalChrome
   }
 })
 

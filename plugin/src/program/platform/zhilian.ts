@@ -374,6 +374,11 @@ const MAIN_APPLY_SOURCING_FILTERS_FAILURE_REASONS = [
   'group_cardinality',
   'group_title_mismatch',
   'option_set_mismatch',
+  // option_click_exhausted:选项就在那儿、标签也对得上,就是补点三次仍没变成
+  // 目标态(或三次都定位不到)。与 option_set_mismatch 刻意分开:后者是平台的
+  // 选项集跟我们认识的不一样(改版,要人工),前者是页面一时点不动(瞬时,脑侧
+  // 可整条重试)。分档见 throwApplySourcingFiltersFailure。
+  'option_click_exhausted',
   'selection_unreadable',
   'custom_selector_unavailable',
   'range_select_unavailable',
@@ -2201,27 +2206,27 @@ async function mainApplySourcingFilters(
       if (key === 'age' || key === 'activeTime' || key === 'gender') {
         if (group.selectedLabels[0] !== targetLabels[0] &&
             !await clickOption(key, targetLabels[0], true)) {
-          return failed('option_set_mismatch')
+          return failed('option_click_exhausted', `${key}/${targetLabels[0]}=选中`)
         }
         continue
       }
       if (targetLabels.length === 1 && targetLabels[0] === '不限') {
         if (!(group.selectedLabels.length === 1 && group.selectedLabels[0] === '不限') &&
             !await clickOption(key, '不限', true)) {
-          return failed('option_set_mismatch')
+          return failed('option_click_exhausted', `${key}/不限=选中`)
         }
         continue
       }
       for (const selected of group.selectedLabels) {
         if (selected !== '不限' && !targetLabels.includes(selected) &&
             !await clickOption(key, selected, false)) {
-          return failed('option_set_mismatch')
+          return failed('option_click_exhausted', `${key}/${selected}=取消`)
         }
       }
       for (const desired of targetLabels) {
         if (!group.selectedLabels.includes(desired) &&
             !await clickOption(key, desired, true)) {
-          return failed('option_set_mismatch')
+          return failed('option_click_exhausted', `${key}/${desired}=选中`)
         }
       }
     }
@@ -5936,12 +5941,22 @@ function throwApplySourcingFiltersFailure(result: MainApplySourcingFiltersFailed
       'manualOnly',
     )
   }
+  // 瞬时档:页面这一趟没准备好,再跑一趟整条原语大概率就成。脑侧据 CTX_NOT_READY
+  // + afterRecovery 决定是否同轮重试(patrol.transientPageNotReady)。
+  // custom_selector_unavailable 与 option_click_exhausted 于 2026-09-04 自下面的
+  // manualOnly 档移入:两者都是"选项就在那儿、页面一时不听话",不是"平台改版了、
+  // 得人来看"——把它们钉在 manualOnly 上,09-03、09-04 各一次点击落空就直接废掉
+  // 当日剩余职位。判定现场随消息带出(留痕条款),不因换档丢失。
   if (result.reason === 'drawer_not_ready' ||
       result.reason === 'list_unavailable' ||
-      result.reason === 'list_unstable') {
+      result.reason === 'list_unstable' ||
+      result.reason === 'custom_selector_unavailable' ||
+      result.reason === 'option_click_exhausted') {
     throw new ZhilianPlatformError(
       'CTX_NOT_READY',
-      '智联筛选面或推荐列表尚未稳定',
+      `智联筛选面或推荐列表尚未稳定（${result.reason}${
+        result.scene === undefined ? '' : `；${result.scene}`
+      }）`,
       'afterRecovery',
       'pageBroken',
     )
