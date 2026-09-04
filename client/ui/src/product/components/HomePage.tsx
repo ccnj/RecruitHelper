@@ -49,6 +49,7 @@ function planSkipCodeText(code: string): string {
   if (code === 'batch:jobStatusReadFailed') return '职位状态读取失败'
   if (code === 'batch:positionSelectFailed') return '推荐页职位列表里找不到该职位或无法唯一确定'
   if (code === 'batch:recommendPageNotReady') return '推荐页加载超时（已重试 5 次）'
+  if (code === 'batch:filtersApplyFailed') return '筛选条件未能设置成功（已重试）'
   return code
 }
 

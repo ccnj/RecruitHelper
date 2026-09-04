@@ -374,6 +374,11 @@ const MAIN_APPLY_SOURCING_FILTERS_FAILURE_REASONS = [
   'group_cardinality',
   'group_title_mismatch',
   'option_set_mismatch',
+  // option_click_exhausted:选项就在那儿、标签也对得上,就是补点三次仍没变成
+  // 目标态(或三次都定位不到)。与 option_set_mismatch 刻意分开:后者是平台的
+  // 选项集跟我们认识的不一样(改版,要人工),前者是页面一时点不动(瞬时,脑侧
+  // 可整条重试)。分档见 throwApplySourcingFiltersFailure。
+  'option_click_exhausted',
   'selection_unreadable',
   'custom_selector_unavailable',
   'range_select_unavailable',
@@ -2038,24 +2043,66 @@ async function mainApplySourcingFilters(
     const groups = visibleAll(drawers[0], schemas[key].selector)
     return groups.length === 1 ? groups[0] : null
   }
+  // 当场读某个组里某个 label 的选中态,判据与 readFilters 逐字同源:checkbox 组认
+  // active/inactive 两个类互斥,radio 组认 km-radio--checked。组或选项定位不唯一、
+  // 两类同时在或同时不在,一律返回 null 表示"读不出",绝不猜。
+  const optionSelected = (key: FilterKey, label: string): boolean | null => {
+    const group = liveGroup(key)
+    if (!group) return null
+    const matches = visibleAll(group, schemas[key].optionSelector)
+      .filter((node) => optionLabel(node) === label)
+    if (matches.length !== 1) return null
+    const node = matches[0]
+    if (schemas[key].control === 'checkbox') {
+      const active = node.classList.contains('recommend-checkbox-group__active')
+      const inactive = node.classList.contains('recommend-checkbox-group__inactive')
+      if (active === inactive) return null
+      return active
+    }
+    return node.classList.contains('km-radio--checked')
+  }
   // 定位与 click 必须待在同一个同步块里。interact 会先睡满平台节奏下限(1 秒以上)
   // 再执行回调,若在睡之前就把节点取出来,这一秒足够 Vue 把整组重渲染一遍——旧节点
   // 脱离文档后 click() 既不抛异常也不生效,页面上就是"点了没反应",而代码毫不知情。
   // 年龄组尤其危险:它是唯一带 config 的独立子组件(.filter-group-age),会自己重建,
   // 又恰好是循环里第一个被点的,紧贴抽屉刚弹出这个最不稳的时刻。
   // 2026-08-07 客户机 custom_selector_unavailable 现场即为此形态。
-  const clickOption = async (key: FilterKey, label: string): Promise<boolean> => {
-    let clicked = false
-    await interact(() => {
-      const group = liveGroup(key)
-      if (!group) return
-      const matches = visibleAll(group, schemas[key].optionSelector)
-        .filter((node) => optionLabel(node) === label)
-      if (matches.length !== 1) return
-      matches[0].click()
-      clicked = true
-    })
-    return clicked
+  //
+  // 同一同步块仍不够:2026-09-03 与 09-04 客户机各出一次,点「自定义」那一下落空,
+  // 页面上年龄格仍是「不限」,而本函数照旧返回 true,直到后面找自定义区间下拉才以
+  // custom_selector_unavailable 报错,09-04 那次废掉当日剩余 3 个职位 53 个名额。
+  // 因此本函数改为"点了还要看见它变了":每轮先回读,已达目标态就直接收工(不点),
+  // 否则点一次再以短条件等待确认。先回读这一步是防抖动的关键——上一轮点击若只是
+  // 渲染晚到,这里直接认账,不会再点一次把 checkbox 又 toggle 回去。
+  // 至多 CLICK_OPTION_MAX_ATTEMPTS 轮;每轮 interact 自带 ≥1 秒平台节奏下限,
+  // 加确认等待最坏约 10 秒,而本原语执行预算 240 秒(真机成功用时约 33 秒)。
+  const CLICK_OPTION_MAX_ATTEMPTS = 3
+  const CLICK_OPTION_SETTLE_MS = 2_000
+  const clickOption = async (
+    key: FilterKey,
+    label: string,
+    desiredSelected: boolean,
+  ): Promise<boolean> => {
+    for (let attempt = 0; attempt < CLICK_OPTION_MAX_ATTEMPTS; attempt += 1) {
+      if (optionSelected(key, label) === desiredSelected) return true
+      let clicked = false
+      await interact(() => {
+        const group = liveGroup(key)
+        if (!group) return
+        const matches = visibleAll(group, schemas[key].optionSelector)
+          .filter((node) => optionLabel(node) === label)
+        if (matches.length !== 1) return
+        matches[0].click()
+        clicked = true
+      })
+      if (!clicked) continue
+      const settled = await waitFor(
+        () => optionSelected(key, label) === desiredSelected ? true : null,
+        CLICK_OPTION_SETTLE_MS,
+      )
+      if (settled === true) return true
+    }
+    return false
   }
   const desiredLabels = (filters: CandidateSourcingFilters): Record<FilterKey, string[]> => {
     const careerLabels: Record<string, string> = {
@@ -2158,28 +2205,28 @@ async function mainApplySourcingFilters(
       const targetLabels = targets[key]
       if (key === 'age' || key === 'activeTime' || key === 'gender') {
         if (group.selectedLabels[0] !== targetLabels[0] &&
-            !await clickOption(key, targetLabels[0])) {
-          return failed('option_set_mismatch')
+            !await clickOption(key, targetLabels[0], true)) {
+          return failed('option_click_exhausted', `${key}/${targetLabels[0]}=选中`)
         }
         continue
       }
       if (targetLabels.length === 1 && targetLabels[0] === '不限') {
         if (!(group.selectedLabels.length === 1 && group.selectedLabels[0] === '不限') &&
-            !await clickOption(key, '不限')) {
-          return failed('option_set_mismatch')
+            !await clickOption(key, '不限', true)) {
+          return failed('option_click_exhausted', `${key}/不限=选中`)
         }
         continue
       }
       for (const selected of group.selectedLabels) {
         if (selected !== '不限' && !targetLabels.includes(selected) &&
-            !await clickOption(key, selected)) {
-          return failed('option_set_mismatch')
+            !await clickOption(key, selected, false)) {
+          return failed('option_click_exhausted', `${key}/${selected}=取消`)
         }
       }
       for (const desired of targetLabels) {
         if (!group.selectedLabels.includes(desired) &&
-            !await clickOption(key, desired)) {
-          return failed('option_set_mismatch')
+            !await clickOption(key, desired, true)) {
+          return failed('option_click_exhausted', `${key}/${desired}=选中`)
         }
       }
     }
@@ -5894,12 +5941,22 @@ function throwApplySourcingFiltersFailure(result: MainApplySourcingFiltersFailed
       'manualOnly',
     )
   }
+  // 瞬时档:页面这一趟没准备好,再跑一趟整条原语大概率就成。脑侧据 CTX_NOT_READY
+  // + afterRecovery 决定是否同轮重试(patrol.transientPageNotReady)。
+  // custom_selector_unavailable 与 option_click_exhausted 于 2026-09-04 自下面的
+  // manualOnly 档移入:两者都是"选项就在那儿、页面一时不听话",不是"平台改版了、
+  // 得人来看"——把它们钉在 manualOnly 上,09-03、09-04 各一次点击落空就直接废掉
+  // 当日剩余职位。判定现场随消息带出(留痕条款),不因换档丢失。
   if (result.reason === 'drawer_not_ready' ||
       result.reason === 'list_unavailable' ||
-      result.reason === 'list_unstable') {
+      result.reason === 'list_unstable' ||
+      result.reason === 'custom_selector_unavailable' ||
+      result.reason === 'option_click_exhausted') {
     throw new ZhilianPlatformError(
       'CTX_NOT_READY',
-      '智联筛选面或推荐列表尚未稳定',
+      `智联筛选面或推荐列表尚未稳定（${result.reason}${
+        result.scene === undefined ? '' : `；${result.scene}`
+      }）`,
       'afterRecovery',
       'pageBroken',
     )

@@ -37,6 +37,16 @@ const {
   assert.deepEqual(planSkipReasonParts('batch:jobNotOnline'), { label: '开批时职位已下线', detail: '' })
   assert.deepEqual(planSkipReasonParts('jobNotOnlineAtPlan:未上线'), { label: '职位未在线（未上线）', detail: '' })
   assert.deepEqual(planSkipReasonParts(undefined), { label: '', detail: '' })
+  // 2026-09-04 甲方裁决:筛选设置失败也进跳过类,文案与判定现场同批补齐。
+  const filters = planSkipReasonParts(
+    'batch:filtersApplyFailed|CTX_NOT_READY/pageBroken: 智联筛选面或推荐列表尚未稳定'
+    + '（option_click_exhausted；age/自定义=选中）',
+  )
+  assert.equal(filters.label, '筛选条件未能设置成功（已重试）')
+  assert.equal(
+    filters.detail,
+    'CTX_NOT_READY/pageBroken: 智联筛选面或推荐列表尚未稳定（option_click_exhausted；age/自定义=选中）',
+  )
 }
 
 const customer = {

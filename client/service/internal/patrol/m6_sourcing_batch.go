@@ -21,7 +21,7 @@ const sourcingWindowNoProgressLimit = 3
 const (
 	sourcingBlockInvalidState       = "invalidBatchState"
 	sourcingBlockPositionSelect     = store.SourcingBatchGateReasonPositionSelect
-	sourcingBlockFiltersApply       = "filtersApplyFailed"
+	sourcingBlockFiltersApply       = store.SourcingBatchGateReasonFiltersApply
 	sourcingBlockWindowReadFailed   = "windowReadFailed"
 	sourcingBlockPositionBindFailed = "positionBindFailed"
 	sourcingBlockPositionChanged    = "positionChanged"
@@ -149,9 +149,7 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 			PositionRef: selected.PositionRef, PositionTitle: selected.PositionTitle,
 			Filters: view.JobFilters,
 		}
-		applied, _, err := invokePrimitiveDirectWithLogicalID[protocol.CandidateApplySourcingFiltersData](
-			ctx, a, protocol.PrimCandidateApplySourcingFilters, filterArgs,
-		)
+		applied, err := a.applySourcingFiltersWithRetries(ctx, batch.BatchID, filterArgs)
 		if err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockFiltersApply, err)
 		}
@@ -329,6 +327,48 @@ func (a *roundActor) selectSourcingPositionWithRetries(
 			"err", err.Error())
 		if paceErr := a.waitSourcingInteractionPace(ctx); paceErr != nil {
 			return selected, paceErr
+		}
+	}
+}
+
+// sourcingFiltersApplyMaxRetries:筛选面这一趟没准备好时同轮最多再发几次同款
+// 命令。刻意比切职位的 5 次少:切职位单趟只有几秒,筛选整条要开抽屉、覆盖六组、
+// 提交、二次回读再取消,真机成功用时约 33 秒、失败也要 33 秒,4 趟已是两分多钟;
+// 而手侧原语内部已先对每个点不动的选项补点三次(zhilian.ts clickOption),本层是
+// 它之上的第二道,不必再堆次数。
+const sourcingFiltersApplyMaxRetries = 3
+
+// applySourcingFiltersWithRetries 在 preparing 阶段、推荐流尚未绑定时覆盖筛选:
+// 手报 CTX_NOT_READY 且自证瞬时(retryable=afterRecovery/yes)就等一个交互节奏后
+// 同轮再跑一整条原语——它自己会重开抽屉、从当前实际状态重新覆盖。至多重试
+// sourcingFiltersApplyMaxRetries 次,不加持久化计数;最后一次仍失败按原路径拦停
+// 批次(此后由当日职位计划按跳过类跳过该职位、接续下一条目)。
+// 立案:2026-09-03 与 09-04 客户机各一次点年龄「自定义」落空,09-04 那次把当日
+// 剩余 3 个职位共 53 个名额全废掉。与切职位同理,这不是 AGENTS.md「批间接续
+// 失败……不自动重试」所指的自动重试(2026-09-02 甲方裁决口径,2026-09-04 写进
+// 条文);本原语 platformSideEffect=none,重跑不产生任何候选人可见动作。
+// 与切职位同一条边界:只服务推荐流尚未绑定的这一步,不得挪到之后任何会刷新
+// 推荐流的位置。
+func (a *roundActor) applySourcingFiltersWithRetries(
+	ctx context.Context,
+	batchID string,
+	args protocol.CandidateApplySourcingFiltersArgs,
+) (protocol.CandidateApplySourcingFiltersData, error) {
+	for attempt := 0; ; attempt++ {
+		applied, _, err := invokePrimitiveDirectWithLogicalID[protocol.CandidateApplySourcingFiltersData](
+			ctx, a, protocol.PrimCandidateApplySourcingFilters, args,
+		)
+		if err == nil || !transientPageNotReady(err) || attempt >= sourcingFiltersApplyMaxRetries {
+			return applied, err
+		}
+		// 留痕(「错误收敛必须留痕」):每一次未就绪的完整判定现场进日志,最后
+		// 一次的结果走原有失败路径落批次原因。
+		slog.Warn("筛选面未就绪,同轮再试",
+			"batchId", batchID, "positionTitle", args.PositionTitle,
+			"attempt", attempt+1, "maxRetries", sourcingFiltersApplyMaxRetries,
+			"err", err.Error())
+		if paceErr := a.waitSourcingInteractionPace(ctx); paceErr != nil {
+			return applied, paceErr
 		}
 	}
 }
