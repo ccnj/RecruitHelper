@@ -48,6 +48,8 @@ import type {
   ChatAcceptWechatData,
   ChatReadWechatExchangeOutcomeArgs,
   ChatReadWechatExchangeOutcomeData,
+  ChatSendInviteCardArgs,
+  ChatSendInviteCardData,
   ChatSendMessageArgs,
   ChatSendMessageData,
   ChatSendMessageGuards,
@@ -62,6 +64,8 @@ import type {
   DebugOsTypeArgs,
   DebugOsTypeData,
   DebugOsProbeData,
+  InterviewDetails,
+  InterviewMethod,
   MessageAnchor,
   PeerSummary,
   ProbePlatformData,
@@ -1367,16 +1371,27 @@ export function projectBossMessage(raw: BossRawMessage): BossProjectedMessage {
   if (plainText && text !== '') {
     return { kind: 'text', direction: raw.direction, text, hashInput: text }
   }
-  if (bizType === 21130009 || bizType === 21130008 || bizType === 21130006) {
-    const cardState: ThreadMessage['cardState'] =
-      raw.interviewCondition === 1 ? 'pending'
-        : raw.interviewCondition === 3 ? 'accepted'
-          : raw.interviewCondition === 5 ? 'expired'
-            : 'unknown'
+  // 邀面卡三码按 bizType 分支,condition 只作印证(出口 §2.1,平台事实 §四/§十六 两时机复核,2026-09-04):
+  // condition 是快照永不回写,接受与取消是独立新行不是跃迁。我方发出的 21130009 投 unknown——意图 ok 收编把账本行
+  // 写成 unknown,投 pending 会在下一轮读回时被当成 unknown→pending 跃迁转人工;21130008 接受投 accepted;
+  // 21130006 取消不论方向都投 system——出站 interviewInvite 任何状态都会被脑读成「又发了一张邀请」,入站非
+  // accepted 邀面卡会判 unknownEvent 转人工,「已约面后候选人取消」另立规格案。三码之外的 condition 值按枚举面
+  // 事实门归 unknown 并把原始值带进日志。
+  if (bizType === 21130009 || bizType === 21130008) {
+    const expected = bizType === 21130009 ? 1 : 3
+    const cardState: ThreadMessage['cardState'] = bizType === 21130008 && raw.interviewCondition === 3 ? 'accepted' : 'unknown'
     return {
       kind: 'card', direction: raw.direction, text: text || null,
       cardType: 'interviewInvite', cardState,
       hashInput: 'card\x1finterviewInvite',
+      ...(raw.interviewCondition === expected ? {} : { unrecognized: `bizType=${bizType} condition=${raw.interviewCondition ?? 'null'}` }),
+    }
+  }
+  if (bizType === 21130006) {
+    const label = text || '[系统消息:21130006]'
+    return {
+      kind: 'system', direction: raw.direction, text: label, hashInput: label,
+      ...(raw.interviewCondition === 5 ? {} : { unrecognized: `bizType=21130006 condition=${raw.interviewCondition ?? 'null'}` }),
     }
   }
   if (bizType === 21050024 && raw.actionAid === 32) {
@@ -1393,7 +1408,10 @@ export function projectBossMessage(raw: BossRawMessage): BossProjectedMessage {
   // 与契约 resumeAttachment「候选人已投递简历」语义不同,同样先归 system,等真机看过再定。
   const seenSystem = bizType === 21050060 || bizType === 21050070 || bizType === 21120018 ||
     bizType === 21130010 || bizType === 21050071 || bizType === 21050177 || bizType === 21050220 ||
-    bizType === 21130011 || bizType === 21050004 || bizType === 14
+    bizType === 21130011 || bizType === 21050004 || bizType === 14 ||
+    // 21050008:候选人接受面试时自动发的附件简历(文本行 + hyperLink 行,平台事实 §十六);投 card/resumeAttachment
+    // 触发 EventResumeSubmitted 是出口 §2.1 的后置项,本轮只去掉 unrecognized 噪音。
+    bizType === 21050008
   const label = `[系统消息:${bizType ?? raw.type ?? 'unknown'}]`
   return {
     kind: 'system', direction: raw.direction, text: text || label, hashInput: text || label,
@@ -2965,6 +2983,933 @@ async function readBossWechatExchangeOutcome(
   return data
 }
 
+// ── 邀面卡线(场景三,2026-09-04 出口) ───────────────────────────────────────────
+//
+// 表单驱动的多步 OS 点击:工具栏「约面试」→ 模态 → 面试类型 radio(线上再选「微信视频」)→ 日期 → 宽松时间起止
+// → 「发送」(出口 §2.2;DOM 事实见平台事实 §十五,主流程后置见 §十六)。判据按出口 §〇:卡已发出只认出站
+// 21130009 行(不看 status,卡片行恒 0)**或**工具栏变「查看面试」,两者两时机都可见;模态关闭、成功弹窗、
+// relationType 只作观测。BOSS 一律走宽松时间(30 分钟格,2026-09-04 甲方对齐);onsite 契约无 endsAt,表单里
+// 结束取开始+1 小时——它只是填表的平台细节,进 detail 留痕,不进 data、不进账本。
+//
+// 失效方向(2026-09-04 甲方重申):「发送」按下之前的一切异常——参数不在格上、地址未配、模态/下拉/日历未就绪、
+// 列表项滚不到、最后一道闸对不上——都点「取消」收回模态后干净失败 afterRecovery,交脑按协议 §8.4 下轮重铸,
+// 不留人工票;manualOnly 只留给「已点过发送、正证读不到」这一条路(世界可能已被改动)。
+
+const INTERVIEW_SENT_BIZ = 21130009
+const INTERVIEW_BUTTON_INVITE = '约面试'
+const INTERVIEW_BUTTON_VIEW = '查看面试'
+const INTERVIEW_TIME_LOOSE = '宽松时间'
+const INTERVIEW_MEETING_WECHAT = '微信视频'
+/** 面试平台下拉的隐藏 input 存类型码:BOSS视频面试间=0、微信视频=8(平台事实 §十五)。与选中项文案二选一即认。 */
+const INTERVIEW_MEETING_WECHAT_CODE = '8'
+const INTERVIEW_SLOT_MINUTES = 30
+const INTERVIEW_START_MIN = 8 * 60
+const INTERVIEW_START_MAX = 20 * 60
+const INTERVIEW_END_MAX = 21 * 60
+const INTERVIEW_MIN_DURATION = 60
+/** 时间列 li 高 44px、一屏 4 项半(平台事实 §十五):可见部分至少这么多才落光标。 */
+const INTERVIEW_TIME_ITEM_MIN_VISIBLE_PX = 20
+const INTERVIEW_SCROLL_ATTEMPTS = 5
+/** 收回模态 / 关成功弹窗的等待封顶:一次点击后页面一帧就该变,给 5 秒是宽裕。 */
+const INTERVIEW_DISMISS_WAIT_MS = 5_000
+
+/** 邀面模态的 selector 包:整包传进页面函数(闭包变量到不了那边)。事实全在平台事实 §十五/§十六。 */
+const INTERVIEW_SEL = Object.freeze({
+  modal: '.interview-invite-dialog-ui',
+  title: '.interview-invite-dialog-ui h3.tab',
+  radio: '.interview-invite-dialog-ui label.radio.radio-item',
+  radioChecked: 'radio-checked',
+  address: '.interview-invite-dialog-ui .interview-address input',
+  meeting: '.interview-invite-dialog-ui .meetingtype-select',
+  meetingOpen: 'ui-select-visible',
+  meetingItem: '.interview-invite-dialog-ui .meetingtype-select li.ui-select-item',
+  meetingSelected: 'ui-select-item-selected',
+  meetingHidden: '.interview-invite-dialog-ui .meetingtype-select input[type=hidden]',
+  dateWrap: '.interview-invite-dialog-ui .datepicker-wrap',
+  dateInput: '.interview-invite-dialog-ui .datepicker-wrap input',
+  dateOpen: 'ui-datepicker-visible',
+  dateMonth: '.datepicker-pannel.datepicker-day .day-month-btn',
+  dateNext: '.datepicker-pannel.datepicker-day .next',
+  dateCell: '.datepicker-pannel.datepicker-day span.cell.day',
+  timeContainer: '.interview-invite-dialog-ui .time-select-container',
+  timeInput: '.interview-invite-dialog-ui input.time-select',
+  timeOpen: 'dropdown-menu-open',
+  timeTab: '.time-title span',
+  timeTabSelected: 'selected',
+  timeList: 'ul.time-select-ul',
+  timeItem: 'ul.time-select-ul li',
+  timeItemSelected: 'selected',
+  cancel: '.interview-invite-dialog-ui .interview-btns button.btn-outline-v2',
+  send: '.interview-invite-dialog-ui .interview-btns button.btn-sure-v2',
+  popup: '.boss-popup__wrapper, .dialog-wrap.active',
+  popupText: '面试邀请已发出',
+  popupClose: '.boss-popup__close',
+})
+type InterviewSelectors = typeof INTERVIEW_SEL
+
+// ── 参数换算与格校验(纯函数,单测钉) ──────────────────────────────────────────
+
+export interface BossInterviewFormPlan {
+  method: InterviewMethod
+  /** radio 文案:线下面试 / 线上面试。 */
+  radioText: string
+  /** 线上才有:面试平台下拉要选的项;线下为 null。 */
+  meetingText: string | null
+  /** 线上才有:该项对应的隐藏 input 类型码;线下为 null。 */
+  meetingCode: string | null
+  year: number
+  month: number
+  day: number
+  /** 日期框回填值 YYYY-MM-DD。 */
+  date: string
+  /** 目标日就是今天:日历里那格文本是「今」不是数字。 */
+  isToday: boolean
+  startText: string
+  endText: string
+  /** 选定开始后结束列重过滤,首项应为开始+1 小时。 */
+  firstEndText: string
+  /** 时间框回填值 HH:mm-HH:mm。 */
+  timeValue: string
+  /** onsite:契约无 endsAt,结束由开始+1 小时合成,只填表、只留痕。 */
+  endSynthesized: boolean
+}
+
+function pad2(value: number): string {
+  return value < 10 ? `0${value}` : String(value)
+}
+
+function hhmm(minutes: number): string {
+  return `${pad2(Math.floor(minutes / 60))}:${pad2(minutes % 60)}`
+}
+
+function localDateParts(at: Date): { year: number; month: number; day: number } {
+  return { year: at.getFullYear(), month: at.getMonth() + 1, day: at.getDate() }
+}
+
+/**
+ * 契约 interview → 表单要填的值。按本机时区拆;任一不合格即 invalid,**不取整、不改时间**(少做方向),
+ * 由调用方零点击干净失败交脑下轮重铸。脑侧 canonical 时段是整点起 1 小时格,正常全部合格。
+ */
+export function planBossInterviewForm(
+  interview: InterviewDetails, now: number,
+): { status: 'ok'; plan: BossInterviewFormPlan } | { status: 'invalid'; detail: string } {
+  const invalid = (detail: string): { status: 'invalid'; detail: string } => ({ status: 'invalid', detail })
+  const method = interview.method
+  if (method !== 'onsite' && method !== 'wechatVideo') return invalid(`面试方式 ${String(method)} 不在本平台开放范围`)
+  const startsAt = interview.startsAt
+  if (typeof startsAt !== 'number' || !Number.isSafeInteger(startsAt) || startsAt <= 0) return invalid('开始时间不是合法的毫秒时间戳')
+  if (startsAt <= now) return invalid(`开始时间 ${new Date(startsAt).toISOString()} 已过`)
+  const start = new Date(startsAt)
+  const startMin = start.getHours() * 60 + start.getMinutes()
+  if (start.getSeconds() !== 0 || start.getMilliseconds() !== 0 || start.getMinutes() % INTERVIEW_SLOT_MINUTES !== 0) {
+    return invalid(`开始时间 ${hhmm(startMin)}:${pad2(start.getSeconds())} 不在 30 分钟格上`)
+  }
+  if (startMin < INTERVIEW_START_MIN || startMin > INTERVIEW_START_MAX) {
+    return invalid(`开始时间 ${hhmm(startMin)} 不在平台 08:00–20:00 范围`)
+  }
+  let endMin: number
+  let endSynthesized = false
+  if (method === 'onsite') {
+    if (typeof interview.endsAt === 'number') return invalid('线下面试的契约不携带结束时间')
+    endMin = startMin + INTERVIEW_MIN_DURATION
+    endSynthesized = true
+  } else {
+    const endsAt = interview.endsAt
+    if (typeof endsAt !== 'number' || !Number.isSafeInteger(endsAt)) return invalid('线上面试缺结束时间')
+    const end = new Date(endsAt)
+    if (end.getFullYear() !== start.getFullYear() || end.getMonth() !== start.getMonth() || end.getDate() !== start.getDate()) {
+      return invalid('结束时间与开始时间不在同一天')
+    }
+    endMin = end.getHours() * 60 + end.getMinutes()
+    if (end.getSeconds() !== 0 || end.getMilliseconds() !== 0 || end.getMinutes() % INTERVIEW_SLOT_MINUTES !== 0) {
+      return invalid(`结束时间 ${hhmm(endMin)}:${pad2(end.getSeconds())} 不在 30 分钟格上`)
+    }
+    if (endMin < startMin + INTERVIEW_MIN_DURATION) return invalid(`结束 ${hhmm(endMin)} 早于开始 ${hhmm(startMin)}+1 小时`)
+  }
+  if (endMin > INTERVIEW_END_MAX) return invalid(`结束时间 ${hhmm(endMin)} 超出平台 21:00`)
+  const today = localDateParts(new Date(now))
+  const target = localDateParts(start)
+  const monthOffset = (target.year - today.year) * 12 + (target.month - today.month)
+  if (monthOffset < 0) return invalid('面试日期早于本月')
+  if (monthOffset > 1) return invalid(`面试日期在 ${monthOffset} 个月后,日历只翻一页`)
+  return {
+    status: 'ok',
+    plan: {
+      method,
+      radioText: method === 'onsite' ? '线下面试' : '线上面试',
+      meetingText: method === 'onsite' ? null : INTERVIEW_MEETING_WECHAT,
+      meetingCode: method === 'onsite' ? null : INTERVIEW_MEETING_WECHAT_CODE,
+      year: target.year, month: target.month, day: target.day,
+      date: `${target.year}-${pad2(target.month)}-${pad2(target.day)}`,
+      isToday: target.year === today.year && target.month === today.month && target.day === today.day,
+      startText: hhmm(startMin),
+      endText: hhmm(endMin),
+      firstEndText: hhmm(startMin + INTERVIEW_MIN_DURATION),
+      timeValue: `${hhmm(startMin)}-${hhmm(endMin)}`,
+      endSynthesized,
+    },
+  }
+}
+
+const BOSS_CALENDAR_MONTHS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二']
+
+/** 日历头「2026年 九月」→ 年月;认不出返回 null,不猜。 */
+export function parseBossCalendarMonth(text: string): { year: number; month: number } | null {
+  const match = /^(\d{4})年(十一|十二|[一二三四五六七八九十])月$/u.exec(text.replace(/\s+/gu, ''))
+  if (!match) return null
+  const month = BOSS_CALENDAR_MONTHS.indexOf(match[2]!) + 1
+  return month > 0 ? { year: Number(match[1]), month } : null
+}
+
+export interface BossCalendarCell {
+  /** 在 selector 全序列里的下标,命中测试用。 */
+  index: number
+  text: string
+  disabled: boolean
+  today: boolean
+  blank: boolean
+  rect: BossRect
+  /** 与视口相交的可见部分。 */
+  clip: BossRect
+}
+
+/** 日历里那一格:非占位、非过去、文本=日(今天那格文本是「今」);恰一格才认。 */
+export function pickBossCalendarCell(
+  cells: readonly BossCalendarCell[], day: number, targetIsToday: boolean,
+): { cell: BossCalendarCell | null; count: number } {
+  const hits = cells.filter((cell) => !cell.blank && !cell.disabled &&
+    (targetIsToday ? cell.today : (!cell.today && cell.text.trim() === String(day))))
+  return { cell: hits.length === 1 ? hits[0]! : null, count: hits.length }
+}
+
+export interface BossTimeItem {
+  index: number
+  text: string
+  selected: boolean
+  rect: BossRect
+}
+
+export interface BossTimeList {
+  index: number
+  /** 列表容器矩形(与视口相交后的可见部分)。 */
+  rect: BossRect
+  scrollTop: number
+  scrollHeight: number
+  clientHeight: number
+  items: BossTimeItem[]
+}
+
+/**
+ * 时间项在不在列表可见区里;不在就算要朝哪滚多少。目标是把项滚到列表正中——滚轮一格 40~120px,
+ * 列表 196px 高、项 44px,正中留的余量两边各 76px,过头一格再回滚一格即可收敛(出口 §2.2)。
+ */
+export function planBossTimeItemReach(
+  list: Pick<BossTimeList, 'rect' | 'scrollTop' | 'scrollHeight' | 'clientHeight'>,
+  item: Pick<BossTimeItem, 'rect'>,
+  minVisiblePx: number,
+): { status: 'visible'; rect: BossRect } | { status: 'scroll'; direction: 'up' | 'down'; distancePx: number } | { status: 'unreachable'; detail: string } {
+  const left = Math.max(item.rect.x, list.rect.x)
+  const top = Math.max(item.rect.y, list.rect.y)
+  const right = Math.min(item.rect.x + item.rect.w, list.rect.x + list.rect.w)
+  const bottom = Math.min(item.rect.y + item.rect.h, list.rect.y + list.rect.h)
+  if (right - left >= minVisiblePx && bottom - top >= minVisiblePx) {
+    return { status: 'visible', rect: { x: left, y: top, w: right - left, h: bottom - top } }
+  }
+  const maxTop = Math.max(0, list.scrollHeight - list.clientHeight)
+  const itemTop = item.rect.y - list.rect.y + list.scrollTop
+  const wanted = Math.min(maxTop, Math.max(0, itemTop - (list.clientHeight - item.rect.h) / 2))
+  const delta = wanted - list.scrollTop
+  if (Math.abs(delta) < 1) {
+    return { status: 'unreachable', detail: `项不在列表可见区内,而 scrollTop 已在 ${Math.round(list.scrollTop)}/${Math.round(maxTop)},无处可滚` }
+  }
+  return { status: 'scroll', direction: delta > 0 ? 'down' : 'up', distancePx: Math.round(Math.abs(delta)) }
+}
+
+/** 发送前复核(脑侧同一份期望):模态、类型、平台、日期、时间、发送键六项逐字对,缺一不点。返回不符项。 */
+export function bossInterviewFormMismatch(modal: DomInterviewModal, plan: BossInterviewFormPlan): string[] {
+  const problems: string[] = []
+  if (modal.modal !== 1) problems.push(`模态数 ${modal.modal}`)
+  const checked = modal.radios.filter((radio) => radio.checked).map((radio) => radio.text)
+  if (!(checked.length === 1 && checked[0] === plan.radioText)) problems.push(`面试类型「${checked.join('/')}」≠「${plan.radioText}」`)
+  if (plan.meetingText !== null && !bossMeetingChosen(modal, plan.meetingText, plan.meetingCode)) {
+    problems.push(`面试平台「${modal.meeting.selected}」/码「${modal.meeting.code}」不是「${plan.meetingText}」`)
+  }
+  if (modal.date.value !== plan.date) problems.push(`日期「${modal.date.value}」≠「${plan.date}」`)
+  if (modal.time.value !== plan.timeValue) problems.push(`时间「${modal.time.value}」≠「${plan.timeValue}」`)
+  if (!modal.send.found) problems.push('发送键不在')
+  else if (modal.send.disabled) problems.push('发送键 disabled')
+  return problems
+}
+
+/** 面试平台已选中某项:选中项文案含目标,**或**隐藏 input 的类型码等于目标码(下拉关着时选中类未必还在 DOM 里)。 */
+function bossMeetingChosen(modal: Pick<DomInterviewModal, 'meeting'>, text: string, code: string | null): boolean {
+  return modal.meeting.selected.includes(text) || (code !== null && modal.meeting.code === code)
+}
+
+function isBossInterviewSentRow(row: BossRawMessage): boolean {
+  return row.direction === 'out' && row.bizType === INTERVIEW_SENT_BIZ
+}
+
+function latestBossRow(rows: readonly BossRawMessage[]): BossRawMessage {
+  return rows.reduce((best, next) => (Number(next.mid) > Number(best.mid) ? next : best))
+}
+
+// ── isolated world:邀面表单的页面函数 ─────────────────────────────────────────
+
+/** 工具栏「约面试 / 查看面试」钮:文案含 tooltip 副本(§十五),按"含"分类而不逐字;恰一个才认。 */
+function domReadBossInterviewButton(selector: string, inviteText: string, viewText: string): {
+  found: boolean; count: number; index: number; kind: 'invite' | 'view' | ''; text: string; disabled: boolean; rect: BossRect
+} {
+  const zero = { x: 0, y: 0, w: 0, h: 0 }
+  const hits: Array<{ index: number; el: Element; kind: 'invite' | 'view'; text: string }> = []
+  Array.from(document.querySelectorAll(selector)).forEach((el, index) => {
+    const text = (el.textContent ?? '').replace(/\s+/gu, ' ').trim()
+    const kind: 'invite' | 'view' | '' = text.includes(viewText) ? 'view' : text.includes(inviteText) ? 'invite' : ''
+    if (kind) hits.push({ index, el, kind, text })
+  })
+  if (hits.length !== 1) return { found: false, count: hits.length, index: -1, kind: '', text: '', disabled: false, rect: zero }
+  const { index, el, kind, text } = hits[0]!
+  const r = el.getBoundingClientRect()
+  return {
+    found: true, count: 1, index, kind, text: text.slice(0, 24), disabled: el.classList.contains('disabled'),
+    rect: { x: r.x, y: r.y, w: r.width, h: r.height },
+  }
+}
+
+/** 命中测试的"含"版本:落点是 selector[index] 或其后代,且此刻文本含 mustContain、不含 mustNotContain。 */
+function domHitTestContains(
+  selector: string, index: number, mustContain: string, mustNotContain: string, x: number, y: number,
+): { onTarget: boolean; found: string } {
+  const target = Array.from(document.querySelectorAll(selector))[index]
+  const at = document.elementFromPoint(x, y)
+  if (!target) return { onTarget: false, found: '靶子已经不在原来的位置上' }
+  if (!at) return { onTarget: false, found: '落点上什么都没有' }
+  if (!(at === target || target.contains(at))) {
+    return { onTarget: false, found: `落点上是别的元素 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 8)}」` }
+  }
+  const now = (target.textContent ?? '').replace(/\s+/gu, ' ').trim()
+  if (!now.includes(mustContain) || (mustNotContain !== '' && now.includes(mustNotContain))) {
+    return { onTarget: false, found: `靶子文本已变:「${now.slice(0, 16)}」` }
+  }
+  return { onTarget: true, found: `靶子(${at.tagName.toLowerCase()})` }
+}
+
+interface DomInterviewModal {
+  /** 可见的邀面模态数;恰 1 才算开着。 */
+  modal: number
+  title: string
+  titleIndex: number
+  titleRect: BossRect
+  radios: Array<{ index: number; text: string; checked: boolean; rect: BossRect }>
+  /** 线下的「面试地址」只读框的值;线上没有这行则为 null。 */
+  address: string | null
+  meeting: {
+    present: boolean
+    index: number
+    open: boolean
+    /** 当前选中项文案(带选中类的 li)。 */
+    selected: string
+    /** 隐藏 input 里的类型码(微信视频=8)。 */
+    code: string
+    rect: BossRect
+    items: Array<{ index: number; text: string; selected: boolean; rect: BossRect }>
+  }
+  date: {
+    index: number
+    value: string
+    open: boolean
+    rect: BossRect
+    month: string
+    nextIndex: number
+    nextRect: BossRect | null
+    cells: BossCalendarCell[]
+  }
+  time: {
+    index: number
+    value: string
+    open: boolean
+    rect: BossRect
+    tabs: Array<{ index: number; text: string; selected: boolean; rect: BossRect }>
+    lists: BossTimeList[]
+  }
+  cancel: { found: boolean; index: number; rect: BossRect }
+  send: { found: boolean; index: number; disabled: boolean; rect: BossRect }
+  /** 发送后的全屏成功对话框「面试邀请已发出」与它的关闭键。 */
+  popup: { found: boolean; closeIndex: number; closeRect: BossRect }
+  viewport: { w: number; h: number }
+}
+
+/** 邀面模态一次读全:每个可点的东西都带 selector 全序列下标(命中测试用)与矩形。只读。 */
+function domReadBossInterviewModal(sel: InterviewSelectors): DomInterviewModal {
+  const zero: BossRect = { x: 0, y: 0, w: 0, h: 0 }
+  const rectOf = (el: Element | undefined | null): BossRect => {
+    if (!el) return zero
+    const r = el.getBoundingClientRect()
+    return { x: r.x, y: r.y, w: r.width, h: r.height }
+  }
+  const clipOf = (r: BossRect): BossRect => {
+    const left = Math.max(0, r.x)
+    const top = Math.max(0, r.y)
+    const right = Math.min(window.innerWidth, r.x + r.w)
+    const bottom = Math.min(window.innerHeight, r.y + r.h)
+    return { x: left, y: top, w: Math.max(0, right - left), h: Math.max(0, bottom - top) }
+  }
+  const visible = (el: Element): boolean => {
+    const r = el.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  }
+  const text = (el: Element | undefined | null): string => (el ? (el.textContent ?? '') : '').replace(/\s+/gu, ' ').trim()
+  const valueOf = (el: Element | undefined | null): string => {
+    const raw = (el as { value?: unknown } | null | undefined)?.value
+    return typeof raw === 'string' ? raw.trim() : ''
+  }
+  const has = (el: Element, cls: string): boolean => el.classList.contains(cls)
+  const all = (selector: string): Element[] => Array.from(document.querySelectorAll(selector))
+  const firstVisible = (selector: string): { el: Element | undefined; index: number } => {
+    const list = all(selector)
+    const index = list.findIndex(visible)
+    return { el: index >= 0 ? list[index] : undefined, index }
+  }
+
+  const modal = all(sel.modal).filter(visible).length
+  const titleHit = firstVisible(sel.title)
+  const title = text(titleHit.el)
+  const radios = all(sel.radio).map((el, index) => ({ index, text: text(el), checked: has(el, sel.radioChecked), rect: rectOf(el) }))
+    .filter((radio) => radio.rect.w > 0 && radio.rect.h > 0)
+  const addressEl = firstVisible(sel.address).el
+  const address = addressEl ? valueOf(addressEl) : null
+
+  const meetingHit = firstVisible(sel.meeting)
+  const meetingItems = all(sel.meetingItem).map((el, index) => ({ index, text: text(el), selected: has(el, sel.meetingSelected), rect: rectOf(el) }))
+  const meeting = {
+    present: !!meetingHit.el, index: meetingHit.index,
+    open: !!meetingHit.el && has(meetingHit.el, sel.meetingOpen),
+    selected: meetingItems.filter((item) => item.selected).map((item) => item.text).join('/'),
+    code: valueOf(all(sel.meetingHidden)[0]),
+    rect: rectOf(meetingHit.el), items: meetingItems,
+  }
+
+  const dateWrap = firstVisible(sel.dateWrap).el
+  const dateInput = firstVisible(sel.dateInput)
+  const nextHit = firstVisible(sel.dateNext)
+  const cells: BossCalendarCell[] = []
+  all(sel.dateCell).forEach((el, index) => {
+    if (!visible(el)) return
+    const rect = rectOf(el)
+    cells.push({ index, text: text(el), disabled: has(el, 'disabled'), today: has(el, 'today'), blank: has(el, 'blank'), rect, clip: clipOf(rect) })
+  })
+  const date = {
+    index: dateInput.index, value: valueOf(dateInput.el),
+    open: !!dateWrap && has(dateWrap, sel.dateOpen),
+    rect: rectOf(dateInput.el), month: text(firstVisible(sel.dateMonth).el),
+    nextIndex: nextHit.index, nextRect: nextHit.el ? rectOf(nextHit.el) : null, cells,
+  }
+
+  const timeContainer = firstVisible(sel.timeContainer).el
+  const timeInput = firstVisible(sel.timeInput)
+  const tabs = all(sel.timeTab).map((el, index) => ({ index, text: text(el), selected: has(el, sel.timeTabSelected), rect: rectOf(el) }))
+    .filter((tab) => tab.rect.w > 0 && tab.rect.h > 0)
+  const allItems = all(sel.timeItem)
+  const lists: BossTimeList[] = []
+  all(sel.timeList).forEach((el, index) => {
+    if (!visible(el)) return
+    const items: BossTimeItem[] = []
+    allItems.forEach((item, itemIndex) => {
+      if (!el.contains(item)) return
+      items.push({ index: itemIndex, text: text(item), selected: has(item, sel.timeItemSelected), rect: rectOf(item) })
+    })
+    lists.push({ index, rect: clipOf(rectOf(el)), scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, items })
+  })
+  const time = {
+    index: timeInput.index, value: valueOf(timeInput.el),
+    open: !!timeContainer && has(timeContainer, sel.timeOpen),
+    rect: rectOf(timeInput.el), tabs, lists,
+  }
+
+  const cancelHit = firstVisible(sel.cancel)
+  const sendHit = firstVisible(sel.send)
+  const sendEl = sendHit.el as (Element & { disabled?: unknown }) | undefined
+  const cancel = { found: !!cancelHit.el, index: cancelHit.index, rect: rectOf(cancelHit.el) }
+  const send = { found: !!sendEl, index: sendHit.index, disabled: !!sendEl && (sendEl.disabled === true || has(sendEl, 'disabled')), rect: rectOf(sendEl) }
+
+  const closers = all(sel.popupClose)
+  let popup = { found: false, closeIndex: -1, closeRect: zero }
+  const popupEl = all(sel.popup).find((el) => visible(el) && (el.textContent ?? '').includes(sel.popupText))
+  if (popupEl) {
+    const closeIndex = closers.findIndex((el) => popupEl.contains(el) && visible(el))
+    popup = { found: true, closeIndex, closeRect: rectOf(closeIndex >= 0 ? closers[closeIndex] : undefined) }
+  }
+  return {
+    modal, title, titleIndex: titleHit.index, titleRect: rectOf(titleHit.el),
+    radios, address, meeting, date, time, cancel, send, popup,
+    viewport: { w: window.innerWidth, h: window.innerHeight },
+  }
+}
+
+/**
+ * 发送前最后一道闸(与 domSendGate / domAcceptGate 同款,点击前的最后一次读):落点是「发送」键、模态仍在、
+ * 面试类型/平台/日期/时间逐字等于期望、选中行仍是目标会话——缺一不点。
+ */
+function domBossInterviewSendGate(
+  sel: InterviewSelectors,
+  expect: { radioText: string; meetingText: string | null; meetingCode: string | null; date: string; timeValue: string },
+  rowSelector: string, conversationRef: string, selectedClass: string,
+  x: number, y: number,
+): { onTarget: boolean; found: string } {
+  const visible = (el: Element): boolean => {
+    const r = el.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  }
+  const text = (el: Element): string => (el.textContent ?? '').replace(/\s+/gu, ' ').trim()
+  const valueOf = (el: Element | undefined): string => {
+    const raw = (el as { value?: unknown } | undefined)?.value
+    return typeof raw === 'string' ? raw.trim() : ''
+  }
+  const all = (selector: string): Element[] => Array.from(document.querySelectorAll(selector))
+  const problems: string[] = []
+  const modals = all(sel.modal).filter(visible)
+  if (modals.length !== 1) problems.push(`模态数 ${modals.length}`)
+  const send = all(sel.send).find(visible) as (Element & { disabled?: unknown }) | undefined
+  const at = document.elementFromPoint(x, y)
+  if (!send) problems.push('发送键不在')
+  else {
+    if (!at) problems.push('落点上什么都没有')
+    else if (!(at === send || send.contains(at))) problems.push(`落点上是别的元素 ${at.tagName.toLowerCase()}「${text(at).slice(0, 8)}」`)
+    if (send.disabled === true || send.classList.contains('disabled')) problems.push('发送键 disabled')
+  }
+  const checked = all(sel.radio).filter((el) => visible(el) && el.classList.contains(sel.radioChecked)).map(text)
+  if (!(checked.length === 1 && checked[0] === expect.radioText)) problems.push(`面试类型「${checked.join('/')}」≠「${expect.radioText}」`)
+  if (expect.meetingText !== null) {
+    const selected = all(sel.meetingItem).filter((el) => el.classList.contains(sel.meetingSelected)).map(text)
+    const code = valueOf(all(sel.meetingHidden)[0])
+    const byText = selected.length === 1 && selected[0]!.includes(expect.meetingText)
+    const byCode = expect.meetingCode !== null && code === expect.meetingCode
+    if (!byText && !byCode) problems.push(`面试平台「${selected.join('/')}」/码「${code}」不是「${expect.meetingText}」`)
+  }
+  const dateValue = valueOf(all(sel.dateInput).find(visible))
+  if (dateValue !== expect.date) problems.push(`日期「${dateValue}」≠「${expect.date}」`)
+  const timeValue = valueOf(all(sel.timeInput).find(visible))
+  if (timeValue !== expect.timeValue) problems.push(`时间「${timeValue}」≠「${expect.timeValue}」`)
+  const selectedRows = all(rowSelector).filter((el) => el.classList.contains(selectedClass))
+  if (!(selectedRows.length === 1 && selectedRows[0]!.getAttribute('data-id') === conversationRef)) {
+    problems.push(`选中行不是目标会话(选中 ${selectedRows.length} 行)`)
+  }
+  return problems.length === 0 ? { onTarget: true, found: '邀面发送键' } : { onTarget: false, found: problems.join(';') }
+}
+
+// ── 编排 ────────────────────────────────────────────────────────────────────────
+
+function isStopExecution(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as { name?: unknown }).name === 'StopExecution'
+}
+
+async function readInterviewModal(tabId: number): Promise<DomInterviewModal> {
+  return runInPage(BOSS_DOM, tabId, domReadBossInterviewModal, [INTERVIEW_SEL])
+}
+
+async function readInterviewButton(tabId: number) {
+  return runInPage(BOSS_DOM, tabId, domReadBossInterviewButton, [TOOLBAR_BUTTON_SELECTOR, INTERVIEW_BUTTON_INVITE, INTERVIEW_BUTTON_VIEW])
+}
+
+function describeInterviewModal(m: DomInterviewModal): string {
+  return `模态=${m.modal} 类型=${m.radios.filter((r) => r.checked).map((r) => r.text).join('/') || '无'}` +
+    ` 平台=${m.meeting.selected || '无'}/码${m.meeting.code || '空'} 日期=${m.date.value || '空'}${m.date.open ? '(开)' : ''}` +
+    ` 时间=${m.time.value || '空'}${m.time.open ? '(开)' : ''} 弹窗=${m.popup.found ? '有' : '无'}`
+}
+
+/** 模态里一个靶子的点击计划:命中测试按 selector 全序列下标 + 文本。 */
+function interviewClickPlan(
+  tabId: number, label: string, selector: string, index: number, expectText: string | null, rect: BossRect,
+): ClickPlan {
+  return {
+    label, rect,
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [selector, index, expectText, x, y]),
+    observe: async (): Promise<ClickObservation> =>
+      ({ trusted: null, onTarget: null, eventDriftPx: null, after: describeInterviewModal(await readInterviewModal(tabId)) }),
+  }
+}
+
+/**
+ * 收回模态:先点标题把开着的下拉/日历收掉(它们会盖住底部按钮),再点「取消」。零副作用;收不回只记日志——
+ * 下一次本原语开工时会先把残留模态取消掉再走。
+ */
+async function cancelBossInterviewModal(tabId: number, ctx: PrimitiveContext, why: string): Promise<void> {
+  try {
+    let modal = await readInterviewModal(tabId)
+    if (modal.modal === 0) return
+    if ((modal.time.open || modal.date.open || modal.meeting.open) && modal.titleIndex >= 0) {
+      await paceBeforeClick()
+      await osClickOnce(tabId, ctx,
+        interviewClickPlan(tabId, '邀面模态标题(收下拉)', INTERVIEW_SEL.title, modal.titleIndex, null, modal.titleRect), '点模态标题收下拉')
+      modal = (await pollUntil(ctx, () => readInterviewModal(tabId), (m) => !(m.time.open || m.date.open || m.meeting.open), INTERVIEW_DISMISS_WAIT_MS)).value
+    }
+    if (!modal.cancel.found) {
+      reportHandLog('warn', 'interviewInviteCancelFailed', `BOSS 邀面模态在但取消键认不出(${why})`)
+      return
+    }
+    await paceBeforeClick()
+    await osClickOnce(tabId, ctx, interviewClickPlan(tabId, '邀面取消键', INTERVIEW_SEL.cancel, modal.cancel.index, '取消', modal.cancel.rect), '点邀面取消键')
+    const gone = await pollUntil(ctx, () => readInterviewModal(tabId), (m) => m.modal === 0, INTERVIEW_DISMISS_WAIT_MS)
+    reportHandLog('warn', gone.satisfied ? 'interviewInviteCancelled' : 'interviewInviteCancelStuck',
+      `BOSS 邀面模态${gone.satisfied ? '已取消' : '点了取消仍在'}:${why}`)
+  } catch (error) {
+    if (isStopExecution(error)) throw error
+    reportHandLog('warn', 'interviewInviteCancelFailed', `BOSS 邀面模态未能取消(${why}):${describeError(error).slice(0, 200)}`)
+  }
+}
+
+
+/** 发送后的全屏成功对话框:正证读完后点它的关闭键;关不掉只记日志,不影响正证。 */
+async function dismissBossInterviewSuccessPopup(tabId: number, ctx: PrimitiveContext): Promise<void> {
+  try {
+    const modal = await readInterviewModal(tabId)
+    if (!modal.popup.found) return
+    if (modal.popup.closeIndex < 0) {
+      reportHandLog('warn', 'interviewSuccessPopupDismissFailed', 'BOSS 邀面成功弹窗在但关闭键认不出')
+      return
+    }
+    await paceBeforeClick()
+    await osClickOnce(tabId, ctx, {
+      label: '邀面成功弹窗关闭键',
+      rect: modal.popup.closeRect,
+      hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [INTERVIEW_SEL.popupClose, modal.popup.closeIndex, null, x, y]),
+      observe: async (): Promise<ClickObservation> =>
+        ({ trusted: null, onTarget: null, eventDriftPx: null, after: `弹窗=${(await readInterviewModal(tabId)).popup.found ? '仍在' : '已关'}` }),
+    }, '关邀面成功弹窗')
+    const gone = await pollUntil(ctx, () => readInterviewModal(tabId), (m) => !m.popup.found, INTERVIEW_DISMISS_WAIT_MS)
+    if (!gone.satisfied) reportHandLog('warn', 'interviewSuccessPopupStuck', 'BOSS 邀面成功弹窗点了关闭仍在,留给下次')
+  } catch (error) {
+    if (isStopExecution(error)) throw error
+    reportHandLog('warn', 'interviewSuccessPopupDismissFailed', `BOSS 邀面成功弹窗未能关闭:${describeError(error).slice(0, 200)}`)
+  }
+}
+
+// ── chat.sendInviteCard ──────────────────────────────────────────────────────
+
+async function sendBossInviteCard(
+  args: ChatSendInviteCardArgs, guards: ChatSendMessageGuards, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<ChatSendInviteCardData> {
+  // 「发送」之前的一切失败都是零副作用的干净失败,一律 afterRecovery 交脑下轮重铸(2026-09-04 甲方)。
+  if (validatePrimitiveArgs(PrimitiveName.ChatSendInviteCard, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '邀面卡参数不符合当前契约', 'afterRecovery')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
+  const parsed = parseBossConversationRef(args.conversationRef)
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'afterRecovery')
+  const planned = planBossInterviewForm(args.interview, Date.now())
+  if (planned.status !== 'ok') {
+    // 零点击干净失败:不取整、不改时间;detail 留实际值。
+    throw new PlatformError('GUARD_FAILED', `邀面参数不合本平台表单:${planned.detail}`, 'afterRecovery')
+  }
+  const plan = planned.plan
+  const contentHash = await sha256Hex('card\x1finterviewInvite')
+  const tab = await verifiedBossChatTab(fingerprint)
+  const tabId = tab.id!
+  await ensureBossSendTarget(tab, ctx, fingerprint, args.conversationRef)
+
+  // 世界状态核对:会话级 bothTalked、消息数组无出站邀面行、工具栏恰为「约面试」。
+  const wechat = await readBossWechatState(tab, parsed)
+  if (!wechat.bothTalked) {
+    throw new PlatformError('GUARD_FAILED', '双方尚未都说过话,平台不开放约面试(bothTalked=false)', 'afterRecovery')
+  }
+  const baseline = await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)
+  await observeBossExpectedTail(baseline.rows, guards, 'chat.sendInviteCard')
+  if (baseline.rows.some(isBossInterviewSentRow)) {
+    throw new PlatformError('GUARD_FAILED', '消息数组里已有我方发出的邀面卡,不再发', 'afterRecovery')
+  }
+  const baselineMids = new Set(baseline.rows.map((row) => row.mid))
+  // 上一趟的残留模态(取消没收回):先收掉,收不掉就本轮不动。
+  const stale = await readInterviewModal(tabId)
+  if (stale.modal > 0) {
+    await cancelBossInterviewModal(tabId, ctx, '开工时发现残留的邀面模态')
+    if ((await readInterviewModal(tabId)).modal > 0) {
+      throw new PlatformError('ELEMENT_UNRESOLVED', '页面上有残留的邀面模态且收不回,本轮不动', 'afterRecovery')
+    }
+  }
+  const button = await readInterviewButton(tabId)
+  if (!button.found) throw new PlatformError('ELEMENT_UNRESOLVED', `工具栏约面试钮认不出(命中 ${button.count} 个)`, 'afterRecovery')
+  if (button.kind === 'view') {
+    throw new PlatformError('GUARD_FAILED', '工具栏已是「查看面试」,该会话有过面试,不再发', 'afterRecovery')
+  }
+  if (button.disabled) throw new PlatformError('GUARD_FAILED', '约面试钮 disabled,本轮不发', 'afterRecovery')
+
+  const trace: string[] = [
+    `计划 ${plan.radioText}${plan.meetingText ? '/' + plan.meetingText : ''} ${plan.date} ${plan.timeValue}${plan.endSynthesized ? '(结束=开始+1h,只填表)' : ''}`,
+  ]
+  const sendExpect = { radioText: plan.radioText, meetingText: plan.meetingText, meetingCode: plan.meetingCode, date: plan.date, timeValue: plan.timeValue }
+
+  // 点一下、等到后置;不就绪即抛(外层 catch 负责收回模态)。
+  const clickAndSettle = async (
+    clickPlan: ClickPlan, what: string, done: (m: DomInterviewModal) => boolean,
+  ): Promise<DomInterviewModal> => {
+    ctx.checkpoint()
+    await paceBeforeClick()
+    await verifiedBossChatTab(fingerprint)
+    await osClickOnce(tabId, ctx, clickPlan, what)
+    const settled = await pollUntil(ctx, () => readInterviewModal(tabId), done)
+    if (!settled.satisfied) {
+      throw new PlatformError('ELEMENT_UNRESOLVED', `${what}后未就绪:${describeInterviewModal(settled.value)}`, 'afterRecovery')
+    }
+    return settled.value
+  }
+
+  // 第一步:点「约面试」。可逆——弹的是带「取消」的模态。
+  const openPlan: ClickPlan = {
+    label: '工具栏约面试钮',
+    rect: button.rect,
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestContains,
+      [TOOLBAR_BUTTON_SELECTOR, button.index, INTERVIEW_BUTTON_INVITE, INTERVIEW_BUTTON_VIEW, x, y]),
+    observe: async (): Promise<ClickObservation> =>
+      ({ trusted: null, onTarget: null, eventDriftPx: null, after: describeInterviewModal(await readInterviewModal(tabId)) }),
+  }
+  let modal = await clickAndSettle(openPlan, '点约面试', (m) => m.modal === 1 && m.radios.length === 2 && m.send.found)
+  trace.push('模态已开')
+  ctx.progress('邀面表单已打开', 20)
+
+  let sent = false
+  let dispatchedAt = 0
+  try {
+    // 面试类型:选中态只在 label 的 radio-checked 上(§五 坑);标题「线上/线下面试邀请」只作观测进 trace。
+    const radio = modal.radios.find((r) => r.text === plan.radioText)
+    if (!radio) throw new PlatformError('ELEMENT_UNRESOLVED', `面试类型 radio 认不出(${modal.radios.map((r) => r.text).join('/')})`, 'afterRecovery')
+    if (!radio.checked) {
+      modal = await clickAndSettle(
+        interviewClickPlan(tabId, `面试类型「${plan.radioText}」`, INTERVIEW_SEL.radio, radio.index, plan.radioText, radio.rect),
+        `点${plan.radioText}`, (m) => m.radios.some((r) => r.text === plan.radioText && r.checked))
+      trace.push(`类型=${plan.radioText}(标题「${modal.title}」)`)
+    }
+    if (plan.method === 'onsite') {
+      if (modal.address === null || modal.address === '') {
+        // 配置不完美一律降级不转人工:平台没配地址,本轮不发,响亮记日志,脑下轮重来(人在平台配一次地址即自愈)。
+        reportHandLog('warn', 'interviewAddressMissing', 'BOSS 邀面表单「面试地址」为空(平台未配地址),本轮零点击不发')
+        throw new PlatformError('GUARD_FAILED', '面试地址为空(平台未配地址),本轮不发', 'afterRecovery')
+      }
+      trace.push('地址已预填')
+    } else {
+      if (!modal.meeting.present) throw new PlatformError('ELEMENT_UNRESOLVED', '线上面试的「面试平台」下拉认不出', 'afterRecovery')
+      if (!bossMeetingChosen(modal, INTERVIEW_MEETING_WECHAT, INTERVIEW_MEETING_WECHAT_CODE)) {
+        if (!modal.meeting.open) {
+          modal = await clickAndSettle(
+            interviewClickPlan(tabId, '面试平台下拉', INTERVIEW_SEL.meeting, modal.meeting.index, null, modal.meeting.rect),
+            '点面试平台下拉',
+            (m) => m.meeting.open && m.meeting.items.some((i) => i.text.includes(INTERVIEW_MEETING_WECHAT) && i.rect.w > 0 && i.rect.h > 0))
+        }
+        const item = modal.meeting.items.find((i) => i.text.includes(INTERVIEW_MEETING_WECHAT) && i.rect.w > 0 && i.rect.h > 0)
+        if (!item) throw new PlatformError('ELEMENT_UNRESOLVED', `面试平台下拉里没有可见的「${INTERVIEW_MEETING_WECHAT}」`, 'afterRecovery')
+        modal = await clickAndSettle({
+          label: `面试平台「${INTERVIEW_MEETING_WECHAT}」`,
+          rect: item.rect,
+          hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestContains, [INTERVIEW_SEL.meetingItem, item.index, INTERVIEW_MEETING_WECHAT, '', x, y]),
+          observe: async (): Promise<ClickObservation> =>
+            ({ trusted: null, onTarget: null, eventDriftPx: null, after: describeInterviewModal(await readInterviewModal(tabId)) }),
+        }, `点${INTERVIEW_MEETING_WECHAT}`, (m) => bossMeetingChosen(m, INTERVIEW_MEETING_WECHAT, INTERVIEW_MEETING_WECHAT_CODE) && !m.meeting.open)
+      }
+      trace.push(`平台=${INTERVIEW_MEETING_WECHAT}`)
+    }
+    ctx.progress('面试类型已选', 35)
+
+    // 日期:readonly,只能点开日历选;所在月不是当月就 .next 一次(再远在换算阶段已拒)。
+    if (modal.date.value !== plan.date) {
+      if (!modal.date.open) {
+        modal = await clickAndSettle(
+          interviewClickPlan(tabId, '日期框', INTERVIEW_SEL.dateInput, modal.date.index, null, modal.date.rect),
+          '点日期框', (m) => m.date.open && m.date.cells.length > 0 && parseBossCalendarMonth(m.date.month) !== null)
+      }
+      const shown = parseBossCalendarMonth(modal.date.month)
+      if (!shown) throw new PlatformError('ELEMENT_UNRESOLVED', `日历月份认不出「${modal.date.month}」`, 'afterRecovery')
+      if (shown.year !== plan.year || shown.month !== plan.month) {
+        const offset = (plan.year - shown.year) * 12 + (plan.month - shown.month)
+        if (offset !== 1) {
+          throw new PlatformError('GUARD_FAILED', `日历当前 ${shown.year}-${pad2(shown.month)},目标 ${plan.year}-${pad2(plan.month)},只翻一页`, 'afterRecovery')
+        }
+        if (!modal.date.nextRect) throw new PlatformError('ELEMENT_UNRESOLVED', '日历翻页钮认不出', 'afterRecovery')
+        modal = await clickAndSettle(
+          interviewClickPlan(tabId, '日历下一月', INTERVIEW_SEL.dateNext, modal.date.nextIndex, null, modal.date.nextRect),
+          '点日历下一月', (m) => {
+            const p = parseBossCalendarMonth(m.date.month)
+            return !!p && p.year === plan.year && p.month === plan.month && m.date.cells.length > 0
+          })
+        trace.push('日历翻到下月')
+      }
+      const picked = pickBossCalendarCell(modal.date.cells, plan.day, plan.isToday)
+      if (!picked.cell) throw new PlatformError('ELEMENT_UNRESOLVED', `日历里 ${plan.day} 日的格认不出(命中 ${picked.count})`, 'afterRecovery')
+      if (picked.cell.clip.w < 16 || picked.cell.clip.h < 16) {
+        throw new PlatformError('ELEMENT_UNRESOLVED',
+          `日历 ${plan.day} 日的格在视口外(可见 ${Math.round(picked.cell.clip.w)}x${Math.round(picked.cell.clip.h)},视口高 ${modal.viewport.h})`, 'afterRecovery')
+      }
+      modal = await clickAndSettle(
+        interviewClickPlan(tabId, `日期格 ${picked.cell.text}`, INTERVIEW_SEL.dateCell, picked.cell.index, picked.cell.text, picked.cell.clip),
+        `点日期 ${plan.day}`, (m) => m.date.value === plan.date && !m.date.open)
+      trace.push(`日期=${plan.date}`)
+    }
+    ctx.progress('日期已选', 55)
+
+    // 时间:点开 → 「宽松时间」页签 → 开始列 → 结束列(重过滤后)。列表项不在可见区先滚 ul(滚轮注入生产首用)。
+    if (modal.time.value !== plan.timeValue) {
+      if (!modal.time.open) {
+        modal = await clickAndSettle(
+          interviewClickPlan(tabId, '时间框', INTERVIEW_SEL.timeInput, modal.time.index, null, modal.time.rect),
+          '点时间框', (m) => m.time.open && m.time.tabs.length >= 2)
+      }
+      const looseReady = (m: DomInterviewModal): boolean => m.time.open &&
+        m.time.tabs.some((t) => t.text === INTERVIEW_TIME_LOOSE && t.selected) &&
+        m.time.lists.length === 2 && m.time.lists[0]!.items.some((i) => /^\d{2}:\d{2}$/u.test(i.text))
+      if (!looseReady(modal)) {
+        const looseTab = modal.time.tabs.find((t) => t.text === INTERVIEW_TIME_LOOSE)
+        if (!looseTab) throw new PlatformError('ELEMENT_UNRESOLVED', `时间页签认不出(${modal.time.tabs.map((t) => t.text).join('/')})`, 'afterRecovery')
+        modal = await clickAndSettle(
+          interviewClickPlan(tabId, '宽松时间页签', INTERVIEW_SEL.timeTab, looseTab.index, INTERVIEW_TIME_LOOSE, looseTab.rect),
+          '点宽松时间', looseReady)
+        trace.push('页签=宽松时间')
+      }
+      const pickTimeItem = async (listPos: 0 | 1, text: string, what: string, done: (m: DomInterviewModal) => boolean): Promise<DomInterviewModal> => {
+        let current = modal
+        for (let attempt = 0; ; attempt += 1) {
+          const list = current.time.lists[listPos]
+          if (!list) throw new PlatformError('ELEMENT_UNRESOLVED', `时间列 ${listPos === 0 ? '开始' : '结束'}不在(可见列 ${current.time.lists.length})`, 'afterRecovery')
+          const item = list.items.find((i) => i.text === text)
+          if (!item) throw new PlatformError('ELEMENT_UNRESOLVED', `时间列里没有 ${text}(共 ${list.items.length} 项)`, 'afterRecovery')
+          const reach = planBossTimeItemReach(list, item, INTERVIEW_TIME_ITEM_MIN_VISIBLE_PX)
+          if (reach.status === 'visible') {
+            return clickAndSettle(interviewClickPlan(tabId, `时间项 ${text}`, INTERVIEW_SEL.timeItem, item.index, text, reach.rect), what, done)
+          }
+          if (reach.status === 'unreachable' || attempt >= INTERVIEW_SCROLL_ATTEMPTS) {
+            throw new PlatformError('ELEMENT_UNRESOLVED',
+              `时间项 ${text} 滚不到可见区(${reach.status === 'unreachable' ? reach.detail : `已滚 ${attempt} 次`})`, 'afterRecovery')
+          }
+          const target: ScrollTarget = {
+            label: `时间列 ${listPos === 0 ? '开始' : '结束'}`,
+            rect: list.rect,
+            hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestIndexed, [INTERVIEW_SEL.timeList, list.index, x, y]),
+            readMetrics: async () => {
+              const m = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [INTERVIEW_SEL.timeList, list.index])
+              return m.found ? { scrollTop: m.scrollTop, scrollHeight: m.scrollHeight, clientHeight: m.clientHeight } : null
+            },
+          }
+          ctx.checkpoint()
+          await paceBeforeClick()
+          const res = await runOsScroll(BOSS_INJECT, tabId, ctx, target, reach.direction, reach.distancePx)
+          trace.push(`滚时间列${reach.direction === 'down' ? '下' : '上'} ${reach.distancePx}px→${res.outcome}(${res.scrollTopBefore}→${res.scrollTopAfter})`)
+          if (res.outcome === 'handServiceUnavailable') {
+            throw new PlatformError('CTX_NOT_READY', `时间列滚动:手服务不可用(${res.detail ?? ''})`, 'afterRecovery', 'pageBroken')
+          }
+          if (res.outcome === 'refusedByGate' || res.outcome === 'stuck') {
+            throw new PlatformError('ELEMENT_UNRESOLVED', `时间列滚动失败(${res.outcome}):${(res.detail ?? '').slice(0, 200)}`, 'afterRecovery')
+          }
+          current = await readInterviewModal(tabId)
+        }
+      }
+      modal = await pickTimeItem(0, plan.startText, `点开始 ${plan.startText}`, (m) => m.time.open && m.time.lists.length === 2 &&
+        m.time.lists[0]!.items.some((i) => i.text === plan.startText && i.selected) &&
+        m.time.lists[1]!.items.length > 0 && m.time.lists[1]!.items[0]!.text === plan.firstEndText)
+      trace.push(`开始=${plan.startText}`)
+      modal = await pickTimeItem(1, plan.endText, `点结束 ${plan.endText}`, (m) => m.time.value === plan.timeValue && !m.time.open)
+      trace.push(`时间=${plan.timeValue}`)
+    }
+    ctx.progress('时间已选', 75)
+
+    // 最后一道闸(同一 evaluator 复核):六项逐字等于期望,缺一不点。
+    const final = await readInterviewModal(tabId)
+    const problems = bossInterviewFormMismatch(final, plan)
+    if (problems.length > 0) throw new PlatformError('GUARD_FAILED', `发送前复核不过:${problems.join(';')}`, 'afterRecovery')
+    const sendPlan: ClickPlan = {
+      label: '邀面发送钮',
+      rect: final.send.rect,
+      hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domBossInterviewSendGate,
+        [INTERVIEW_SEL, sendExpect, ROW_SELECTOR, args.conversationRef, ROW_SELECTED_CLASS, x, y]),
+      observe: async (): Promise<ClickObservation> =>
+        ({ trusted: null, onTarget: null, eventDriftPx: null, after: describeInterviewModal(await readInterviewModal(tabId)) }),
+    }
+    ctx.checkpoint()
+    await paceBeforeClick()
+    await verifiedBossChatTab(fingerprint)
+    if (Date.now() > ctx.irreversibleNotAfterMs) {
+      throw new PlatformError('CTX_LOST_DURING_EXEC', '不可逆动作窗口已过,未点发送', 'afterRecovery')
+    }
+    await ctx.beforeSideEffect()
+    dispatchedAt = Date.now()
+    const probe = await runOsProbe(BOSS_INJECT, tabId, ctx, sendPlan)
+    if (probe.outcome !== 'clicked') {
+      // 闸在按下之前拒:没点。收回模态,下轮重来。
+      throw new PlatformError(
+        probe.outcome === 'handServiceUnavailable' ? 'CTX_NOT_READY' : 'ELEMENT_UNRESOLVED',
+        `发送钮未点击:${probe.detail ?? probe.outcome}`, 'afterRecovery')
+    }
+    sent = true
+    trace.push(`点了发送 ${probe.detail ?? ''}`)
+  } catch (error) {
+    if (!sent && !isStopExecution(error)) await cancelBossInterviewModal(tabId, ctx, describeError(error).slice(0, 120))
+    throw error
+  }
+
+  // 正证(出口 §〇,或关系):新增出站 21130009 行、time 不早于派发(不看 status,卡片行恒 0);或工具栏变「查看面试」
+  // (此时 sourceKey 取窗口最新一条出站邀面行,读不到行继续等)。点击之后任何读取异常都只记 lastSeen,绝不以
+  // sideEffect=none 的错误出去——世界可能已被改动。
+  const deadline = Date.now() + READY_WAIT_MS
+  let lastSeen = ''
+  let hit: BossRawMessage | null = null
+  let viaToolbar = false
+  await sleep(500)
+  while (Date.now() < deadline && hit === null) {
+    ctx.checkpoint()
+    try {
+      const after = await runInPage(BOSS_INJECT, tabId, mainReadBossThread, [parsed.uid, parsed.friendSource])
+      if (after.status === 'ready') {
+        const fresh = after.rows.filter((row) => !baselineMids.has(row.mid) && isBossInterviewSentRow(row))
+        const inWindow = fresh.filter((row) => !(row.time !== null && row.time < dispatchedAt - SEND_CLOCK_TOLERANCE_MS))
+        lastSeen = `新行 ${after.rows.filter((row) => !baselineMids.has(row.mid)).length},出站邀面行 ${fresh.length},窗内 ${inWindow.length}`
+        if (inWindow.length >= 1) {
+          hit = latestBossRow(inWindow)
+          break
+        }
+        const toolbar = await readInterviewButton(tabId)
+        if (toolbar.found && toolbar.kind === 'view') {
+          if (fresh.length >= 1) {
+            hit = latestBossRow(fresh)
+            viaToolbar = true
+            break
+          }
+          lastSeen += ',工具栏已「查看面试」但无出站邀面行'
+        }
+      } else {
+        lastSeen = `消息列表 ${after.status}`
+      }
+    } catch (error) {
+      if (isStopExecution(error)) throw error
+      lastSeen = `读取异常 ${describeError(error).slice(0, 120)}`
+    }
+    await sleep(500)
+  }
+  // 清场:成功对话框「面试邀请已发出」锁着页面,关不掉只记日志。
+  await dismissBossInterviewSuccessPopup(tabId, ctx)
+  if (hit === null) {
+    throw new PlatformError('POSTCONDITION_UNCONFIRMED',
+      `只点击了一次发送,但未确认出站邀面行或工具栏「查看面试」(${lastSeen};${trace.join(' | ')})`,
+      'manualOnly', undefined, 'possible')
+  }
+  const data: ChatSendInviteCardData = {
+    conversationRef: args.conversationRef,
+    contentHash,
+    sourceKey: await bossSourceKey(hit.mid),
+    observedAt: Date.now(),
+    interview: args.interview,
+    ...(hit.time !== null && hit.time > 0 ? { tsApprox: hit.time } : {}),
+  }
+  if (validatePrimitiveData(PrimitiveName.ChatSendInviteCard, 1, data).length !== 0) {
+    throw new PlatformError('POSTCONDITION_UNCONFIRMED', '邀面卡结果不符合当前契约', 'manualOnly', undefined, 'possible')
+  }
+  try {
+    await verifiedBossChatTab(fingerprint)
+  } catch (error) {
+    if (isStopExecution(error)) throw error
+    throw new PlatformError('POSTCONDITION_UNCONFIRMED', `邀面卡已发出但账号页复核失败:${describeError(error).slice(0, 120)}`,
+      'manualOnly', undefined, 'possible')
+  }
+  ctx.progress(viaToolbar ? '工具栏已变「查看面试」,邀面卡已发出' : '已从当前消息列表确认邀面卡已发出', 100)
+  console.info('[RecruitHelper] boss_send_invite_card', trace.join(' | '))
+  return data
+}
+
 // ── chat.captureThreadScreenshot ────────────────────────────────────────────
 
 async function decodeFrame(dataUrl: string): Promise<ImageBitmap> {
@@ -3212,6 +4157,16 @@ export const bossTestHooks = Object.freeze({
   domReadBossAcceptButton,
   domAcceptGate,
   mainReadBossWechatState,
+  planBossInterviewForm,
+  parseBossCalendarMonth,
+  pickBossCalendarCell,
+  planBossTimeItemReach,
+  bossInterviewFormMismatch,
+  domReadBossInterviewButton,
+  domHitTestContains,
+  domReadBossInterviewModal,
+  domBossInterviewSendGate,
+  INTERVIEW_SEL,
   matchAnchorTail,
   summarizeBossListRow,
   newlinesToSpaces,
@@ -3251,6 +4206,8 @@ export const bossAdapter = {
   sendWechatInvite: ({ args, guards, ctx, fingerprint }) => sendBossWechatInvite(args, guards, ctx, fingerprint),
   acceptWechat: ({ args, guards, ctx, fingerprint }) => acceptBossWechat(args, guards, ctx, fingerprint),
   readWechatExchangeOutcome: ({ args, ctx, fingerprint }) => readBossWechatExchangeOutcome(args, ctx, fingerprint),
+  // 场景三的一条(2026-09-04 出口):邀面卡,表单驱动的多步 OS 点击。
+  sendInviteCard: ({ args, guards, ctx, fingerprint }) => sendBossInviteCard(args, guards, ctx, fingerprint),
   captureThreadScreenshot: ({ args, ctx, fingerprint }) => captureBossThreadScreenshot(args, ctx, fingerprint),
   // 建档后的简历补采(2026-09-03 甲方选 B):摘要级、零点击,见 readBossResume。
   readResume: ({ args, ctx, fingerprint }) => readBossResume(args, ctx, fingerprint),
