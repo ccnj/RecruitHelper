@@ -631,6 +631,8 @@ const batchFailureFriendlyLabels: Record<string, string> = {
   // 2026-09-02 甲方裁决:切职位失败按手报类别拆开提示,不再笼统写"找不到职位"。
   recommendPageNotReady: '智联推荐页加载超时(已自动重试 5 次),已停止工作;请稍后重新点击开始',
   positionSelectFailed: '智联推荐页的职位列表里找不到该职位或无法唯一确定,已停止工作;请核对智联上的职位名后重新点击开始',
+  // 2026-09-04 甲方裁决:筛选设置失败改判跳过类,同批补文案(条款要求"产品 UI 可见原因")。
+  filtersApplyFailed: '未能在智联推荐页设置好筛选条件(已自动重试),已跳过该职位;请稍后重新点击开始',
 }
 
 function batchFailureLabel(reason: string | undefined): string | null {
