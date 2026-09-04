@@ -16877,8 +16877,9 @@ test('考古定位的框架跳转 A >>> B:矩形加 iframe 偏移换算回顶层
   // iframe 在顶层 (168,40) 处,视口 1302x622;按钮在 iframe 视口坐标 (1122,90) 92x32 → 顶层 (1290,130)。
   const inner = el({ x: 1122, y: 90, w: 92, h: 32 }, '打招呼')
   const half = el({ x: 1122, y: 610, w: 92, h: 32 }, '半露')
-  const html = { tagName: 'HTML', className: '', textContent: '', parentElement: null, scrollTop: 0, scrollHeight: 2814, clientHeight: 622, getBoundingClientRect() { return rectOf({ x: 0, y: -300, w: 1302, h: 2814 }) } }
-  const scrolling = { scrollTop: 300, scrollHeight: 2814, clientHeight: 622 }
+  // html 的矩形只有视口那么高、滚过 300 后整个在视口上方——真机形态;定位要按 scrollingElement 合成。
+  const html = { tagName: 'HTML', className: '', textContent: '', parentElement: null, scrollTop: 0, scrollHeight: 2814, clientHeight: 622, getBoundingClientRect() { return rectOf({ x: 0, y: -300, w: 1302, h: 622 }) } }
+  const scrolling = { scrollTop: 300, scrollHeight: 2814, clientHeight: 622, clientWidth: 1302 }
   let innerAt = inner
   const innerDoc = { body: { tagName: 'BODY' }, documentElement: html, scrollingElement: scrolling, querySelectorAll(sel) { return sel === 'button.btn-greet' ? [inner] : sel === '.half' ? [half] : sel === 'html' ? [html] : [] }, elementFromPoint() { return innerAt } }
   html.ownerDocument = innerDoc
@@ -16909,6 +16910,10 @@ test('考古定位的框架跳转 A >>> B:矩形加 iframe 偏移换算回顶层
     assert.match(domHitTestExpected('iframe[name=recommendFrame] >>> button.btn-greet', 0, '打招呼', 1336, 146).found, /别的元素/, 'iframe 里落点上是别的元素')
     // 滚动指标:靶子是 iframe 的 html 时读 scrollingElement,不读 html.scrollTop(标准模式恒 0)。
     assert.deepEqual(domReadScrollMetrics('iframe[name=recommendFrame] >>> html', 0), { found: true, scrollTop: 300, scrollHeight: 2814, clientHeight: 622 })
+    const doc = domLocateBySelector('iframe[name=recommendFrame] >>> html', -1)
+    assert.equal(doc.status, 'ok', '滚过一屏后 html 自身矩形在视口上方,但按内容高度合成后仍可落')
+    assert.deepEqual(doc.rect, { x: 168, y: 40 - 300, w: 1302, h: 2814 })
+    assert.deepEqual(doc.clip, { x: 168, y: 40, w: 1302, h: 622 }, '可见部分就是整个 iframe 视口')
     assert.equal(domReadScrollMetrics('iframe.none >>> html', 0).found, false)
   } finally { globalThis.document = saved.document; globalThis.window = saved.window }
 })
