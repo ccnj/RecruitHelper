@@ -35,8 +35,9 @@ const V4InterviewDurationMs int64 = 30 * 60 * 1000
 // V4InterviewTimeGridMs 是两平台公共的邀面时间格(2026-09-02 甲方裁决,批 D 2.4):
 // 智联选择器是 5 分钟格(2026-07-28 真机),BOSS 宽松时间是 30 分钟格(2026-08-28 真机),
 // 取最粗公共格 30 分钟,两边都能表达。取整仍只在时间出生点做一次。
-// 当前 canonical 推荐时段恒为整点(m5ai.GenerateSlots 按小时生成),整点是 30 分钟格的
-// 子集,所以改格宽是零行为变化——它是将来放开时段策略时的保险,不是修当前故障。
+// canonical 推荐时段自 2026-09-04 起按 m5ai.InterviewSlotStepMinutes(30 分钟)生成,
+// 与本格同宽,取整恒为 no-op;它是将来把步长改细时的保险,不是修当前故障。步长必须是
+// 本格的整数倍,否则 AI 承诺的时刻会被静默推到下一格——v4_dialogue_test 钉着这条。
 const V4InterviewTimeGridMs int64 = 30 * 60 * 1000
 
 // roundUpToInterviewTimeGrid 把邀面开始时间向上取整到平台时间格。取整只允许
@@ -603,8 +604,8 @@ func planV4ReplyActions(
 		if !matched {
 			return nil, false
 		}
-		// 当前冻结时段恒为整点（槽位解析强制 Minute()==0），整点是 30 分钟公共格的
-		// 子集,本行为未来时段策略放开时的保险，今天恒为 no-op。
+		// 冻结时段按 m5ai.InterviewSlotStepMinutes 生成,与 30 分钟公共格同宽,
+		// 本行今天恒为 no-op;步长改细时它是保险(见 V4InterviewTimeGridMs 注释)。
 		startsAt = roundUpToInterviewTimeGrid(startsAt)
 		planned := V4PlannedAction{
 			ActionKey:           stableV4TurnActionKey(turn.TurnID, V4ActionInterviewInvite, 0),

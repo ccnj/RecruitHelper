@@ -190,8 +190,24 @@ var shanghai = func() *time.Location {
 	return location
 }()
 
-// InterviewWindow 是周表里的一段可面试窗口，起止都是 'HH:MM' 整点，右开区间。
-// 09:00-18:00 表示 09、10 … 17 九个整点，不含 18:00。
+// InterviewSlotStepMinutes 是推荐时段的步长(2026-09-04 甲方裁决,此前为整点):周表
+// 的起止时刻、展开出的候选时段、AI 命中的时刻都按这个格走。取 30 分钟是因为它是
+// 两平台公共的邀面时间格(communication.V4InterviewTimeGridMs):智联选择器是 5 分钟
+// 格,BOSS 宽松时间只有 30 分钟格,再细 BOSS 表单就选不出来。改它要连
+// slotStepWording 一起改;communication 另有一条"步长是平台格整数倍"的测试钉着,
+// 否则 AI 命中的时刻会被取整静默推到下一格。
+const InterviewSlotStepMinutes = 30
+
+// slotStepWording 是概览行尾对步长的口语描述,喂给回复模型;与
+// InterviewSlotStepMinutes 绑定,步长变了这句必须跟着变。措辞待会话重放确认
+// (2026-09-04 甲方:先按此,重放后定)。
+const slotStepWording = "的整点与半点"
+
+const minutesPerDay = 24 * 60
+
+// InterviewWindow 是周表里的一段可面试窗口,起止都是 'HH:MM' 且落在
+// InterviewSlotStepMinutes 的格上,右开区间。09:00-18:00 表示 09:00、09:30 … 17:30
+// 十八个时段,不含 18:00。
 type InterviewWindow struct {
 	Start string `json:"start"`
 	End   string `json:"end"`
@@ -229,7 +245,7 @@ func DefaultInterviewSchedule() InterviewSchedule {
 // ValidateInterviewSchedule 校验周表可用于展开。空表被拒——甲方裁决要求至少保留
 // 一个时段，且该校验必须由脑侧把关，不能只靠 UI。
 func ValidateInterviewSchedule(schedule InterviewSchedule) error {
-	hours := 0
+	minutes := 0
 	for day, windows := range schedule {
 		if _, ok := interviewWeekdayIndex(day); !ok {
 			return fmt.Errorf("非法星期: %q", day)
@@ -246,10 +262,10 @@ func ValidateInterviewSchedule(schedule InterviewSchedule) error {
 			if start >= end {
 				return fmt.Errorf("%s 起止非法: %s >= %s", day, window.Start, window.End)
 			}
-			hours += end - start
+			minutes += end - start
 		}
 	}
-	if hours == 0 {
+	if minutes == 0 {
 		return errors.New("可面试时段不得为空")
 	}
 	return nil
@@ -264,8 +280,9 @@ func interviewWeekdayIndex(day string) (int, bool) {
 	return 0, false
 }
 
-// parseInterviewClock 解析 'HH:MM' 并返回小时数。面试时段一律整点对齐——
-// 下游 MatchFrozenRecommendedMeetingTime 与槽位解析都假定 Minute()==0。
+// parseInterviewClock 解析 'HH:MM' 并返回当日分钟数。时刻必须落在
+// InterviewSlotStepMinutes 的格上——GenerateSlots 按同一步长展开,
+// decodeFrozenRecommendedTimeText 与 MatchFrozenRecommendedMeetingTime 也按它校验。
 func parseInterviewClock(value string) (int, error) {
 	if len(value) != 5 || value[2] != ':' {
 		return 0, fmt.Errorf("时间格式必须是 HH:MM: %q", value)
@@ -278,10 +295,13 @@ func parseInterviewClock(value string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("时间格式必须是 HH:MM: %q", value)
 	}
-	if hour < 0 || hour > 24 || minute != 0 {
-		return 0, fmt.Errorf("面试时间必须是整点小时: %q", value)
+	if hour < 0 || hour > 24 || minute < 0 || minute > 59 || (hour == 24 && minute != 0) {
+		return 0, fmt.Errorf("面试时间越界: %q", value)
 	}
-	return hour, nil
+	if minute%InterviewSlotStepMinutes != 0 {
+		return 0, fmt.Errorf("面试时间必须落在 %d 分钟格上: %q", InterviewSlotStepMinutes, value)
+	}
+	return hour*60 + minute, nil
 }
 
 // GenerateDefaultSlots 按内置默认周表展开，等价于 GenerateSlots(now,
@@ -290,8 +310,10 @@ func GenerateDefaultSlots(frozenNow time.Time) []string {
 	return GenerateSlots(frozenNow, DefaultInterviewSchedule())
 }
 
-// GenerateSlots 把周表展开成冻结时刻起 14 个日历日内的候选时段。当天早于冻结时刻
-// 的整点被丢弃；周表非法或全空时返回空列表，下游据此不承诺任何面试时间。
+// GenerateSlots 把周表展开成冻结时刻起 14 个日历日内的候选时段,步长
+// InterviewSlotStepMinutes。当天早于冻结时刻的时段被丢弃;周表非法或全空时返回空
+// 列表,下游据此不承诺任何面试时间。提前量只看"不早于冻结时刻",14:23 冻结可给
+// 14:30(2026-09-04 甲方裁决保持原样,不加最短提前量)。
 func GenerateSlots(frozenNow time.Time, schedule InterviewSchedule) []string {
 	now := frozenNow.In(shanghai)
 	startDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, shanghai)
@@ -299,7 +321,7 @@ func GenerateSlots(frozenNow time.Time, schedule InterviewSchedule) []string {
 	for offset := 0; offset <= 13; offset++ {
 		day := startDay.AddDate(0, 0, offset)
 		windows := schedule[interviewWeekdayByGoWeekday[day.Weekday()]]
-		hours := make(map[int]struct{}, len(windows)*4)
+		selected := make(map[int]struct{}, len(windows)*8)
 		for _, window := range windows {
 			start, err := parseInterviewClock(window.Start)
 			if err != nil {
@@ -309,16 +331,16 @@ func GenerateSlots(frozenNow time.Time, schedule InterviewSchedule) []string {
 			if err != nil || start >= end {
 				continue
 			}
-			for hour := start; hour < end && hour < 24; hour++ {
-				hours[hour] = struct{}{}
+			for minute := start; minute < end && minute < minutesPerDay; minute += InterviewSlotStepMinutes {
+				selected[minute] = struct{}{}
 			}
 		}
-		// 同一天的窗口允许重叠，展开后按整点去重并升序，保证时段列表本身有序去重。
-		for hour := 0; hour < 24; hour++ {
-			if _, selected := hours[hour]; !selected {
+		// 同一天的窗口允许重叠,展开后按格去重并升序,保证时段列表本身有序去重。
+		for minute := 0; minute < minutesPerDay; minute += InterviewSlotStepMinutes {
+			if _, ok := selected[minute]; !ok {
 				continue
 			}
-			slot := time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, shanghai)
+			slot := time.Date(day.Year(), day.Month(), day.Day(), minute/60, minute%60, 0, 0, shanghai)
 			if slot.Before(now) {
 				continue
 			}
@@ -330,16 +352,29 @@ func GenerateSlots(frozenNow time.Time, schedule InterviewSchedule) []string {
 
 var weekdays = [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
 
+// slotOnStep 判断一个候选时段是否落在步长格上——冻结载荷、命中比对与概览渲染
+// 共用这一个判据。整点是它的子集,2026-09-04 之前冻结的整点载荷照样通过,不需要迁移。
+func slotOnStep(slot time.Time) bool {
+	return slot.Minute()%InterviewSlotStepMinutes == 0 && slot.Second() == 0
+}
+
+func clockText(minuteOfDay int) string {
+	return fmt.Sprintf("%02d:%02d", minuteOfDay/60, minuteOfDay%60)
+}
+
+// slotsOverview 把候选时段按天压成"09:00-17:30、19:00 的整点与半点"这种区间写法:
+// 相邻(差一个步长)的时段合成一段,区间两端都是时段起点、闭区间;孤立时段单写。
+// 区间写法让提示词长度不随步长变细而膨胀。
 func slotsOverview(slots []string) (string, error) {
 	type daySlots struct {
-		day   time.Time
-		hours []int
+		day     time.Time
+		minutes []int
 	}
 	byDate := make(map[string]*daySlots)
 	var order []string
 	for _, raw := range slots {
 		dt, err := time.ParseInLocation("2006-01-02 15:04:05", raw, shanghai)
-		if err != nil || dt.Minute() != 0 || dt.Second() != 0 {
+		if err != nil || !slotOnStep(dt) {
 			return "", errors.New("invalidInterviewSlot")
 		}
 		key := dt.Format("2006-01-02")
@@ -349,34 +384,35 @@ func slotsOverview(slots []string) (string, error) {
 			byDate[key] = entry
 			order = append(order, key)
 		}
-		entry.hours = append(entry.hours, dt.Hour())
+		entry.minutes = append(entry.minutes, dt.Hour()*60+dt.Minute())
 	}
 	sort.Strings(order)
 	lines := make([]string, 0, len(order))
 	for _, key := range order {
 		entry := byDate[key]
-		sort.Ints(entry.hours)
-		unique := entry.hours[:0]
-		for _, hour := range entry.hours {
-			if len(unique) == 0 || unique[len(unique)-1] != hour {
-				unique = append(unique, hour)
+		sort.Ints(entry.minutes)
+		unique := entry.minutes[:0]
+		for _, minute := range entry.minutes {
+			if len(unique) == 0 || unique[len(unique)-1] != minute {
+				unique = append(unique, minute)
 			}
 		}
 		parts := make([]string, 0)
 		for startIndex := 0; startIndex < len(unique); {
 			endIndex := startIndex
-			for endIndex+1 < len(unique) && unique[endIndex+1] == unique[endIndex]+1 {
+			for endIndex+1 < len(unique) && unique[endIndex+1] == unique[endIndex]+InterviewSlotStepMinutes {
 				endIndex++
 			}
 			if endIndex == startIndex {
-				parts = append(parts, fmt.Sprintf("%02d:00", unique[startIndex]))
+				parts = append(parts, clockText(unique[startIndex]))
 			} else {
-				parts = append(parts, fmt.Sprintf("%02d:00-%02d:00", unique[startIndex], unique[endIndex]))
+				parts = append(parts, clockText(unique[startIndex])+"-"+clockText(unique[endIndex]))
 			}
 			startIndex = endIndex + 1
 		}
-		lines = append(lines, fmt.Sprintf("%d月%d日(%s) %s 的整点",
-			entry.day.Month(), entry.day.Day(), weekdays[entry.day.Weekday()], strings.Join(parts, "、")))
+		lines = append(lines, fmt.Sprintf("%d月%d日(%s) %s %s",
+			entry.day.Month(), entry.day.Day(), weekdays[entry.day.Weekday()],
+			strings.Join(parts, "、"), slotStepWording))
 	}
 	return strings.Join(lines, "\n"), nil
 }
@@ -452,8 +488,7 @@ func decodeFrozenRecommendedTimeText(raw string) (frozenRecommendedTimeText, err
 	}
 	for _, rawSlot := range frozen.Slots {
 		slot, err := time.ParseInLocation("2006-01-02 15:04:05", rawSlot, shanghai)
-		if err != nil || slot.Format("2006-01-02 15:04:05") != rawSlot ||
-			slot.Minute() != 0 || slot.Second() != 0 {
+		if err != nil || slot.Format("2006-01-02 15:04:05") != rawSlot || !slotOnStep(slot) {
 			return frozenRecommendedTimeText{}, errors.New("invalidFrozenRecommendedTimeText")
 		}
 	}
@@ -503,8 +538,7 @@ func MatchFrozenRecommendedMeetingTime(slots []string, raw string) (int64, bool)
 	matches := 0
 	for _, rawSlot := range slots {
 		slot, err := time.ParseInLocation("2006-01-02 15:04:05", rawSlot, shanghai)
-		if err != nil || slot.Format("2006-01-02 15:04:05") != rawSlot ||
-			slot.Minute() != 0 || slot.Second() != 0 {
+		if err != nil || slot.Format("2006-01-02 15:04:05") != rawSlot || !slotOnStep(slot) {
 			return 0, false
 		}
 		// 比时刻而不是比拼法：写法差异不得冒充语义越界，语义仍须逐字段精确命中。
