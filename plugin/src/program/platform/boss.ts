@@ -1642,7 +1642,9 @@ function domLocateBySelector(selector: string, index: number): DomLocated {
   }
   const text = (el.textContent ?? '').trim()
   const signature = `${parts.join('<')}[${Math.round(r.width)}x${Math.round(r.height)}]「${text.slice(0, 8)}」`
-  if (!(clip.w >= 24 && clip.h >= 24)) {
+  // 考古探针的落点余量:16px。BOSS 邀面表单的 radio 标签(20px 高)与时间页签(22px)都比 24 小,
+  // 而落点抖动只有几个像素、标定就绪时偏 0(2026-09-04 真机);生产原语各自的计划另有判据,不走这里。
+  if (!(clip.w >= 16 && clip.h >= 16)) {
     return { status: 'offscreen', count: all.length, detail: `${signature} 可见部分只有 ${Math.round(clip.w)}x${Math.round(clip.h)},光标没处落` }
   }
   return { status: 'ok', count: all.length, index: i, rect: { x: r.x, y: r.y, w: r.width, h: r.height }, clip, text, signature }
