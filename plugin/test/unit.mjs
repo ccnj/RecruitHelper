@@ -16869,6 +16869,50 @@ test('考古定位:selector 命中不唯一且没给 index 即拒,越界即拒,�
   } finally { globalThis.document = saved.document; globalThis.window = saved.window }
 })
 
+test('考古定位的框架跳转 A >>> B:矩形加 iframe 偏移换算回顶层视口、可见部分裁到 iframe 视口;命中测试先问顶层再进 iframe;文档自身滚动读 scrollingElement', () => {
+  const rectOf = (r) => ({ x: r.x, y: r.y, width: r.w, height: r.h, left: r.x, top: r.y, right: r.x + r.w, bottom: r.y + r.h })
+  const el = (rect, text = '', cls = 'btn btn-greet') => ({ tagName: 'BUTTON', className: cls, textContent: text, parentElement: null, getBoundingClientRect() { return rectOf(rect) }, contains(x) { return x === this } })
+  const saved = { document: globalThis.document, window: globalThis.window }
+  globalThis.window = { innerWidth: 1470, innerHeight: 662 }
+  // iframe 在顶层 (168,40) 处,视口 1302x622;按钮在 iframe 视口坐标 (1122,90) 92x32 → 顶层 (1290,130)。
+  const inner = el({ x: 1122, y: 90, w: 92, h: 32 }, '打招呼')
+  const half = el({ x: 1122, y: 610, w: 92, h: 32 }, '半露')
+  const html = { tagName: 'HTML', className: '', textContent: '', parentElement: null, scrollTop: 0, scrollHeight: 2814, clientHeight: 622, getBoundingClientRect() { return rectOf({ x: 0, y: -300, w: 1302, h: 2814 }) } }
+  const scrolling = { scrollTop: 300, scrollHeight: 2814, clientHeight: 622 }
+  let innerAt = inner
+  const innerDoc = { body: { tagName: 'BODY' }, documentElement: html, scrollingElement: scrolling, querySelectorAll(sel) { return sel === 'button.btn-greet' ? [inner] : sel === '.half' ? [half] : sel === 'html' ? [html] : [] }, elementFromPoint() { return innerAt } }
+  html.ownerDocument = innerDoc
+  const frame = { tagName: 'IFRAME', className: '', contentDocument: innerDoc, clientLeft: 0, clientTop: 0, clientWidth: 1302, clientHeight: 622, getBoundingClientRect() { return rectOf({ x: 168, y: 40, w: 1302, h: 622 }) } }
+  const crossOrigin = { tagName: 'IFRAME', contentDocument: null, getBoundingClientRect() { return rectOf({ x: 0, y: 0, w: 10, h: 10 }) } }
+  let topAt = frame
+  globalThis.document = { body: {}, querySelector(sel) { return sel === 'iframe[name=recommendFrame]' ? frame : sel === 'iframe.cross' ? crossOrigin : null }, querySelectorAll() { return [] }, elementFromPoint() { return topAt } }
+  try {
+    const { domLocateBySelector, domReadScrollMetrics, domHitTestExpected, domHitTestIndexed } = bossTestHooks
+    const ok = domLocateBySelector('iframe[name=recommendFrame] >>> button.btn-greet', -1)
+    assert.equal(ok.status, 'ok', ok.detail)
+    assert.deepEqual(ok.rect, { x: 1290, y: 130, w: 92, h: 32 }, '矩形换算到顶层视口')
+    assert.deepEqual(ok.clip, { x: 1290, y: 130, w: 92, h: 32 })
+    assert.equal(ok.text, '打招呼')
+    const clipped = domLocateBySelector('iframe[name=recommendFrame] >>> .half', -1)
+    assert.equal(clipped.status, 'offscreen', '按钮下沿超出 iframe 视口(40+622=662),只露 12px 就拒——不能按顶层视口算')
+    assert.equal(domLocateBySelector('iframe.none >>> button', -1).status, 'none')
+    assert.equal(domLocateBySelector('iframe.cross >>> button', -1).status, 'none', '不同源读不到文档也是 none')
+    assert.equal(domLocateBySelector('a >>> b >>> c', -1).status, 'bad_selector', '只支持一层')
+    // 命中测试:先问顶层像素上是不是那个 iframe,再减偏移进 iframe 问。
+    assert.equal(domHitTestExpected('iframe[name=recommendFrame] >>> button.btn-greet', 0, '打招呼', 1336, 146).onTarget, true)
+    topAt = { tagName: 'DIV', textContent: '快捷聊天窗', className: 'chat-global-outer-wrap', parentElement: null, getBoundingClientRect() { return rectOf({ x: 900, y: 100, w: 500, h: 500 }) } }
+    const covered = domHitTestExpected('iframe[name=recommendFrame] >>> button.btn-greet', 0, '打招呼', 1336, 146)
+    assert.equal(covered.onTarget, false); assert.match(covered.found, /顶层的别的元素/, '顶层浮层盖住 iframe 时在顶层就拒')
+    const coveredIdx = domHitTestIndexed('iframe[name=recommendFrame] >>> button.btn-greet', 0, 1336, 146)
+    assert.equal(coveredIdx.onTarget, false); assert.match(coveredIdx.found, /遮挡物\(顶层\)/, '滚轮探针把顶层遮挡物签名带出去')
+    topAt = frame; innerAt = half
+    assert.match(domHitTestExpected('iframe[name=recommendFrame] >>> button.btn-greet', 0, '打招呼', 1336, 146).found, /别的元素/, 'iframe 里落点上是别的元素')
+    // 滚动指标:靶子是 iframe 的 html 时读 scrollingElement,不读 html.scrollTop(标准模式恒 0)。
+    assert.deepEqual(domReadScrollMetrics('iframe[name=recommendFrame] >>> html', 0), { found: true, scrollTop: 300, scrollHeight: 2814, clientHeight: 622 })
+    assert.equal(domReadScrollMetrics('iframe.none >>> html', 0).found, false)
+  } finally { globalThis.document = saved.document; globalThis.window = saved.window }
+})
+
 test('只落不点:action=land 走完靠近、落点确认与命中测试就停,收场 landed、一次都不按', async () => {
   const hand = osClickHarness({ calibrated: true })
   try {

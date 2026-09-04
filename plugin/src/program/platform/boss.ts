@@ -966,9 +966,42 @@ function domHitTestIndexed(
     const r = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : { width: 0, height: 0 }
     return `${parts.join('<')}[${Math.round(r.width)}x${Math.round(r.height)}]「${(node.textContent ?? '').trim().slice(0, 8)}」`
   }
-  const target = Array.from(document.querySelectorAll(selector))[index]
-  const at = document.elementFromPoint(x, y)
-  if (!target) return { onTarget: false, found: '靶子已经不在原来的位置上' }
+  // `A >>> B` 框架跳转,与 domLocateBySelector 同一约定(那里有说明);遮挡物可能在顶层
+  // (盖在 iframe 上的浮层)也可能在 iframe 里,两层各问一次,签名都带出去。
+  const hop = selector.split('>>>')
+  let root: Document | null = document
+  let inner = selector
+  let frame: Element | null = null
+  let offX = 0
+  let offY = 0
+  if (hop.length === 2) {
+    inner = hop[1].trim()
+    try {
+      frame = document.querySelector(hop[0].trim())
+    } catch {
+      frame = null
+    }
+    root = frame && 'contentDocument' in frame ? (frame as HTMLIFrameElement).contentDocument : null
+    if (frame) {
+      const fr = frame.getBoundingClientRect()
+      offX = fr.left + frame.clientLeft
+      offY = fr.top + frame.clientTop
+    }
+  } else if (hop.length > 2) {
+    root = null
+  }
+  let target: Element | undefined
+  try {
+    target = root ? Array.from(root.querySelectorAll(inner))[index] : undefined
+  } catch {
+    target = undefined
+  }
+  if (!target || !root) return { onTarget: false, found: '靶子已经不在原来的位置上' }
+  if (frame) {
+    const topAt = document.elementFromPoint(x, y)
+    if (topAt !== frame) return { onTarget: false, found: topAt ? `遮挡物(顶层) ${signature(topAt)}` : '落点上什么都没有' }
+  }
+  const at = root.elementFromPoint(x - offX, y - offY)
   if (!at) return { onTarget: false, found: '落点上什么都没有' }
   const onTarget = at === target || target.contains(at)
   // 不命中时把遮挡物的签名带出去(类名链、尺寸、文本头几个字):它是清场白名单的唯一数据来源。
@@ -1637,11 +1670,43 @@ type DomLocated =
 /**
  * 按 selector(+index)定位一个元素。index<0 表示"没给":命中不唯一即拒,不猜第一个。
  * 返回它的整矩形与**可见部分**矩形(与视口相交);可见部分太小算 offscreen,光标没处落。
+ *
+ * **框架跳转 `A >>> B`**:A 是顶层文档里的同源 iframe,B 在它的文档里定位,只支持一层。
+ * 矩形一律换算回顶层视口坐标(加 iframe 的位置与边框),可见部分同时裁到 iframe 视口与顶层视口——
+ * 光标最终落在屏幕上,而屏幕只认顶层坐标。BOSS 推荐页整张列表画在 `iframe[name=recommendFrame]`
+ * 里,顶层 `querySelectorAll` 看不见它(2026-09-04 真机)。下面四个页面函数各自内联这段解析:
+ * 它们经 executeScript 序列化注入,引用不到模块里的共享函数。
  */
 function domLocateBySelector(selector: string, index: number): DomLocated {
+  const hop = selector.split('>>>')
+  if (hop.length > 2) return { status: 'bad_selector', count: 0, detail: '>>> 只支持一层 iframe' }
+  let root: Document = document
+  let inner = selector
+  let offX = 0
+  let offY = 0
+  let view = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
+  if (hop.length === 2) {
+    inner = hop[1].trim()
+    let frame: Element | null
+    try {
+      frame = document.querySelector(hop[0].trim())
+    } catch (error) {
+      return { status: 'bad_selector', count: 0, detail: `iframe 选择器无效:${String(error).slice(0, 120)}` }
+    }
+    const doc = frame && 'contentDocument' in frame ? (frame as HTMLIFrameElement).contentDocument : null
+    if (!frame || !doc) return { status: 'none', count: 0, detail: 'iframe 没命中,或不同源、读不到它的文档' }
+    const fr = frame.getBoundingClientRect()
+    offX = fr.left + frame.clientLeft
+    offY = fr.top + frame.clientTop
+    view = {
+      left: Math.max(0, offX), top: Math.max(0, offY),
+      right: Math.min(window.innerWidth, offX + frame.clientWidth), bottom: Math.min(window.innerHeight, offY + frame.clientHeight),
+    }
+    root = doc
+  }
   let all: Element[]
   try {
-    all = Array.from(document.querySelectorAll(selector))
+    all = Array.from(root.querySelectorAll(inner))
   } catch (error) {
     return { status: 'bad_selector', count: 0, detail: `选择器无效:${String(error).slice(0, 120)}` }
   }
@@ -1652,15 +1717,16 @@ function domLocateBySelector(selector: string, index: number): DomLocated {
   const i = index < 0 ? 0 : index
   const el = all[i]
   if (!el) return { status: 'out_of_range', count: all.length, detail: `index ${i} 越界,只命中 ${all.length} 个` }
-  const r = el.getBoundingClientRect()
-  const left = Math.max(0, r.left)
-  const top = Math.max(0, r.top)
-  const right = Math.min(window.innerWidth, r.right)
-  const bottom = Math.min(window.innerHeight, r.bottom)
+  const r0 = el.getBoundingClientRect()
+  const r = { x: r0.x + offX, y: r0.y + offY, width: r0.width, height: r0.height, left: r0.left + offX, top: r0.top + offY, right: r0.right + offX, bottom: r0.bottom + offY }
+  const left = Math.max(view.left, r.left)
+  const top = Math.max(view.top, r.top)
+  const right = Math.min(view.right, r.right)
+  const bottom = Math.min(view.bottom, r.bottom)
   const clip = { x: left, y: top, w: Math.max(0, right - left), h: Math.max(0, bottom - top) }
   const parts: string[] = []
   let cursor: Element | null = el
-  for (let depth = 0; cursor && cursor !== document.body && depth < 4; depth += 1) {
+  for (let depth = 0; cursor && cursor !== root.body && depth < 4; depth += 1) {
     const cls = typeof cursor.className === 'string' ? cursor.className.trim().split(/\s+/u).slice(0, 2).join('.') : ''
     parts.push(cursor.tagName.toLowerCase() + (cls ? '.' + cls : ''))
     cursor = cursor.parentElement
@@ -1675,34 +1741,84 @@ function domLocateBySelector(selector: string, index: number): DomLocated {
   return { status: 'ok', count: all.length, index: i, rect: { x: r.x, y: r.y, w: r.width, h: r.height }, clip, text, signature }
 }
 
-/** 容器的滚动指标。找不到就 found=false,不抛。 */
+/** 容器的滚动指标。找不到就 found=false,不抛。selector 同样接受 `A >>> B` 框架跳转。 */
 function domReadScrollMetrics(selector: string, index: number): { found: boolean; scrollTop: number; scrollHeight: number; clientHeight: number } {
+  const hop = selector.split('>>>')
+  let root: Document | null = document
+  let inner = selector
+  if (hop.length === 2) {
+    inner = hop[1].trim()
+    let frame: Element | null = null
+    try {
+      frame = document.querySelector(hop[0].trim())
+    } catch {
+      frame = null
+    }
+    root = frame && 'contentDocument' in frame ? (frame as HTMLIFrameElement).contentDocument : null
+  } else if (hop.length > 2) {
+    root = null
+  }
   let el: Element | undefined
   try {
-    el = Array.from(document.querySelectorAll(selector))[index]
+    el = root ? Array.from(root.querySelectorAll(inner))[index] : undefined
   } catch {
     el = undefined
   }
   if (!el) return { found: false, scrollTop: 0, scrollHeight: 0, clientHeight: 0 }
-  return { found: true, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }
+  // 整个文档在滚(靶子是 html 或 body)时读 scrollingElement:标准模式下 body.scrollTop 恒为 0,
+  // 读它会把真滚了的页面报成 stuck。BOSS 推荐列表就是 iframe 文档自己在滚(2026-09-04 真机)。
+  const doc = el.ownerDocument
+  const scroller = doc && (el === doc.documentElement || el === doc.body) && doc.scrollingElement ? doc.scrollingElement : el
+  return { found: true, scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight }
 }
 
 /**
  * 考古点击的命中测试:落点上是 selector[index] 或其后代,**且**给了 expectText 时元素此刻的
  * 文本仍逐字相等——这是点击前的最后一次读。列表重排后同一个 index 可能指到另一行,
  * 只看 index 会点错人;文本是那一行的身份。
+ * 带 `A >>> B` 时先问顶层"这个像素上是不是那个 iframe"——顶层的浮层(快捷聊天窗、弹窗)会盖在
+ * iframe 上,顶层 elementFromPoint 只会回答 iframe 本身,盖没盖要在顶层问;再把坐标减去 iframe
+ * 偏移进它的文档问第二次。
  */
 function domHitTestExpected(
   selector: string, index: number, expectText: string | null, x: number, y: number,
 ): { onTarget: boolean; found: string } {
+  const hop = selector.split('>>>')
+  let root: Document | null = document
+  let inner = selector
+  let frame: Element | null = null
+  let offX = 0
+  let offY = 0
+  if (hop.length === 2) {
+    inner = hop[1].trim()
+    try {
+      frame = document.querySelector(hop[0].trim())
+    } catch {
+      frame = null
+    }
+    root = frame && 'contentDocument' in frame ? (frame as HTMLIFrameElement).contentDocument : null
+    if (frame) {
+      const fr = frame.getBoundingClientRect()
+      offX = fr.left + frame.clientLeft
+      offY = fr.top + frame.clientTop
+    }
+  } else if (hop.length > 2) {
+    root = null
+  }
   let target: Element | undefined
   try {
-    target = Array.from(document.querySelectorAll(selector))[index]
+    target = root ? Array.from(root.querySelectorAll(inner))[index] : undefined
   } catch {
     target = undefined
   }
-  const at = document.elementFromPoint(x, y)
-  if (!target) return { onTarget: false, found: '靶子已经不在原来的位置上' }
+  if (!target || !root) return { onTarget: false, found: '靶子已经不在原来的位置上' }
+  if (frame) {
+    const topAt = document.elementFromPoint(x, y)
+    if (topAt !== frame) {
+      return { onTarget: false, found: `落点上是顶层的别的元素 ${topAt ? topAt.tagName.toLowerCase() + '「' + (topAt.textContent ?? '').trim().slice(0, 8) + '」' : '(空)'}` }
+    }
+  }
+  const at = root.elementFromPoint(x - offX, y - offY)
   if (!at) return { onTarget: false, found: '落点上什么都没有' }
   if (!(at === target || target.contains(at))) {
     return { onTarget: false, found: `落点上是别的元素 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 8)}」` }

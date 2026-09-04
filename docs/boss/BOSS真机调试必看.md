@@ -53,6 +53,8 @@ http://127.0.0.1:17872/admin/osclick
 ```
 `mode` 为 `move` 只落不点；`click` 至多按一次。`index` 不给时命中不唯一就拒，不猜第一个；`expectText` 给了就与元素文本（去首尾空白）逐字相等才动，点前最后一次命中测试再核一遍。
 
+靶子在同源 iframe 里时,selector 写 `iframe选择器 >>> 内层选择器`(只支持一层),两条探针都认;推荐页整张列表画在 `iframe[name=recommendFrame]` 里,例如 `iframe[name=recommendFrame] >>> button.btn-greet`,滚它的文档本身用 `iframe[name=recommendFrame] >>> html`(2026-09-04)。
+
 **osScroll：把容器朝一个方向滚指定像素，每簇回读 scrollTop。**
 ```bash
 curl -s -X POST -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' -d \
