@@ -3146,6 +3146,8 @@
   display: grid;
   gap: 3px;
   min-width: 460px;
+  /* 压在末缝上的 21:00 有半个字高探出网格,留白免得被滚动容器裁掉。 */
+  padding-bottom: 8px;
   /* 拖选时不要选中文本，否则整片格子会被高亮成蓝色 */
   user-select: none;
 }
@@ -3166,14 +3168,41 @@
   color: var(--rh-copy);
 }
 
+/* 时间标签压在行与行的缝上(2026-09-04 甲方要求):08:00 在首格上缘、21:00 在末格
+   下缘,格子本身不写字,每格一眼就是"两条线之间那半小时"。行高由格子撑,标签列
+   不占高度;span 上移半个自身高度再加半个 gap,正好落在缝的正中。 */
 .rh-schedule-clock {
   justify-content: flex-end;
+  align-items: flex-start;
+  min-height: 0;
   padding-right: 8px;
   font-variant-numeric: tabular-nums;
 }
 
+.rh-schedule-clock > span {
+  display: block;
+  line-height: 1;
+  transform: translateY(calc(-50% - 1.5px));
+}
+
+.rh-schedule-clock.is-half {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.rh-schedule-clock.is-end,
+.rh-schedule-cell-end {
+  height: 0;
+  min-height: 0;
+}
+
+/* 表头角落的字靠上,免得和压在首缝上的 08:00 挤在一起。 */
+.rh-schedule-corner {
+  align-items: flex-start;
+}
+
 .rh-schedule-cell {
-  min-height: 26px;
+  min-height: 18px;
   border: 1px solid var(--rh-border);
   border-radius: var(--rh-radius-sm);
   background: var(--rh-canvas);
