@@ -16279,17 +16279,49 @@ test('BOSS 日历:月份头「2026年 九月」解析;目标格按数字挑,今�
   assert.equal(pickBossCalendarCell([...cells, cell(8, '5')], 5, false).count, 2, '两格同文不猜')
 })
 
-test('BOSS 时间列:项在可见区就点可见部分(半截露 20px 即可),不在就朝列表正中滚;滚过头回滚;到边无处可滚如实说', () => {
+test('BOSS 时间列:项在可见区就点可见部分(半截露 20px 即可),不在就瞄合格区近侧边界+40px 滚;过头修正量 <100px 只走一格;到边无处可滚如实说', () => {
   const { planBossTimeItemReach } = bossTestHooks
   const list = { rect: { x: 100, y: 300, w: 107, h: 196 }, scrollTop: 0, scrollHeight: 1100, clientHeight: 196 }
   const item = (i, scrollTop = 0) => ({ rect: { x: 100, y: 300 + i * 44 - scrollTop, w: 107, h: 44 } })
   assert.deepEqual(planBossTimeItemReach(list, item(0), 20), { status: 'visible', rect: { x: 100, y: 300, w: 107, h: 44 } })
   assert.deepEqual(planBossTimeItemReach(list, item(4), 20), { status: 'visible', rect: { x: 100, y: 476, w: 107, h: 20 } }, '第 5 项露 20px,点可见部分')
-  assert.deepEqual(planBossTimeItemReach(list, item(10), 20), { status: 'scroll', direction: 'down', distancePx: 364 }, '目标滚到正中:440-(196-44)/2')
-  assert.deepEqual(planBossTimeItemReach({ ...list, scrollTop: 500 }, item(10, 500), 20), { status: 'scroll', direction: 'up', distancePx: 136 }, '滚过头就回滚')
+  // 第 11 项(itemTop 440):合格区 [264,464],瞄 264+40。
+  assert.deepEqual(planBossTimeItemReach(list, item(10), 20), { status: 'scroll', direction: 'down', distancePx: 304 }, '瞄近侧边界+40,不瞄正中')
+  assert.deepEqual(planBossTimeItemReach({ ...list, scrollTop: 500 }, item(10, 500), 20), { status: 'scroll', direction: 'up', distancePx: 76 }, '过头 36px:修正量 <100 只走一格,不振荡')
+  assert.deepEqual(planBossTimeItemReach({ ...list, scrollTop: 480 }, item(10, 480), 20), { status: 'scroll', direction: 'up', distancePx: 56 },
+    '瞄正中时的经典振荡起点(480):现在只回 56px,一格 120 落到 360 仍在合格区')
+  assert.equal(planBossTimeItemReach({ ...list, scrollTop: 360 }, item(10, 360), 20).status, 'visible')
   assert.equal(planBossTimeItemReach({ ...list, scrollTop: 904 }, item(24, 904), 20).status, 'visible', '到底后最后一项在可见区')
-  assert.deepEqual(planBossTimeItemReach(list, item(24), 20), { status: 'scroll', direction: 'down', distancePx: 904 }, '想滚 980 只能到 904:按 maxTop 夹')
+  assert.deepEqual(planBossTimeItemReach(list, item(24), 20), { status: 'scroll', direction: 'down', distancePx: 904 }, '想瞄 920 只能到 904:按 maxTop 夹')
   assert.equal(planBossTimeItemReach({ ...list, scrollHeight: 196 }, { rect: { x: 100, y: 900, w: 107, h: 44 } }, 20).status, 'unreachable')
+  assert.match(planBossTimeItemReach(list, { rect: { x: 900, y: 300, w: 107, h: 44 } }, 20).detail, /横向不相交/, '纵向已在合格区却不可见:滚动解决不了,不瞎滚')
+  // Mac 120px/格全程模拟:runOsScroll 每次调用起手按 100px/格估 ceil(d/100) 格(≤3 格时恰取该数,4~8 格随机取 3~cap),
+  // 对 25 个开始项各从 scrollTop=0 出发,最坏情况(每簇取 cap 格)也在 3 次内到可见区。
+  const NOTCH = 120
+  for (let i = 0; i < 25; i += 1) {
+    let scrollTop = 0
+    let attempts = 0
+    let reach = planBossTimeItemReach({ ...list, scrollTop }, item(i, scrollTop), 20)
+    while (reach.status === 'scroll') {
+      attempts += 1
+      assert.ok(attempts <= 3, `第 ${i} 项 ${attempts} 次仍未到:scrollTop=${scrollTop}`)
+      let remaining = reach.distancePx
+      let pxPerNotch = 100
+      let moved = 0
+      while (remaining > 0) {
+        const ticks = Math.min(8, Math.max(1, Math.ceil(remaining / pxPerNotch)))
+        const step = ticks * NOTCH * (reach.direction === 'down' ? 1 : -1)
+        const next = Math.min(904, Math.max(0, scrollTop + step))
+        moved += Math.abs(next - scrollTop)
+        if (next === scrollTop) break
+        scrollTop = next
+        pxPerNotch = NOTCH
+        remaining = reach.distancePx - moved
+      }
+      reach = planBossTimeItemReach({ ...list, scrollTop }, item(i, scrollTop), 20)
+    }
+    assert.equal(reach.status, 'visible', `第 ${i} 项最终应可见(scrollTop=${scrollTop})`)
+  }
 })
 
 test('BOSS 邀面发送前复核:模态/类型/平台/日期/时间/发送键六项逐字对,缺一列出;线下不看平台', () => {

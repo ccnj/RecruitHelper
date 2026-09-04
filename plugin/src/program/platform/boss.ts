@@ -3009,6 +3009,8 @@ const INTERVIEW_END_MAX = 21 * 60
 const INTERVIEW_MIN_DURATION = 60
 /** 时间列 li 高 44px、一屏 4 项半(平台事实 §十五):可见部分至少这么多才落光标。 */
 const INTERVIEW_TIME_ITEM_MIN_VISIBLE_PX = 20
+/** 滚动瞄准点:合格区近侧边界再进这么多。见 planBossTimeItemReach 的说明。 */
+const INTERVIEW_TIME_ITEM_AIM_MARGIN_PX = 40
 const INTERVIEW_SCROLL_ATTEMPTS = 5
 /** 收回模态 / 关成功弹窗的等待封顶:一次点击后页面一帧就该变,给 5 秒是宽裕。 */
 const INTERVIEW_DISMISS_WAIT_MS = 5_000
@@ -3200,13 +3202,18 @@ export interface BossTimeList {
 }
 
 /**
- * 时间项在不在列表可见区里;不在就算要朝哪滚多少。目标是把项滚到列表正中——滚轮一格 40~120px,
- * 列表 196px 高、项 44px,正中留的余量两边各 76px,过头一格再回滚一格即可收敛(出口 §2.2)。
+ * 时间项在不在列表可见区里;不在就算要朝哪滚多少。
+ *
+ * **瞄合格区的近侧边界再进 40px,不瞄正中。** "露出 ≥20px"对应的 scrollTop 合格区宽 200px(项 44 + 列表 196
+ * − 2×20),滚轮一格 100~120px:瞄近侧边界时任何一格过头都还落在合格区内;瞄正中时两侧余量只有 76px,Mac
+ * 120px/格的过头修正量(100~140px)恰落在 runOsScroll 每次调用起手按 100px/格估算的"两格 240px"档,会来回
+ * 振荡到封顶(2026-09-04 出口审查记录级第 3 条)。过头进不了合格区时修正量 <100px 只走一格,至多两三次收敛。
  */
 export function planBossTimeItemReach(
   list: Pick<BossTimeList, 'rect' | 'scrollTop' | 'scrollHeight' | 'clientHeight'>,
   item: Pick<BossTimeItem, 'rect'>,
   minVisiblePx: number,
+  aimMarginPx = INTERVIEW_TIME_ITEM_AIM_MARGIN_PX,
 ): { status: 'visible'; rect: BossRect } | { status: 'scroll'; direction: 'up' | 'down'; distancePx: number } | { status: 'unreachable'; detail: string } {
   const left = Math.max(item.rect.x, list.rect.x)
   const top = Math.max(item.rect.y, list.rect.y)
@@ -3217,7 +3224,14 @@ export function planBossTimeItemReach(
   }
   const maxTop = Math.max(0, list.scrollHeight - list.clientHeight)
   const itemTop = item.rect.y - list.rect.y + list.scrollTop
-  const wanted = Math.min(maxTop, Math.max(0, itemTop - (list.clientHeight - item.rect.h) / 2))
+  // scrollTop 的合格区:[itemTop + m − clientHeight, itemTop + h − m]。
+  const lo = itemTop + minVisiblePx - list.clientHeight
+  const hi = itemTop + item.rect.h - minVisiblePx
+  if (list.scrollTop >= lo && list.scrollTop <= hi) {
+    return { status: 'unreachable', detail: `项在纵向合格区内却不可见(横向不相交?scrollTop ${Math.round(list.scrollTop)}),滚动解决不了` }
+  }
+  const clamp = (value: number): number => Math.min(maxTop, Math.max(0, value))
+  const wanted = list.scrollTop < lo ? clamp(Math.min(hi, lo + aimMarginPx)) : clamp(Math.max(lo, hi - aimMarginPx))
   const delta = wanted - list.scrollTop
   if (Math.abs(delta) < 1) {
     return { status: 'unreachable', detail: `项不在列表可见区内,而 scrollTop 已在 ${Math.round(list.scrollTop)}/${Math.round(maxTop)},无处可滚` }
@@ -3559,7 +3573,11 @@ async function cancelBossInterviewModal(tabId: number, ctx: PrimitiveContext, wh
 }
 
 
-/** 发送后的全屏成功对话框:正证读完后点它的关闭键;关不掉只记日志,不影响正证。 */
+/**
+ * 发送后的全屏成功对话框:正证读完后点它的关闭键;关不掉只记日志,不影响正证。它不在 BOSS_DISMISS_WHITELIST 里
+ * (那份名单只收营销位与引导,容器选择器认不出它),关不掉页面就锁着,此后每次 OS 点击都会被命中测试干净拒到
+ * 真人关掉为止——真机 §十六 一点就掉,先不为它加机制。
+ */
 async function dismissBossInterviewSuccessPopup(tabId: number, ctx: PrimitiveContext): Promise<void> {
   try {
     const modal = await readInterviewModal(tabId)
@@ -3577,7 +3595,7 @@ async function dismissBossInterviewSuccessPopup(tabId: number, ctx: PrimitiveCon
         ({ trusted: null, onTarget: null, eventDriftPx: null, after: `弹窗=${(await readInterviewModal(tabId)).popup.found ? '仍在' : '已关'}` }),
     }, '关邀面成功弹窗')
     const gone = await pollUntil(ctx, () => readInterviewModal(tabId), (m) => !m.popup.found, INTERVIEW_DISMISS_WAIT_MS)
-    if (!gone.satisfied) reportHandLog('warn', 'interviewSuccessPopupStuck', 'BOSS 邀面成功弹窗点了关闭仍在,留给下次')
+    if (!gone.satisfied) reportHandLog('warn', 'interviewSuccessPopupStuck', 'BOSS 邀面成功弹窗点了关闭仍在,页面锁着,要真人关掉')
   } catch (error) {
     if (isStopExecution(error)) throw error
     reportHandLog('warn', 'interviewSuccessPopupDismissFailed', `BOSS 邀面成功弹窗未能关闭:${describeError(error).slice(0, 200)}`)
@@ -3817,8 +3835,16 @@ async function sendBossInviteCard(
       rect: final.send.rect,
       hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domBossInterviewSendGate,
         [INTERVIEW_SEL, sendExpect, ROW_SELECTOR, args.conversationRef, ROW_SELECTED_CLASS, x, y]),
-      observe: async (): Promise<ClickObservation> =>
-        ({ trusted: null, onTarget: null, eventDriftPx: null, after: describeInterviewModal(await readInterviewModal(tabId)) }),
+      observe: async (): Promise<ClickObservation> => {
+        // 「发送」已按下才会走到这里:页面这一秒里被登出/跳转读不到,也不能让错误带着 sideEffect=none 从
+        // runOsProbe 抛出去(脑会按 §8.4 重铸)——只记观测,正证循环去判。
+        try {
+          return { trusted: null, onTarget: null, eventDriftPx: null, after: describeInterviewModal(await readInterviewModal(tabId)) }
+        } catch (error) {
+          if (isStopExecution(error)) throw error
+          return { trusted: null, onTarget: null, eventDriftPx: null, after: `点后读取失败:${describeError(error).slice(0, 120)}` }
+        }
+      },
     }
     ctx.checkpoint()
     await paceBeforeClick()
@@ -3880,7 +3906,7 @@ async function sendBossInviteCard(
     }
     await sleep(500)
   }
-  // 清场:成功对话框「面试邀请已发出」锁着页面,关不掉只记日志。
+  // 清场:成功对话框「面试邀请已发出」锁着页面,关不掉只记日志(见 dismissBossInterviewSuccessPopup 说明)。
   await dismissBossInterviewSuccessPopup(tabId, ctx)
   if (hit === null) {
     throw new PlatformError('POSTCONDITION_UNCONFIRMED',
