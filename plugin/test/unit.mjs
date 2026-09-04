@@ -15949,7 +15949,7 @@ test('全文档观察器只给能读登录态的站点装:BOSS 上一个都不�
   }
 })
 
-test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话原语,其余显式拒绝', () => {
+test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话原语加场景二三条换微信原语,其余显式拒绝', () => {
   assert.equal(bossAdapter.id, 'boss')
   assert.equal(bossAdapter.hostMatch, bossSite.match, '适配器与站点表必须是同一个"BOSS 是谁"')
   // MAIN 是 2026-08-28 取数通道裁决的直接后果:isolated world 拿不到 user$ 与消息数组。
@@ -15964,19 +15964,21 @@ test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话
     .sort()
   // **这张名单只在过了出口之后才准变长。** 三条探针(2026-08-28/08-30/09-01 各自出口)之后,
   // 2026-09-03 甲方批准场景一出口,加了七条会话原语——恰好是「仅回复一轮闭环」要的那七条。
-  // 换微信、邀面卡、采集、招呼一条都没有:场景二、三与第二刀各自另过出口。
+  // 2026-09-04 甲方批准场景二出口,加了换微信线三条(sendWechatInvite/acceptWechat/readWechatExchangeOutcome)。
+  // 邀面卡、采集、招呼一条都没有:场景三与第二刀各自另过出口。
   assert.deepEqual(declared, [
-    'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
+    'acceptWechat', 'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
     'osClick', 'osProbe', 'osScroll', 'osType', 'probePlatform',
-    'readList', 'readResume', 'readThread', 'readUnreadTotal', 'sendMessage',
-  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B,建档后补采是场景一的硬前置;osScroll/osClick:2026-09-03 滚轮/点击探针战役出口)')
+    'readList', 'readResume', 'readThread', 'readUnreadTotal', 'readWechatExchangeOutcome',
+    'sendMessage', 'sendWechatInvite',
+  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口)')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'sendGreeting'), /未实现原语能力/)
-  assert.throws(() => requireCapability(bossAdapter, 'sendWechatInvite'), /未实现原语能力/)
+  assert.throws(() => requireCapability(bossAdapter, 'sendInviteCard'), /未实现原语能力/, '邀面卡是场景三,尚未过出口')
 })
 
-test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表恰为平台无关四条加探针五条加场景一七条', async () => {
+test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表恰为平台无关四条加探针五条加场景一七条加场景二三条', async () => {
   // 原语的 capability 字段是与 handler 内 callPlatform 字面量并行的第二份声明;
   // 这两条断言把它钉住:漏填一条,BOSS 表会多出一条(第二条红);填错名字,
   // 智联表会少一条(第一条红)。
@@ -16002,8 +16004,9 @@ test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表�
       '智联表应等于并集减 BOSS 专属三条')
     assert.deepEqual(tables[1].caps, [
       'candidate.readResume@1',
-      'chat.captureThreadScreenshot@1', 'chat.identifyCurrentConversation@1', 'chat.openConversation@1',
-      'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.sendMessage@1',
+      'chat.acceptWechat@1', 'chat.captureThreadScreenshot@1', 'chat.identifyCurrentConversation@1', 'chat.openConversation@1',
+      'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.readWechatExchangeOutcome@1',
+      'chat.sendMessage@1', 'chat.sendWechatInvite@1',
       'debug.osClick@1', 'debug.osProbe@1', 'debug.osScroll@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
       'debug.slowEcho@1', 'debug.switchWindow@1', 'probe.platform@1',
     ], 'BOSS 表变了:要么适配器长了能力(先过出口),要么某条原语漏填 capability')
@@ -16083,13 +16086,24 @@ test('BOSS 侧栏角标文本:空是 0、数字照读、99+ 向多算', () => {
 
 test('BOSS 消息投影:只实现真机已见的 bizType,未见值归并 system 并带出原始类型', async () => {
   const { projectBossMessage } = bossTestHooks
-  const base = { mid: '4123', direction: 'in', type: 'text', bizType: 101, bodyType: 1, status: 1, time: 1788402198000, text: ' 你好   世界 ', interviewCondition: null, actionAid: null }
+  const base = { mid: '4123', direction: 'in', type: 'text', bizType: 101, bodyType: 1, status: 1, time: 1788402198000, text: ' 你好   世界 ', interviewCondition: null, actionAid: null, templateId: 1, dialogOperated: null, dialogAids: [] }
   const text = projectBossMessage(base)
   assert.deepEqual([text.kind, text.direction, text.text, text.hashInput], ['text', 'in', '你好 世界', '你好 世界'])
   const noBiz = projectBossMessage({ ...base, bizType: null })
   assert.equal(noBiz.kind, 'text', '早期普通文本没有 bizType 字段(平台事实 §二)')
   const wx = projectBossMessage({ ...base, bizType: 12, direction: 'in', text: '某人的微信号:abc' })
-  assert.equal(wx.kind, 'text')
+  assert.equal(wx.kind, 'text', 'bizType 12 的普通文本(templateId 1)仍是文本')
+  // 换微信线(平台事实 §十四):微信号消息 templateId=5 投 accepted 卡且正文不带号码;对方请求 dialog 投 pending,答过仍 pending。
+  const wxNumber = projectBossMessage({ ...base, bizType: 12, bodyType: 1, templateId: 5, direction: 'in', text: '某人的微信号:&lt;copy&gt;abc123&lt;/copy&gt;' })
+  assert.deepEqual([wxNumber.kind, wxNumber.cardType, wxNumber.cardState, wxNumber.text, wxNumber.hashInput],
+    ['card', 'wechatExchange', 'accepted', '[微信交换成功]', 'card\x1fwechatExchange'], '微信号不得进 text')
+  const wxAsk = projectBossMessage({ ...base, bizType: 12, bodyType: 7, type: 'dialog', direction: 'in', text: '我想要和您交换微信，您是否同意', dialogOperated: false, dialogAids: [33, 34] })
+  assert.deepEqual([wxAsk.kind, wxAsk.cardType, wxAsk.cardState, wxAsk.text, wxAsk.hashInput],
+    ['card', 'wechatExchange', 'pending', '[交换微信请求]', 'card\x1fwechatExchange'])
+  const wxAsked = projectBossMessage({ ...base, bizType: 12, bodyType: 7, type: 'dialog', direction: 'in', text: '我想要和您交换微信，您是否同意', dialogOperated: true, dialogAids: [33, 34] })
+  assert.equal(wxAsked.cardState, 'pending', '答过的请求卡仍投 pending(出口 §四 第 2 条:完成态由微信号消息表达,Exchanged 只触发一次)')
+  const otherAsk = projectBossMessage({ ...base, bizType: 12, bodyType: 7, type: 'dialog', direction: 'in', text: '别的请求', dialogOperated: false, dialogAids: [41, 42] })
+  assert.equal(otherAsk.kind, 'text', '不带 aid 33 的 dialog 不是换微信请求,按既有文本路径走')
   const recalled = projectBossMessage({ ...base, status: 3, text: '' })
   assert.deepEqual([recalled.kind, recalled.text], ['system', '[消息已撤回]'])
   for (const [bizType, condition, state, direction] of [[21130009, 1, 'pending', 'out'], [21130008, 3, 'accepted', 'in'], [21130006, 5, 'expired', 'out'], [21130009, 4, 'unknown', 'out']]) {
@@ -16112,6 +16126,81 @@ test('BOSS 消息投影:只实现真机已见的 bizType,未见值归并 system 
   const unseen = projectBossMessage({ ...base, bizType: 99999999, bodyType: 1, text: '像文本但类型没见过' })
   assert.equal(unseen.kind, 'system', '枚举面事实门:未见值不得实现成文本')
   assert.match(unseen.unrecognized, /bizType=99999999/)
+})
+
+test('BOSS 换微信线纯函数:待答请求筛选与结果行选取(带锚恰一条、无锚取最新、零/多都不猜)', () => {
+  const { pendingBossWechatRequests, selectBossExchangeResult } = bossTestHooks
+  const row = (mid, over) => ({ mid, direction: 'in', type: 'text', bizType: 12, bodyType: 1, status: 2, time: null, text: '', interviewCondition: null, actionAid: null, templateId: 1, dialogOperated: null, dialogAids: [], ...over })
+  const ask = (mid, operated) => row(mid, { bodyType: 7, type: 'dialog', dialogOperated: operated, dialogAids: [33, 34] })
+  const num = (mid) => row(mid, { templateId: 5 })
+  const text = (mid) => row(mid, { bizType: 101 })
+  assert.deepEqual(pendingBossWechatRequests([text('1'), ask('2', false), ask('3', true), num('4')]).map((r) => r.mid), ['2'])
+  assert.deepEqual(pendingBossWechatRequests([ask('2', false), { ...ask('5', false), direction: 'out' }]).map((r) => r.mid), ['2'], '出站 dialog 不算对方请求')
+  // 带锚:锚后、下一条请求卡前恰一条
+  assert.equal(selectBossExchangeResult([ask('10', true), text('11'), num('12')], '10').row.mid, '12')
+  assert.equal(selectBossExchangeResult([ask('10', true), text('11')], '10').status, 'none')
+  assert.equal(selectBossExchangeResult([ask('10', true), num('11'), num('12')], '10').status, 'many')
+  assert.equal(selectBossExchangeResult([ask('10', true), ask('11', false), num('12')], '10').status, 'none', '下一条请求卡之后的结果不归前一个锚')
+  assert.equal(selectBossExchangeResult([num('12')], '10').status, 'anchor_missing')
+  assert.equal(selectBossExchangeResult([text('10'), num('12')], '10').status, 'anchor_missing', '锚不是请求卡也算缺失')
+  // 无锚:最新一条
+  assert.equal(selectBossExchangeResult([num('3'), text('4'), num('5')], null).row.mid, '5')
+  assert.equal(selectBossExchangeResult([text('4')], null).status, 'none')
+  assert.equal(selectBossExchangeResult([num('9'), num('3')], null).row.mid, '9', '按 mid 数值排序取最新,不按数组顺序')
+})
+
+test('BOSS 接受前最后一道闸:只认换微信请求卡里的「同意」,附件简历请求卡的同意键不算;落点、可用、卡文案、选中行四者缺一不点', () => {
+  const { domReadBossAcceptButton, domAcceptGate } = bossTestHooks
+  const mkBtn = (text, cardText, disabled = false, w = 111) => {
+    const card = { textContent: `${cardText} 拒绝 ${text}` }
+    const btn = {
+      tagName: 'SPAN', textContent: text,
+      classList: { contains(c) { return c === 'disabled' && disabled } },
+      getBoundingClientRect() { return { x: 700, y: 500, width: w, height: 34, left: 700, top: 500, right: 700 + w, bottom: 534 } },
+      closest(sel) { return sel === '.message-item' ? card : null },
+      contains(node) { return node === btn },
+    }
+    return btn
+  }
+  const resumeAgree = mkBtn('同意', '对方请求发送附件简历')
+  const wxAgree = mkBtn('同意', '我想要和您交换微信，您是否同意')
+  const wxRefuse = mkBtn('拒绝', '我想要和您交换微信，您是否同意')
+  const rows = [
+    { getAttribute() { return '11-0' }, classList: { contains(c) { return c === 'selected' } } },
+    { getAttribute() { return '12-0' }, classList: { contains() { return false } } },
+  ]
+  const saved = globalThis.document
+  const savedWindow = globalThis.window
+  const install = (buttons, overrides = {}) => {
+    globalThis.document = {
+      querySelectorAll(selector) { return selector === '.message-card-buttons .card-btn' ? buttons : selector === '.geek-item' ? (overrides.rows ?? rows) : [] },
+      elementFromPoint() { return overrides.at === undefined ? wxAgree : overrides.at },
+    }
+    globalThis.window = { innerWidth: 1470, innerHeight: 800 }
+  }
+  try {
+    install([resumeAgree, wxRefuse, wxAgree])
+    const read = domReadBossAcceptButton('.message-card-buttons .card-btn', '.message-item', '交换微信')
+    assert.deepEqual([read.found, read.count, read.index, read.clipOk], [true, 1, 2, true], '简历请求卡的同意键不算,换微信卡的才算')
+    install([resumeAgree, wxRefuse, mkBtn('同意', '我想要和您交换微信，您是否同意', true)])
+    assert.deepEqual(domReadBossAcceptButton('.message-card-buttons .card-btn', '.message-item', '交换微信').count, 0, '已 disabled 的不算')
+    install([resumeAgree, wxAgree, mkBtn('同意', '交换微信(第二张)')])
+    assert.equal(domReadBossAcceptButton('.message-card-buttons .card-btn', '.message-item', '交换微信').found, false, '两张换微信卡都可用时不猜')
+
+    const gate = (buttons, index, overrides) => {
+      install(buttons, overrides)
+      return domAcceptGate('.message-card-buttons .card-btn', index, 1, 1, '.message-item', '交换微信', '.geek-item', '11-0', 'selected')
+    }
+    assert.equal(gate([resumeAgree, wxRefuse, wxAgree], 2).onTarget, true)
+    assert.match(gate([resumeAgree, wxRefuse, wxAgree], 0, { at: resumeAgree }).found, /不是换微信请求卡/, '落到简历请求卡的同意键上不点')
+    assert.match(gate([resumeAgree, wxRefuse, wxAgree], 2, { at: wxRefuse }).found, /别的元素/, '落点偏到拒绝键上不点')
+    assert.match(gate([resumeAgree, wxRefuse, wxAgree], 1).found, /文案已变/, 'index 指到拒绝键不点')
+    assert.match(gate([resumeAgree, wxRefuse, wxAgree], 2, { rows: [rows[1]] }).found, /选中行不是目标会话/, '真人切走会话后不点')
+    assert.match(gate([resumeAgree, wxRefuse], 2).found, /不在原来的位置/, '卡片重排后 index 落空不点')
+  } finally {
+    globalThis.document = saved
+    globalThis.window = savedWindow
+  }
 })
 
 test('BOSS 锚尾匹配:唯一命中才给起点,零命中与重复命中都不裁', () => {
