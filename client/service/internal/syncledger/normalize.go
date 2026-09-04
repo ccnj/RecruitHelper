@@ -110,6 +110,23 @@ func InterviewInviteContentHash(startsAtMs, endsAtMs int64, method string) strin
 		strconv.FormatInt(startsAtMs, 10) + "\x1f" + ends + "\x1f" + method)
 }
 
+// InterviewInviteNeutralContentHash 是 interview 缺席的邀面卡的常量投影
+// (《协议规格-v1》§4.5,2026-09-04 落地 09-02 底稿 1.2):平台不在卡上提供邀面
+// 参数(BOSS,平台事实 §四)时手侧只能投这个常量,与 wechatExchange 常量投影同款。
+func InterviewInviteNeutralContentHash() string {
+	return hashCanonical("card\x1finterviewInvite")
+}
+
+// InterviewInviteContentHashAccepted 判一个观察到的邀面卡 hash 是否属于本次
+// 意图:等于按意图参数算的配方(卡上带参数的平台),或等于无参数常量投影(卡上
+// 不带参数的平台)。两者之外一律不认——它是结果校验、验证器与账本收编共用的
+// 同一把尺,三处必须同口径,否则又是"卡发出去了却永远配不上正证"。
+func InterviewInviteContentHashAccepted(observed string, startsAtMs, endsAtMs int64, method string) bool {
+	return observed != "" &&
+		(observed == InterviewInviteContentHash(startsAtMs, endsAtMs, method) ||
+			observed == InterviewInviteNeutralContentHash())
+}
+
 // OptionalEndsAt 把契约的值语义 endsAt 折回缺席语义。契约里 endsAt 是
 // optional 且 minimum=1,所以 0 只可能是"这次没有结束时间"(现场面试),
 // 不是一个合法时刻;直接取地址会把缺席写成 0 落进账本。

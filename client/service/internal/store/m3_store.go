@@ -7,6 +7,8 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+
+	"recruithelper/client/service/internal/textcanon"
 )
 
 var (
@@ -1028,11 +1030,11 @@ func (s *Store) ConsumeVerificationChild(parentRef, childLogicalID string) error
 }
 
 type VerifiedEffectSuccess struct {
-	Ref              string
-	ConversationKey  ConversationKey
-	Text             string
-	ContentHash      string
-	ObservedAtMs     int64
+	Ref             string
+	ConversationKey ConversationKey
+	Text            string
+	ContentHash     string
+	ObservedAtMs    int64
 	// PlatformTsMs 语义同 EffectResultMutation.PlatformTsMs:只可来自
 	// 验证读命中消息自带的 tsApprox,缺失保持 nil。
 	PlatformTsMs *int64
@@ -1162,7 +1164,7 @@ func (s *Store) ResolveCardVerified(req VerifiedCardSuccess) (*Message, error) {
 		if intent.Platform != req.ConversationKey.Platform ||
 			intent.AccountRef != req.ConversationKey.AccountRef ||
 			intent.TargetRef != req.ConversationKey.ConversationRef ||
-			intent.SendFingerprint != req.Card.ContentHash {
+			!cardContentHashMatchesIntent(&intent, req.Card.ContentHash) {
 			return ErrEffectIntentConflict
 		}
 		message, err := applyCardResultTx(tx, &intent, req.Card, req.At)
@@ -1515,6 +1517,22 @@ func appendOutboundMessageTx(
 	return message, nil
 }
 
+// interviewInviteNeutralContentHash 与 syncledger.InterviewInviteNeutralContentHash
+// 同配方(《协议规格-v1》§4.5 interview 缺席款);store 不 import syncledger,故本地算。
+func interviewInviteNeutralContentHash() string {
+	return textcanon.Hash("card\x1finterviewInvite")
+}
+
+// cardContentHashMatchesIntent:卡片结果/验证观察到的 hash 是否属于该意图。
+// 意图指纹是按参数算的配方;卡上不带参数的平台(BOSS)观察到的是常量投影,
+// 2026-09-04 落地 09-02 底稿 1.2 后两者都算本次。换微信卡不变。
+func cardContentHashMatchesIntent(intent *EffectIntent, observed string) bool {
+	if intent.SendFingerprint == observed {
+		return true
+	}
+	return intent.Primitive == primitiveChatSendInviteCard && observed == interviewInviteNeutralContentHash()
+}
+
 func applyCardResultTx(
 	tx *gorm.DB,
 	intent *EffectIntent,
@@ -1526,7 +1544,7 @@ func applyCardResultTx(
 	}
 	if !validMessageSourceKey(card.ContentHash) || !validMessageSourceKey(card.SourceKey) ||
 		intent.TargetRef == "" || card.ConversationRef != intent.TargetRef ||
-		intent.SendFingerprint != card.ContentHash {
+		!cardContentHashMatchesIntent(intent, card.ContentHash) {
 		return nil, ErrEffectIntentConflict
 	}
 	switch intent.Primitive {

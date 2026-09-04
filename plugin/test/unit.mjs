@@ -16109,7 +16109,7 @@ test('BOSS 消息投影:只实现真机已见的 bizType,未见值归并 system 
   for (const [bizType, condition, state, direction] of [[21130009, 1, 'pending', 'out'], [21130008, 3, 'accepted', 'in'], [21130006, 5, 'expired', 'out'], [21130009, 4, 'unknown', 'out']]) {
     const card = projectBossMessage({ ...base, bizType, bodyType: 14, direction, text: '发送了面试邀请', interviewCondition: condition })
     assert.deepEqual([card.kind, card.cardType, card.cardState, card.direction], ['card', 'interviewInvite', state, direction], `bizType=${bizType}`)
-    assert.equal(card.hashInput, 'card\x1finterviewInvite\x1f4123', '邀面卡暂按消息身份投影,1.2 落地后改常量')
+    assert.equal(card.hashInput, 'card\x1finterviewInvite', '契约包 1.2(2026-09-04):BOSS 卡无参数,投常量配方,状态分离在 cardState')
   }
   const wxReq = projectBossMessage({ ...base, bizType: 21050024, bodyType: 4, type: 'action', direction: 'out', text: '请求交换微信已发送', actionAid: 32 })
   assert.deepEqual([wxReq.kind, wxReq.cardType, wxReq.cardState, wxReq.hashInput], ['card', 'wechatExchange', 'pending', 'card\x1fwechatExchange'])

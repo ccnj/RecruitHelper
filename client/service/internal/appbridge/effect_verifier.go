@@ -465,9 +465,9 @@ func classifyVerifiedSend(
 	}
 	return dispatch.VerificationObservation{
 		Confirmed: true, ContentHash: matched.ContentHash, SourceKey: matched.SourceKey,
-		ObservedAt: observedAt(*matched),
+		ObservedAt:   observedAt(*matched),
 		PlatformTsMs: platformTs(*matched),
-		Reason: "最近窗口命中目标 out/text 指纹(同文取最新)",
+		Reason:       "最近窗口命中目标 out/text 指纹(同文取最新)",
 	}, nil
 }
 
@@ -489,7 +489,7 @@ func classifyVerifiedCard(
 		message := messages[i]
 		if message.Direction != protocol.MessageDirectionOut ||
 			message.Kind != protocol.MessageKindCard ||
-			message.ContentHash != targetHash ||
+			(primitive == protocol.PrimChatSendWechatInvite && message.ContentHash != targetHash) ||
 			!validOpaqueSourceKey(message.SourceKey) ||
 			message.CardType == nil || message.CardState == nil ||
 			!withinDispatchWindow(message, dispatchedAtMs) {
@@ -503,11 +503,19 @@ func classifyVerifiedCard(
 				matched = &messages[i]
 			}
 		case protocol.PrimChatSendInviteCard:
-			if expectedInterview != nil &&
-				*message.CardType == protocol.CardTypeInterviewInvite &&
-				*message.CardState == protocol.CardStateUnknown &&
-				message.Interview != nil &&
-				*message.Interview == *expectedInterview {
+			// 2026-09-04 落地 09-02 底稿 1.1:卡上带参数(智联)仍逐项相等且 hash 等于参数配方;
+			// 卡上不带参数(BOSS,interview 缺席)以方向、类型、派发窗口三项判成功且 hash 等于
+			// 常量投影。不再要求 cardState=unknown——平台私有状态不解释。
+			if expectedInterview == nil || *message.CardType != protocol.CardTypeInterviewInvite {
+				continue
+			}
+			if message.Interview != nil {
+				if *message.Interview == *expectedInterview &&
+					message.ContentHash == syncledger.InterviewInviteContentHash(
+						expectedInterview.StartsAt, expectedInterview.EndsAt, string(expectedInterview.Method)) {
+					matched = &messages[i]
+				}
+			} else if message.ContentHash == syncledger.InterviewInviteNeutralContentHash() {
 				matched = &messages[i]
 			}
 		}
@@ -526,7 +534,7 @@ func classifyVerifiedCard(
 		Confirmed: true, ContentHash: matched.ContentHash, SourceKey: matched.SourceKey,
 		Interview: interview, ObservedAt: observedAt(*matched),
 		PlatformTsMs: platformTs(*matched),
-		Reason: "最近窗口命中严格卡片正证(同类取最新)",
+		Reason:       "最近窗口命中严格卡片正证(同类取最新)",
 	}, nil
 }
 

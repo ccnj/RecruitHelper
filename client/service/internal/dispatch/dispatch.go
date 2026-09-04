@@ -504,11 +504,13 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 		case !validInterviewDetails(args.Interview) || data.Interview != args.Interview:
 			validationErr = errors.New("邀面卡 result 的参数与命令不一致")
 		case !validLowerHex64(data.ContentHash) ||
-			data.ContentHash != syncledger.InterviewInviteContentHash(
+			!syncledger.InterviewInviteContentHashAccepted(
+				data.ContentHash,
 				args.Interview.StartsAt,
 				args.Interview.EndsAt,
 				string(args.Interview.Method),
 			):
+			// 参数配方或无参数常量投影之一(规格 §4.5,2026-09-04);别的一律非法。
 			validationErr = errors.New("邀面卡 result 的 contentHash 非法")
 		case !validLowerHex64(data.SourceKey):
 			validationErr = errors.New("邀面卡 result 的 sourceKey 非法")
@@ -1096,6 +1098,12 @@ func (d *Dispatcher) realCardResultPlan(
 			}
 			card.SourceKey = data.SourceKey
 			card.PlatformTsMs = data.TsApprox
+			// 账本行的 hash 取手侧观察到的值(参数配方或常量投影,结果校验已核过),
+			// 面试字段仍取意图参数——后续 readThread 对同一 sourceKey 读回的就是这个
+			// 观察值,写成参数配方会让 BOSS 卡下一轮就撞 validateSourceKeySemantics。
+			if data.ContentHash != "" {
+				card.ContentHash = data.ContentHash
+			}
 		}
 		r.Status = store.CmdOk
 		r.TerminalAt = &now

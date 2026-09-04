@@ -112,6 +112,48 @@ func TestClassifyVerifiedInterviewCardRequiresExactFrozenParameters(t *testing.T
 	if err != nil || observation.Confirmed {
 		t.Fatalf("邀面参数不一致只能未确认: observation=%+v err=%v", observation, err)
 	}
+
+	// 2026-09-04 契约包 1.1/1.2:卡上不带参数(interview 缺席)+常量投影 → 三项判成功;
+	// 缺席却带参数配方 hash、或带参数却挂常量 hash,都不认。
+	neutral := card
+	neutral.Interview = nil
+	neutral.ContentHash = syncledger.InterviewInviteNeutralContentHash()
+	observation, err = classifyVerifiedCard(
+		[]protocol.ThreadMessage{neutral}, protocol.PrimChatSendInviteCard,
+		targetHash, &expected, dispatchedAt,
+	)
+	if err != nil || !observation.Confirmed || observation.Interview != nil ||
+		observation.ContentHash != syncledger.InterviewInviteNeutralContentHash() {
+		t.Fatalf("interview 缺席的常量投影卡应按方向/类型/窗口三项确认: observation=%+v err=%v", observation, err)
+	}
+	neutralWrongHash := neutral
+	neutralWrongHash.ContentHash = targetHash
+	observation, err = classifyVerifiedCard(
+		[]protocol.ThreadMessage{neutralWrongHash}, protocol.PrimChatSendInviteCard,
+		targetHash, &expected, dispatchedAt,
+	)
+	if err != nil || observation.Confirmed {
+		t.Fatalf("interview 缺席却挂参数配方 hash 不得确认: observation=%+v err=%v", observation, err)
+	}
+	withParamsNeutralHash := card
+	withParamsNeutralHash.ContentHash = syncledger.InterviewInviteNeutralContentHash()
+	observation, err = classifyVerifiedCard(
+		[]protocol.ThreadMessage{withParamsNeutralHash}, protocol.PrimChatSendInviteCard,
+		targetHash, &expected, dispatchedAt,
+	)
+	if err != nil || observation.Confirmed {
+		t.Fatalf("带参数的卡挂常量 hash 不得确认: observation=%+v err=%v", observation, err)
+	}
+	state2 := protocol.CardStatePending
+	pendingState := neutral
+	pendingState.CardState = &state2
+	observation, err = classifyVerifiedCard(
+		[]protocol.ThreadMessage{pendingState}, protocol.PrimChatSendInviteCard,
+		targetHash, &expected, dispatchedAt,
+	)
+	if err != nil || !observation.Confirmed {
+		t.Fatalf("不再要求 cardState=unknown(平台私有状态不解释): observation=%+v err=%v", observation, err)
+	}
 }
 
 func TestCardVerificationReadAtomicallyAdoptsObservedCard(t *testing.T) {

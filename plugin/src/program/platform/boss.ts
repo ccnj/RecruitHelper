@@ -1337,8 +1337,9 @@ export interface BossProjectedMessage {
  * bizType → 契约形状。枚举面按「平台枚举面事实门」只实现真机已见值(平台事实 §二、§四、§六),
  * 未见值归并为 system 并把原始类型带出——system 行不作语义证词(协议 §4.5),方向是少做。
  *
- * 邀面卡的 contentHash 暂按消息身份投影(与智联未知卡同款"本地账本锚"),契约包 1.2
- * 落地后改成常量配方;换微信按 §4.5 既有常量配方。
+ * 邀面卡的 contentHash 按契约包 1.2(2026-09-04 落地)投常量配方:BOSS 卡上没有时间地点
+ * (平台事实 §四),interview 整体省略,hash=sha256("card\x1finterviewInvite");换微信按 §4.5
+ * 既有常量配方。状态分离在 cardState 上。
  */
 export function projectBossMessage(raw: BossRawMessage): BossProjectedMessage {
   const text = normalizeBossMessageText(raw.text)
@@ -1375,7 +1376,7 @@ export function projectBossMessage(raw: BossRawMessage): BossProjectedMessage {
     return {
       kind: 'card', direction: raw.direction, text: text || null,
       cardType: 'interviewInvite', cardState,
-      hashInput: `card\x1finterviewInvite\x1f${raw.mid}`,
+      hashInput: 'card\x1finterviewInvite',
     }
   }
   if (bizType === 21050024 && raw.actionAid === 32) {
