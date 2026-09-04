@@ -172,6 +172,11 @@ type ReplyActionMenu struct {
 	// 它为真时 AllowStartMeeting 必为假(2026-08-21 甲方裁决),块据此告知模型
 	// 卡已发出、不得再约;它是事实陈述不是授权,与 WechatLine 同性质。
 	InterviewCardSent bool
+	// PreferredSlots 是本轮抛时段时「优先提」的至多两个 canonical 时段
+	// (2026-09-04 甲方裁决,规格 v4 §五「优先提」时段例外),由
+	// PreferredProposalSlots 按候选人稳定哈希从冻结全表挑出。它只是措辞倾向:
+	// 不进任何判定,AllowStartMeeting 为假时块不渲染它。
+	PreferredSlots []string
 }
 
 type ScoringSuggestion struct {

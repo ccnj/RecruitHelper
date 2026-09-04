@@ -1520,10 +1520,13 @@ func (a *roundActor) appendM5ReplyActionMenu(
 		return content
 	}
 	facts.RecommendedSlots, _ = m5ai.FrozenRecommendedSlots(turn.RecommendedTimeText)
-	withMenu, err := m5ai.AppendReplyActionMenu(
-		content,
-		communication.V4ReplyActionMenu(aggregate.State, facts, true),
-	)
+	menu := communication.V4ReplyActionMenu(aggregate.State, facts, true)
+	if menu.AllowStartMeeting {
+		// 「优先提」时段(2026-09-04):按候选人稳定哈希从本轮冻结全表挑,冻结时刻
+		// 取轮行 CreatedAt(即 FrozenAt),同一轮多次渲染结果一致。
+		menu.PreferredSlots = m5ai.PreferredProposalSlots(turn.ProfileID, turn.CreatedAt, facts.RecommendedSlots)
+	}
+	withMenu, err := m5ai.AppendReplyActionMenu(content, menu)
 	if err != nil {
 		slog.Info("对话轮省略可选动作块:块渲染失败,本轮照常调用 AI",
 			"turnId", turn.TurnID, "err", err)

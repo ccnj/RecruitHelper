@@ -2,6 +2,8 @@ package m5ai
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -444,9 +446,100 @@ func slotsBlock(frozenNow time.Time, slots []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// 「正文未规定怎么选时，优先最早的时段」已于 2026-09-04 删去:抛时段的倾向改由
+	// 可选动作块的「优先提」句给出(PreferredProposalSlots),两句并存会打架。
 	return dateLine +
-		"约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n" +
+		"约面话术只能使用下列时间，不要编造其它面试时间。\n" +
 		slotFormatGuard + "\n" + overview, nil
+}
+
+// PreferredProposalSlots 从冻结时段表挑本轮「优先提」的至多两个时段(2026-09-04
+// 甲方裁决,规格 v4 §五「优先提」时段例外):取最近一个晚于冻结日的可约日,上午
+// (12:00 前)、下午(13:00 起)各取一个,下标由 seed(候选人 profileId)的稳定哈希决定——
+// 同一候选人每轮挑到的一致,不同候选人散在不同格上。立案数据:钟点集中靠措辞劝不动,
+// 程序挑一对把最常见钟点占比从 36% 压到 16%(重放验收第四轮)。
+//
+// 它只影响提示词措辞:返回的时段本身取自 slots,不可能授权表外时刻;模型照它写的
+// 时间仍须经 MatchFrozenRecommendedMeetingTime 精确命中全表。
+func PreferredProposalSlots(seed string, frozenNow time.Time, slots []string) []string {
+	today := frozenNow.In(shanghai).Format("2006-01-02")
+	day := ""
+	for _, raw := range slots {
+		if len(raw) < 16 || raw[:10] <= today {
+			continue
+		}
+		if day == "" || raw[:10] < day {
+			day = raw[:10]
+		}
+	}
+	if day == "" {
+		return nil
+	}
+	var morning, afternoon []string
+	for _, raw := range slots {
+		if len(raw) < 16 || raw[:10] != day {
+			continue
+		}
+		hour, err := strconv.Atoi(raw[11:13])
+		if err != nil {
+			continue
+		}
+		switch {
+		case hour < 12:
+			morning = append(morning, raw)
+		case hour >= 13:
+			afternoon = append(afternoon, raw)
+		}
+	}
+	sort.Strings(morning)
+	sort.Strings(afternoon)
+	sum := sha256.Sum256([]byte(seed))
+	h := binary.BigEndian.Uint64(sum[:8])
+	var picked []string
+	if len(morning) > 0 {
+		picked = append(picked, morning[int(h%uint64(len(morning)))])
+	}
+	if len(afternoon) > 0 {
+		picked = append(picked, afternoon[int((h/7)%uint64(len(afternoon)))])
+	}
+	return picked
+}
+
+// preferredSlotsLine 把「优先提」时段渲染成一句:同一天只写一次日期
+// (「8月26日10:30或14:30」),跨天各带日期;时段串非法时整句省略,不喂半截。
+func preferredSlotsLine(slots []string) string {
+	type part struct {
+		date, clock string
+	}
+	parts := make([]part, 0, len(slots))
+	for _, raw := range slots {
+		dt, err := time.ParseInLocation("2006-01-02 15:04:05", raw, shanghai)
+		if err != nil {
+			return ""
+		}
+		parts = append(parts, part{
+			date:  fmt.Sprintf("%d月%d日", int(dt.Month()), dt.Day()),
+			clock: dt.Format("15:04"),
+		})
+	}
+	var text string
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		text = parts[0].date + parts[0].clock
+	default:
+		if parts[0].date == parts[1].date {
+			text = parts[0].date + parts[0].clock + "或" + parts[1].clock
+		} else {
+			text = parts[0].date + parts[0].clock + "或" + parts[1].date + parts[1].clock
+		}
+	}
+	lead := "本轮抛时段优先提："
+	if len(parts) >= 2 {
+		lead = "本轮抛时段优先提这两个："
+	}
+	return lead + text + "（候选人另提别的时间，按【输入参数-推荐时段】判断）。"
 }
 
 type frozenRecommendedTimeText struct {
@@ -661,6 +754,12 @@ func replyActionMenuBlock(menu ReplyActionMenu) string {
 			"本轮微信已经交换成功。不得填「发起换微信邀请」，话术里也不要出现「加个微信」「通过一下」这类说法。")
 	}
 	if menu.AllowStartMeeting {
+		// 「优先提」句(2026-09-04):只在允许邀面时出现。已发卡时 AllowStartMeeting
+		// 必为假,这句随之消失——重放验收第五轮实证,已发卡后仍给这句,模型会违反上面
+		// 「不许自己定新时间」再抛时段。
+		if line := preferredSlotsLine(menu.PreferredSlots); line != "" {
+			lines = append(lines, line)
+		}
 		lines = append(lines,
 			"话术里的时间一律写成「8月3日10:00」这种具体日期，不要用「明天」「后天」；【输入参数-推荐时段】以外的时间一律不得出现。")
 	}
