@@ -249,7 +249,16 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 		d.resolveDeliveryRejected(*cmd, *intent, *observation.DeliveryRejectedTs, observation.Reason)
 		return
 	}
-	if !observation.Confirmed || observation.ContentHash != intent.SendFingerprint {
+	fingerprintOK := observation.ContentHash == intent.SendFingerprint
+	if !fingerprintOK && cmd.Name == protocol.PrimChatSendInviteCard && request.InviteCardArgs != nil {
+		// 卡上不带邀面参数的平台(BOSS):观察到的是 §4.5 无参数常量投影,与派发 ok 结果校验
+		// (dispatch.go)、账本收编(store.cardContentHashMatchesIntent)同一把尺
+		// (《协议规格-v1》§9.4.3,2026-09-04 落地 09-02 底稿 1.1)。
+		interview := request.InviteCardArgs.Interview
+		fingerprintOK = syncledger.InterviewInviteContentHashAccepted(
+			observation.ContentHash, interview.StartsAt, interview.EndsAt, string(interview.Method))
+	}
+	if !observation.Confirmed || !fingerprintOK {
 		reason := observation.Reason
 		if reason == "" {
 			reason = "完整窗口未唯一命中目标正文"
@@ -361,9 +370,22 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			At: time.Now(),
 		})
 	case protocol.PrimChatSendInviteCard:
-		if request.InviteCardArgs == nil || !validLowerHex64(observation.SourceKey) ||
-			observation.Interview == nil || *observation.Interview != request.InviteCardArgs.Interview {
-			recordMiss("邀面卡验证正证缺少稳定卡片身份或参数不一致")
+		if request.InviteCardArgs == nil || !validLowerHex64(observation.SourceKey) {
+			recordMiss("邀面卡验证正证缺少稳定卡片身份")
+			return
+		}
+		// 卡上带参数的平台(智联):观察到的 interview 须与原 args 逐项相等;卡上不带参数的
+		// 平台(BOSS,平台事实 §四):验证器交出的 interview 为 nil,以 §4.5 常量投影为凭
+		// (《协议规格-v1》§9.4.3,2026-09-04 落地 09-02 底稿 1.1),data 与账本行的面试字段
+		// 取原 args——与派发 ok 收编同口径。此前这里要求 interview 非空,BOSS 卡一进验证读
+		// 就必然 miss、用尽轮数转 suspect(2026-09-04 场景三出口审查优化级第 2 条)。
+		if observation.Interview != nil {
+			if *observation.Interview != request.InviteCardArgs.Interview {
+				recordMiss("邀面卡验证正证参数与原 args 不一致")
+				return
+			}
+		} else if observation.ContentHash != syncledger.InterviewInviteNeutralContentHash() {
+			recordMiss("邀面卡验证正证既无邀面参数又不是无参数常量投影")
 			return
 		}
 		interview := request.InviteCardArgs.Interview
