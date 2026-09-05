@@ -5541,8 +5541,15 @@ async function readBossSourcingTargetResume(
   const tab = await requireBossRecommendTab(fingerprint)
   const tabId = tab.id!
   ctx.checkpoint()
-  const settled = await pollUntil(ctx, () => readBossRecommendTarget(tabId, geekId),
-    (read) => read.status === 'ready' || read.status === 'absent' || read.status === 'duplicated')
+  // 「不在」要连续三读(≥500ms)都不在才算:刚翻页的卡 vm 晚几百毫秒才挂上,data-geekid 对不上时会瞬时读成 absent,
+  // 一读即判会把这个人永久跳过(脑侧 unreadable 集合;出口审查 R2)。
+  let misses = 0
+  const settled = await pollUntil(ctx, () => readBossRecommendTarget(tabId, geekId), (read) => {
+    if (read.status === 'ready') return true
+    if (read.status === 'absent' || read.status === 'duplicated') { misses += 1; return misses >= 3 }
+    misses = 0
+    return false
+  })
   const read = settled.value
   if (read.status === 'no_frame' || read.status === 'no_list') {
     throw new PlatformError('CTX_NOT_READY', `推荐页未就绪(${read.status})`, 'afterRecovery', 'pageBroken')
