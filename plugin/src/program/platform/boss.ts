@@ -19,10 +19,10 @@ import { tabNavigationGeneration } from '../../base/tabGeneration'
 import { composeClearKeys, isHandServiceDown, osClickContractData, osProbeContractData, playKeys, playTypePlan, readHandOS, runOsProbe, seedFrom } from './osinput'
 import { planType } from '../osengine/plan'
 import { osScrollContractData, runOsScroll } from './osscroll'
-import type { ScrollTarget } from './osscroll'
+import type { OsScrollResult, ScrollTarget } from './osscroll'
 import type { ClickObservation, ClickPlan } from './osinput'
 import { PlatformError } from './types'
-import { BOSS_MATCH, BOSS_PLATFORM, bossSite } from './bossSite'
+import { BOSS_MATCH, BOSS_ORIGIN, BOSS_PLATFORM, bossSite } from './bossSite'
 import type { InjectOptions } from './inject'
 import type { PlatformAdapter } from './types'
 import type { PrimitiveContext } from '../registry'
@@ -31,14 +31,26 @@ import { BlobChannelError, captureVisibleTabJpegDataUrl, putSessionBlob, session
 import { describeError, reportHandLog } from '../../base/handLog'
 import type { BlobPutOutcome } from '../../base/capture'
 import type {
+  CandidateApplySourcingFiltersArgs,
+  CandidateApplySourcingFiltersData,
+  CandidateContactState,
   CandidateReadResumeArgs,
   CandidateReadResumeData,
+  CandidateReadSourcingResumeData,
+  CandidateReadSourcingTargetResumeArgs,
+  CandidateReadSourcingWindowArgs,
+  CandidateReadSourcingWindowData,
   CandidateResumeLabelValue,
+  CandidateSelectSourcingPositionArgs,
+  CandidateSelectSourcingPositionData,
+  CandidateSourcingFilters,
   CaptureScreenshotData,
   ChatCaptureThreadScreenshotArgs,
   ChatIdentifyCurrentConversationData,
   ChatOpenConversationArgs,
   ChatOpenConversationData,
+  ChatReadGreetingOutcomeArgs,
+  ChatReadGreetingOutcomeData,
   ChatReadListArgs,
   ChatReadListData,
   ChatReadThreadArgs,
@@ -48,6 +60,9 @@ import type {
   ChatAcceptWechatData,
   ChatReadWechatExchangeOutcomeArgs,
   ChatReadWechatExchangeOutcomeData,
+  ChatSendGreetingArgs,
+  ChatSendGreetingData,
+  ChatSendGreetingGuards,
   ChatSendInviteCardArgs,
   ChatSendInviteCardData,
   ChatSendMessageArgs,
@@ -66,9 +81,13 @@ import type {
   DebugOsProbeData,
   InterviewDetails,
   InterviewMethod,
+  JobPostingSection,
+  JobReadPublishedListData,
   MessageAnchor,
   PeerSummary,
   ProbePlatformData,
+  SourcingCareerStatus,
+  SourcingEducation,
   ThreadMessage,
 } from '../../base/protocol'
 
@@ -530,17 +549,17 @@ function mainHitTestComposer(id: string, x: number, y: number): { onTarget: bool
  * 这件事没有增量——`isTrusted` 在这个页面上已经由筛选页签那个靶子验过了,
  * 而这里真正的后置条件是"焦点到了没有",那是标准 DOM 属性,直接读。
  */
-async function bossComposerClickPlan(tabId: number): Promise<ClickPlan> {
-  const before = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
+async function bossComposerClickPlan(tabId: number, composerId: string = COMPOSER_ID): Promise<ClickPlan> {
+  const before = await runInPage(BOSS_DOM, tabId, mainReadComposer, [composerId])
   if (!before.found) {
     throw new PlatformError('ELEMENT_UNRESOLVED', '页面上找不到聊天输入框', 'manualOnly')
   }
   return {
     label: `输入框(点前 焦点=${before.focused ? '在' : '不在'})`,
     rect: { x: before.x, y: before.y, w: before.w, h: before.h },
-    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, mainHitTestComposer, [COMPOSER_ID, x, y]),
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, mainHitTestComposer, [composerId, x, y]),
     observe: async (): Promise<ClickObservation> => {
-      const after = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
+      const after = await runInPage(BOSS_DOM, tabId, mainReadComposer, [composerId])
       return {
         trusted: null,
         onTarget: null,
@@ -2356,7 +2375,7 @@ async function sendButtonClickPlan(tabId: number, conversationRef: string, expec
  * 日志只记字数,不记内容。
  */
 async function clearBossComposerByKeys(
-  tabId: number, ctx: PrimitiveContext, trace: string[], beforeLength: number,
+  tabId: number, ctx: PrimitiveContext, trace: string[], beforeLength: number, composerId: string = COMPOSER_ID,
 ): Promise<void> {
   let played
   try {
@@ -2369,7 +2388,7 @@ async function clearBossComposerByKeys(
       `清空输入框的按键半途失败:${describeError(error).slice(0, 300)}`, 'afterRecovery')
   }
   const settled = await pollUntil(ctx,
-    () => runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID]),
+    () => runInPage(BOSS_DOM, tabId, mainReadComposer, [composerId]),
     (read) => read.found && read.text === '', CLEAR_WAIT_MS)
   if (!settled.satisfied) {
     throw new PlatformError('ELEMENT_UNRESOLVED',
@@ -4300,6 +4319,1548 @@ async function readBossResume(
   return data
 }
 
+// ── 第二刀:推荐页采集 + 打招呼(2026-09-05 开工) ─────────────────────────────────
+//
+// 出口:docs/boss/第二刀出口-采集与打招呼-2026-09-04.md(甲方定方案一:招呼正文在推荐页的快捷聊天窗里发,
+// 脑与契约零改动);事实:docs/boss/BOSS平台事实-2026-08-28.md §十七。推荐页整张画在同源 iframe
+// `iframe[name=recommendFrame]` 里——定位、内存读、OS 落点全部经 contentDocument,坐标换算回顶层视口。
+// 下面的页面函数各自内联这段框架跳转:它们经 executeScript 序列化注入,引用不到模块里的共享函数。
+//
+// 身份一条线(§十七,已坐实):卡片 geekId/geekSource/encryptGeekId 与 IM 侧 uid/friendSource/encryptUid
+// 逐字相等。platformUserRef = String(geekId),conversationRef = "{geekId}-{geekSource}" 首击当场可算,
+// positionRef = encryptJobId(职位选择器 .job-item[value] 与卡片同值;出口 §四 第 3 件)。
+
+const BOSS_RECOMMEND_URL = `${BOSS_ORIGIN}/web/chat/recommend`
+const BOSS_JOB_LIST_URL = `${BOSS_ORIGIN}/web/chat/job/list`
+const RECOMMEND_FRAME = 'iframe[name=recommendFrame]'
+/** 导航后推荐页/职位管理页的就绪等待:2026-09-03 甲方裁决同款 60 秒封顶(智联侧 84771d6);其余等待仍 20 秒。 */
+const RECOMMEND_NAV_WAIT_MS = 60_000
+/** 列表刷新后的稳定判据:签名连续这么久没变才算稳。 */
+const RECOMMEND_STABLE_MS = 1_500
+const RECOMMEND_SEL = Object.freeze({
+  jobItem: '.job-selecter-wrap .job-item',
+  jobItemCurrentClass: 'curr',
+  filterLabel: '.filter-wrap .filter-label',
+  filterPanel: '.filter-panel',
+  filterBlock: '.filter-panel .filters-wrap',
+  filterVipBlockClass: 'vip-filters',
+  filterGroup: '.filter-wrap',
+  filterGroupName: '.name',
+  filterBox: '.check-box',
+  filterOption: '.option',
+  filterOptionActiveClass: 'active',
+  filterOptionDefaultClass: 'default',
+  filterButton: '.filter-panel .btns .btn',
+  vipMask: '.vip-mask',
+  listView: '#recommend-list',
+  cardList: 'ul.card-list',
+  cardItem: 'li.card-item',
+  cardInner: '.card-inner',
+  cardButton: '.button-chat-wrap button',
+  greetButton: 'button.btn-greet',
+  continueButton: 'button.btn-continue',
+})
+const JOB_LIST_SEL = Object.freeze({
+  frameSrc: '/web/frame/job_v2/list',
+  tab: '.tab-item',
+  row: 'li.job-item-container',
+  rowName: '.job-name',
+  rowStatus: '.status-box',
+})
+const QUICK_CHAT_SEL = Object.freeze({
+  window: '.chat-global-conversation',
+  messageList: '.chat-global-msg-content',
+  composerId: 'boss-chat-global-input',
+  sendButton: '.submit-content .submit',
+  close: '.chat-global-top .iboss-close',
+})
+const FILTER_GROUP = Object.freeze({ career: '求职状态', education: '学历要求', experience: '经验要求', salary: '薪资待遇' })
+/** VIP 锁定组(平台事实 §十七 `.vip-mask`):只回读不点,配置须为不限(出口 §四 第 2 件,运营侧约定)。 */
+const FILTER_VIP_GROUPS = Object.freeze(['活跃度', '性别', '近期没有看过', '是否与同事交换简历'])
+const FILTER_ANY = '不限'
+const FILTER_CONFIRM = '确定'
+const FILTER_LABEL = '筛选'
+const BOSS_ONLINE_LABEL_PLATFORM = '开放中'
+const BOSS_ONLINE_LABEL_CONTRACT = '在线中'
+const BOSS_JOB_TAB_ALL = '全部'
+const GREET_TEXT = '打招呼'
+const CONTINUE_TEXT = '继续沟通'
+const SEND_TEXT = '发送'
+
+const BOSS_CAREER_LABELS: Readonly<Record<SourcingCareerStatus, string>> = Object.freeze({
+  leftLooking: '离职-随时到岗',
+  employedNotLooking: '在职-暂不考虑',
+  employedOpen: '在职-考虑机会',
+  employedLooking: '在职-月内到岗',
+})
+/** BOSS 学历组没有 MBA/EMBA 项(平台事实 §十七 面板枚举),配置要它就干净失败,不就近取硕士。 */
+const BOSS_EDUCATION_LABELS: Readonly<Partial<Record<SourcingEducation, string>>> = Object.freeze({
+  juniorHighOrBelow: '初中及以下',
+  secondaryVocational: '中专/中技',
+  highSchool: '高中',
+  associate: '大专',
+  bachelor: '本科',
+  master: '硕士',
+  doctorate: '博士',
+})
+
+function isBossRecommendUrl(value: string | undefined): boolean {
+  if (!value) return false
+  try { return new URL(value).pathname === '/web/chat/recommend' } catch { return false }
+}
+
+function isBossJobListUrl(value: string | undefined): boolean {
+  if (!value) return false
+  try { return new URL(value).pathname === '/web/chat/job/list' } catch { return false }
+}
+
+export function parseBossGeekId(platformUserRef: string): number | null {
+  if (!/^[1-9]\d{0,17}$/u.test(platformUserRef)) return null
+  const value = Number(platformUserRef)
+  return Number.isSafeInteger(value) ? value : null
+}
+
+/** 组名去掉「[单选]」一类后缀:面板里「薪资待遇[单选]」「活跃度[单选]」是同一组的展示写法。 */
+export function bossFilterGroupName(raw: string): string {
+  return normalizeBossMessageText(raw).replace(/\[[^\]]*\]\s*$/u, '').trim()
+}
+
+/** 职位选择器项文案「职位名 _ 城市 薪资」取职位名;没有分隔就是整段。 */
+export function bossJobItemName(text: string): string {
+  const cleaned = normalizeBossMessageText(text)
+  const at = cleaned.indexOf(' _ ')
+  return at < 0 ? cleaned : cleaned.slice(0, at).trim()
+}
+
+export interface BossJobItem { text: string; value: string; current: boolean }
+
+/**
+ * 按标题在职位选择器里做唯一精确匹配:整段相等、职位名相等、或整段以「标题 _ 」开头(标题自带下划线时
+ * 前一种切法会切错)。不模糊、不就近。
+ */
+export function matchBossJobItem(
+  items: readonly BossJobItem[], positionTitle: string,
+): { status: 'ok'; index: number; name: string; value: string; current: boolean } | { status: 'none' | 'ambiguous'; count: number } {
+  const title = normalizeBossMessageText(positionTitle)
+  if (!title) return { status: 'none', count: 0 }
+  const hits = items
+    .map((item, index) => ({ item, index, text: normalizeBossMessageText(item.text) }))
+    .filter(({ item, text }) => text === title || bossJobItemName(item.text) === title || text.startsWith(`${title} _ `))
+  if (hits.length === 0) return { status: 'none', count: 0 }
+  if (hits.length > 1) return { status: 'ambiguous', count: hits.length }
+  const hit = hits[0]!
+  // 三种相等都蕴含「页面上的职位名就是这个标题」,名字回传规范化后的标题本身(标题自带「 _ 」时切职位名会切错)。
+  return { status: 'ok', index: hit.index, name: title, value: hit.item.value.trim(), current: hit.item.current }
+}
+
+export interface BossFilterPlan { career: string[]; education: string[] }
+
+/** 契约筛选 → 面板目标(只有非 VIP 的求职状态/学历能按图索骥);VIP 锁定组要求配置为不限。 */
+export function planBossSourcingFilters(
+  filters: CandidateSourcingFilters,
+): { ok: true; plan: BossFilterPlan } | { ok: false; reason: string } {
+  const locked: string[] = []
+  if (filters.age.mode !== 'any') locked.push('年龄')
+  if (filters.activeWindow !== 'any') locked.push('活跃度')
+  if (filters.gender !== 'any') locked.push('性别')
+  if (filters.excludeViewed) locked.push('近期没有看过')
+  if (filters.excludeCoworkerContacted) locked.push('是否与同事交换简历')
+  if (locked.length > 0) {
+    return { ok: false, reason: `这些筛选组在 BOSS 上被 VIP 锁定、手侧只回读不点,候选人筛选文档须配「不限」:${locked.join('/')}` }
+  }
+  const career: string[] = []
+  for (const status of filters.careerStatuses) {
+    const label = BOSS_CAREER_LABELS[status]
+    if (!label) return { ok: false, reason: `求职状态 ${status} 在 BOSS 上没有对应选项` }
+    if (!career.includes(label)) career.push(label)
+  }
+  const education: string[] = []
+  for (const level of filters.educations) {
+    const label = BOSS_EDUCATION_LABELS[level]
+    if (!label) return { ok: false, reason: `学历 ${level} 在 BOSS 上没有对应选项(面板只有初中及以下/中专中技/高中/大专/本科/硕士/博士)` }
+    if (!education.includes(label)) education.push(label)
+  }
+  return { ok: true, plan: { career, education } }
+}
+
+export interface BossFilterOptionRead { text: string; active: boolean; isDefault: boolean }
+export interface BossFilterGroupRead { name: string; boxKey: string; vip: boolean; options: BossFilterOptionRead[] }
+export interface BossFilterPanelRead { frame: boolean; panel: boolean; masked: boolean; groups: BossFilterGroupRead[]; buttons: string[] }
+
+export interface BossFilterClick { boxKey: string; index: number; text: string; expectActive: boolean }
+
+/**
+ * 逐项差异覆盖的点击清单(契约 applySourcingFilters「逐项差异覆盖」)。四个非 VIP 组各自:目标为空
+ * 就点「不限」(若尚未选中);目标非空就先点该点上的、再点该点掉的——「不限」在点上别的项时由平台自动
+ * 退选(2026-09-05 真机:点「本科」后「不限」失去 active)。经验/薪资契约里没有,目标恒为不限:
+ * 真人留下的手工筛选会悄悄收窄推荐流,配置才是唯一事实源。
+ */
+export function bossFilterClicks(
+  read: BossFilterPanelRead, plan: BossFilterPlan,
+): { ok: true; clicks: BossFilterClick[] } | { ok: false; reason: string } {
+  const targets: Array<[string, string[]]> = [
+    [FILTER_GROUP.career, plan.career], [FILTER_GROUP.education, plan.education],
+    [FILTER_GROUP.experience, []], [FILTER_GROUP.salary, []],
+  ]
+  const clicks: BossFilterClick[] = []
+  for (const [groupName, wanted] of targets) {
+    const groups = read.groups.filter((group) => !group.vip && bossFilterGroupName(group.name) === groupName)
+    if (groups.length !== 1) return { ok: false, reason: `筛选组「${groupName}」命中 ${groups.length} 个` }
+    const group = groups[0]!
+    if (!group.boxKey) return { ok: false, reason: `筛选组「${groupName}」没有可定位的组键` }
+    const anyIndex = group.options.findIndex((option) => option.text === FILTER_ANY)
+    if (anyIndex < 0) return { ok: false, reason: `筛选组「${groupName}」没有「${FILTER_ANY}」项` }
+    for (const label of wanted) {
+      if (!group.options.some((option) => option.text === label)) {
+        return { ok: false, reason: `筛选组「${groupName}」没有「${label}」项(现有:${group.options.map((o) => o.text).join('/')})` }
+      }
+    }
+    if (wanted.length === 0) {
+      if (!group.options[anyIndex]!.active) clicks.push({ boxKey: group.boxKey, index: anyIndex, text: FILTER_ANY, expectActive: true })
+      continue
+    }
+    group.options.forEach((option, index) => {
+      if (option.text !== FILTER_ANY && wanted.includes(option.text) && !option.active) {
+        clicks.push({ boxKey: group.boxKey, index, text: option.text, expectActive: true })
+      }
+    })
+    group.options.forEach((option, index) => {
+      if (option.text !== FILTER_ANY && !wanted.includes(option.text) && option.active) {
+        clicks.push({ boxKey: group.boxKey, index, text: option.text, expectActive: false })
+      }
+    })
+  }
+  return { ok: true, clicks }
+}
+
+/**
+ * 面板回读 → 契约 filters。与目标逐组核对(集合相等,不看顺序);全部相等就原样回传请求的 filters——
+ * 脑侧用 reflect.DeepEqual 比较,数组顺序也算,回传请求本身是唯一与配置逐字节相等的写法。
+ * VIP 组缺席视为不限(平台没给这组就没有东西在过滤);年龄滑块 DOM 上读不出值,被 `.vip-mask` 盖着时
+ * 不可能被改过——VIP 账号的滑块回读是后置项(出口 §五 4)。
+ */
+export function projectBossSourcingFilters(
+  read: BossFilterPanelRead, requested: CandidateSourcingFilters,
+): { ok: true; filters: CandidateSourcingFilters } | { ok: false; reason: string } {
+  const planned = planBossSourcingFilters(requested)
+  if (!planned.ok) return planned
+  const sameSet = (a: string[], b: string[]): boolean => a.length === b.length && a.every((x) => b.includes(x))
+  const check = (groupName: string, vip: boolean, wanted: string[]): string | null => {
+    const groups = read.groups.filter((group) => group.vip === vip && bossFilterGroupName(group.name) === groupName)
+    if (groups.length === 0) return vip ? null : `筛选组「${groupName}」认不出`
+    if (groups.length > 1) return `筛选组「${groupName}」命中 ${groups.length} 个`
+    const active = groups[0]!.options.filter((option) => option.active).map((option) => option.text)
+    const expected = wanted.length > 0 ? wanted : [FILTER_ANY]
+    if (!sameSet(active, expected)) return `筛选组「${groupName}」回读为「${active.join('/') || '(空)'}」,目标「${expected.join('/')}」`
+    return null
+  }
+  const problems = [
+    check(FILTER_GROUP.career, false, planned.plan.career),
+    check(FILTER_GROUP.education, false, planned.plan.education),
+    check(FILTER_GROUP.experience, false, []),
+    check(FILTER_GROUP.salary, false, []),
+    ...FILTER_VIP_GROUPS.map((name) => check(name, true, [])),
+  ].filter((problem): problem is string => problem !== null)
+  if (problems.length > 0) return { ok: false, reason: problems.join(';') }
+  return { ok: true, filters: requested }
+}
+
+/**
+ * 职位管理页「全部」页签一屏列出所有职位、逐行带状态文案(平台事实 §十七),所以不逐分区切页签:
+ * 分区 = 页签文案(去「全部」、去计数后缀),行按自己的状态文案归入;状态不在页签里的行按原样文案另起
+ * 一区带出(存在性判定取并集,少一个名字方向就是多发)。「开放中」投影成契约/脑侧的「在线中」
+ * (出口 §四 第 4 件:映射放手侧,脑保持平台无关)。
+ */
+export function bossJobListSections(
+  tabs: readonly string[], rows: ReadonlyArray<{ name: string; status: string }>,
+): { ok: true; sections: JobPostingSection[] } | { ok: false; reason: string } {
+  const stripCount = (raw: string): string => normalizeBossMessageText(raw).replace(/[\s·]*\d+$/u, '').trim()
+  const labels = tabs.map(stripCount).filter((label) => label !== '' && label !== BOSS_JOB_TAB_ALL)
+  if (labels.length === 0) return { ok: false, reason: '职位管理页没有状态分区页签' }
+  if (new Set(labels).size !== labels.length) return { ok: false, reason: `状态分区页签重名:${labels.join('/')}` }
+  const sections: JobPostingSection[] = labels.map((label) => ({
+    label: label === BOSS_ONLINE_LABEL_PLATFORM ? BOSS_ONLINE_LABEL_CONTRACT : label,
+    names: [],
+  }))
+  const extras = new Map<string, string[]>()
+  for (const row of rows) {
+    const name = normalizeBossMessageText(row.name)
+    const status = stripCount(row.status)
+    if (!name) return { ok: false, reason: '有职位行读不到职位名' }
+    if (!status) return { ok: false, reason: `职位「${name}」读不到状态文案` }
+    const index = labels.indexOf(status)
+    if (index >= 0) {
+      sections[index]!.names.push(name)
+    } else {
+      const list = extras.get(status) ?? []
+      list.push(name)
+      extras.set(status, list)
+    }
+  }
+  for (const [label, names] of extras) sections.push({ label, names })
+  return { ok: true, sections }
+}
+
+export interface BossRecommendCardLite {
+  geekId: number
+  geekSource: number
+  encryptGeekId: string
+  encryptJobId: string
+  isFriend: number | null
+  buttonText: string
+  visible: boolean
+}
+
+export interface BossRecommendCard extends BossRecommendCardLite {
+  name: string
+  ageDesc: string
+  degree: string
+  workYear: string
+  salary: string
+  activeTimeDesc: string
+  desc: string
+  edus: Array<{ school: string; major: string; degree: string; start: string; end: string }>
+  works: Array<{ company: string; position: string; start: string; end: string; responsibility: string }>
+  expect: { location: string; position: string; salary: string }
+}
+
+/** 关系态判据(出口 §〇):isFriend=1 或按钮「继续沟通」= 已建立;isFriend=0 且按钮「打招呼」= 未建立;其余 unknown。 */
+export function bossCardContactState(card: Pick<BossRecommendCardLite, 'isFriend' | 'buttonText'>): CandidateContactState {
+  if (card.isFriend === 1 || card.buttonText === CONTINUE_TEXT) return 'established'
+  if (card.isFriend === 0 && card.buttonText === GREET_TEXT) return 'unestablished'
+  return 'unknown'
+}
+
+/**
+ * 卡片 geekInfo → 契约五分区(出口 §四 第 6 件:不开详情——详情正文是 canvas,右栏只多一份经历概览)。
+ * 标签与智联/readResume 对齐;空值整行省略。
+ */
+export function projectBossSourcingResume(
+  card: BossRecommendCard, positionRef: string, positionTitle: string | null, observedAt: number,
+): CandidateReadSourcingResumeData {
+  const clean = (value: string): string => normalizeBossMessageText(value)
+  const push = (list: CandidateResumeLabelValue[], label: string, value: string): void => {
+    const cleaned = clean(value)
+    if (cleaned) list.push({ label, value: cleaned })
+  }
+  const basic: CandidateResumeLabelValue[] = []
+  push(basic, '姓名', card.name)
+  push(basic, '年龄', card.ageDesc)
+  push(basic, '工作经验', card.workYear)
+  push(basic, '最高学历', card.degree)
+  push(basic, '活跃时间', card.activeTimeDesc)
+  const expectations: CandidateResumeLabelValue[] = []
+  push(expectations, '期望职位', card.expect.position)
+  push(expectations, '期望城市', card.expect.location)
+  push(expectations, '期望薪资', card.salary || card.expect.salary)
+  const range = (start: string, end: string): string => [clean(start), clean(end)].filter(Boolean).join('-')
+  const join = (parts: string[]): string => parts.map(clean).filter(Boolean).join(' · ')
+  const education = card.edus
+    .map((item) => [range(item.start, item.end), join([item.school, item.major, item.degree])].filter(Boolean).join(' '))
+    .filter(Boolean)
+    .join('\n\n')
+  const workExperiences = card.works
+    .map((item) => {
+      const head = [range(item.start, item.end), join([item.company, item.position])].filter(Boolean).join(' ')
+      const body = clean(item.responsibility)
+      return [head, body].filter(Boolean).join('\n')
+    })
+    .filter(Boolean)
+    .join('\n\n')
+  const name = clean(card.name)
+  return {
+    platformUserRef: String(card.geekId),
+    displayName: name ? name.slice(0, 256) : null,
+    positionRef,
+    positionTitle: positionTitle && positionTitle.length <= 256 ? positionTitle : null,
+    contactState: bossCardContactState(card),
+    observedAt,
+    basic,
+    expectations,
+    selfEvaluation: clean(card.desc),
+    education,
+    workExperiences,
+  }
+}
+
+// ── 页面函数:推荐页(MAIN world 读 iframe 内存;isolated 读 DOM) ────────────────
+
+type BossRecommendWindowRead =
+  | { status: 'no_frame' }
+  | { status: 'no_list' }
+  | {
+    status: 'ready'
+    loading: boolean
+    finished: boolean
+    positionRef: string
+    positionText: string
+    jobItems: BossJobItem[]
+    cards: BossRecommendCardLite[]
+    domCount: number
+    aligned: boolean
+    scrollTop: number
+    scrollHeight: number
+    clientHeight: number
+  }
+
+/**
+ * 推荐窗口:`ul.card-list` 的 vm 持有 `pageList`(与 DOM `li.card-item` 顺序一致,30/30 已核),`#recommend-list`
+ * 的 vm 持有 loading/finished。每张卡只取身份、关系态、按钮文案与可见性;简历投影另走 mainReadBossRecommendTarget。
+ * `aligned`:DOM 卡数等于 pageList 且每张 `.card-inner[data-geekid]` 等于 encryptGeekId——刚翻页的卡 vm 会晚几百毫秒
+ * 才挂上(§十七),没对齐就是没就绪。
+ */
+function mainReadBossRecommendWindow(
+  frameSel: string, listViewSel: string, cardListSel: string, cardItemSel: string, cardInnerSel: string,
+  buttonSel: string, jobItemSel: string, currentClass: string,
+): BossRecommendWindowRead {
+  type AnyRecord = Record<string, unknown>
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const num = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null)
+  const str = (value: unknown): string => (typeof value === 'string' ? value : typeof value === 'number' ? String(value) : '')
+  const frame = document.querySelector(frameSel)
+  const doc = frame && 'contentDocument' in frame ? (frame as HTMLIFrameElement).contentDocument : null
+  if (!doc) return { status: 'no_frame' }
+  const listEl = doc.querySelector(cardListSel)
+  const listVm = listEl ? (listEl as unknown as { __vue__?: AnyRecord }).__vue__ : undefined
+  let pageList: unknown
+  try { pageList = listVm?.pageList } catch { pageList = undefined }
+  if (!listVm || !Array.isArray(pageList)) return { status: 'no_list' }
+  const viewEl = doc.querySelector(listViewSel)
+  const viewVm = viewEl ? (viewEl as unknown as { __vue__?: AnyRecord }).__vue__ : undefined
+  let loading = false
+  let finished = false
+  try { loading = viewVm?.loading === true; finished = viewVm?.finished === true } catch { loading = false }
+  const items = Array.from(doc.querySelectorAll(cardItemSel))
+  const scroller = doc.scrollingElement
+  const viewportHeight = scroller ? scroller.clientHeight : doc.documentElement.clientHeight
+  let aligned = items.length === pageList.length
+  const cards: BossRecommendCardLite[] = pageList.map((raw, index) => {
+    const info = asRecord(raw)
+    const item = items[index]
+    const inner = item ? item.querySelector(cardInnerSel) : null
+    const rect = item ? item.getBoundingClientRect() : null
+    const button = item ? item.querySelector(buttonSel) : null
+    const encryptGeekId = str(info?.encryptGeekId)
+    if (!inner || encryptGeekId === '' || inner.getAttribute('data-geekid') !== encryptGeekId) aligned = false
+    return {
+      geekId: num(info?.geekId) ?? 0,
+      geekSource: num(info?.geekSource) ?? 0,
+      encryptGeekId,
+      encryptJobId: str(info?.encryptJobId),
+      isFriend: num(info?.isFriend),
+      buttonText: (button?.textContent ?? '').trim(),
+      visible: !!rect && rect.bottom > 1 && rect.top < viewportHeight - 1,
+    }
+  })
+  const jobItems: BossJobItem[] = Array.from(doc.querySelectorAll(jobItemSel)).map((el) => ({
+    text: (el.textContent ?? '').replace(/\s+/gu, ' ').trim(),
+    value: el.getAttribute('value') ?? '',
+    current: el.classList.contains(currentClass),
+  }))
+  const current = jobItems.filter((item) => item.current)
+  return {
+    status: 'ready',
+    loading,
+    finished,
+    positionRef: current.length === 1 ? current[0]!.value.trim() : '',
+    positionText: current.length === 1 ? current[0]!.text : '',
+    jobItems,
+    cards,
+    domCount: items.length,
+    aligned,
+    scrollTop: scroller ? scroller.scrollTop : 0,
+    scrollHeight: scroller ? scroller.scrollHeight : 0,
+    clientHeight: viewportHeight,
+  }
+}
+
+type BossRecommendTargetRead =
+  | { status: 'no_frame' }
+  | { status: 'no_list' }
+  | { status: 'absent' }
+  | { status: 'duplicated'; count: number }
+  | { status: 'ready'; positionRef: string; positionText: string; card: BossRecommendCard }
+
+/** 目标卡的完整投影源:按 geekId 在 pageList 里唯一匹配,读 geekInfo 的摘要字段,不开详情、不点任何东西。 */
+function mainReadBossRecommendTarget(
+  frameSel: string, cardListSel: string, cardItemSel: string, cardInnerSel: string, buttonSel: string,
+  jobItemSel: string, currentClass: string, geekId: number,
+): BossRecommendTargetRead {
+  type AnyRecord = Record<string, unknown>
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const num = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null)
+  const str = (value: unknown): string => (typeof value === 'string' ? value : typeof value === 'number' ? String(value) : '')
+  const list = (value: unknown): AnyRecord[] =>
+    Array.isArray(value) ? value.map(asRecord).filter((item): item is AnyRecord => item !== null) : []
+  const frame = document.querySelector(frameSel)
+  const doc = frame && 'contentDocument' in frame ? (frame as HTMLIFrameElement).contentDocument : null
+  if (!doc) return { status: 'no_frame' }
+  const listEl = doc.querySelector(cardListSel)
+  const listVm = listEl ? (listEl as unknown as { __vue__?: AnyRecord }).__vue__ : undefined
+  let pageList: unknown
+  try { pageList = listVm?.pageList } catch { pageList = undefined }
+  if (!listVm || !Array.isArray(pageList)) return { status: 'no_list' }
+  const hits: Array<{ info: AnyRecord; index: number }> = []
+  pageList.forEach((raw, index) => {
+    const info = asRecord(raw)
+    if (info && num(info.geekId) === geekId) hits.push({ info, index })
+  })
+  if (hits.length === 0) return { status: 'absent' }
+  if (hits.length > 1) return { status: 'duplicated', count: hits.length }
+  const { info, index } = hits[0]!
+  const items = Array.from(doc.querySelectorAll(cardItemSel))
+  const item = items[index]
+  const inner = item ? item.querySelector(cardInnerSel) : null
+  const encryptGeekId = str(info.encryptGeekId)
+  if (!inner || encryptGeekId === '' || inner.getAttribute('data-geekid') !== encryptGeekId) return { status: 'absent' }
+  const rect = item!.getBoundingClientRect()
+  const scroller = doc.scrollingElement
+  const viewportHeight = scroller ? scroller.clientHeight : doc.documentElement.clientHeight
+  const button = item!.querySelector(buttonSel)
+  const desc = asRecord(info.geekDesc)
+  const expect = asRecord(info.viewExpect)
+  const low = str(expect?.lowSalary)
+  const high = str(expect?.highSalary)
+  const jobItems = Array.from(doc.querySelectorAll(jobItemSel)).filter((el) => el.classList.contains(currentClass))
+  return {
+    status: 'ready',
+    positionRef: jobItems.length === 1 ? (jobItems[0]!.getAttribute('value') ?? '').trim() : '',
+    positionText: jobItems.length === 1 ? (jobItems[0]!.textContent ?? '').replace(/\s+/gu, ' ').trim() : '',
+    card: {
+      geekId,
+      geekSource: num(info.geekSource) ?? 0,
+      encryptGeekId,
+      encryptJobId: str(info.encryptJobId),
+      isFriend: num(info.isFriend),
+      buttonText: (button?.textContent ?? '').trim(),
+      visible: rect.bottom > 1 && rect.top < viewportHeight - 1,
+      name: str(info.geekName),
+      ageDesc: str(info.ageDesc),
+      degree: str(info.geekDegree),
+      workYear: str(info.geekWorkYear),
+      salary: str(info.salary),
+      activeTimeDesc: str(info.activeTimeDesc),
+      desc: str(desc?.content),
+      edus: list(info.geekEdus).map((edu) => ({
+        school: str(edu.school), major: str(edu.major), degree: str(edu.degreeName), start: str(edu.startDate), end: str(edu.endDate),
+      })),
+      works: list(info.geekWorks).map((work) => ({
+        company: str(work.company), position: str(work.positionName), start: str(work.startDate), end: str(work.endDate),
+        responsibility: str(work.responsibility),
+      })),
+      expect: {
+        location: str(expect?.location),
+        position: str(expect?.position),
+        salary: low && high ? `${low}-${high}` : low || high,
+      },
+    },
+  }
+}
+
+type BossQuickChatRead =
+  | { status: 'closed' }
+  | { status: 'no_geek' }
+  | { status: 'identity_missing' }
+  | { status: 'ready'; uid: number; friendSource: number; encryptUid: string; rows: BossRawMessage[] }
+
+/**
+ * 顶层快捷聊天窗(平台事实 §十七「继续沟通与快捷聊天窗」):`.chat-global-conversation` 里
+ * `.chat-global-msg-content` 的 vm 自持 `geek`(与 IM 列表行同形:uid/friendSource/encryptUid);消息行是与 IM 页
+ * 同一个 message-component,从各实例的 `message` prop 收(mid/body/fromId/time/status 同形)。顶层没有 IM 页那套
+ * `list$/conversation$`,所以不能复用 mainReadBossThread。方向只认 fromId === 我方 userId(与 IM 同一判据)。
+ */
+function mainReadBossQuickChat(windowSel: string, listSel: string): BossQuickChatRead {
+  type AnyRecord = Record<string, unknown>
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const num = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null)
+  const win = document.querySelector(windowSel)
+  if (!win) return { status: 'closed' }
+  const listEl = win.querySelector(listSel)
+  const listVm = listEl ? (listEl as unknown as { __vue__?: AnyRecord }).__vue__ : undefined
+  let geek: AnyRecord | null = null
+  try { geek = asRecord(listVm?.geek) } catch { geek = null }
+  if (!geek || typeof geek.uid !== 'number' || typeof geek.friendSource !== 'number') return { status: 'no_geek' }
+  const uid = geek.uid
+  const friendSource = geek.friendSource
+  let myUserId: number | null = null
+  const seen = new Set<unknown>()
+  for (const element of Array.from(document.querySelectorAll('*'))) {
+    const instance = (element as unknown as { __vue__?: AnyRecord }).__vue__
+    if (!instance || seen.has(instance)) continue
+    seen.add(instance)
+    let user: unknown
+    try { user = instance.user$ } catch { continue }
+    const raw = asRecord(user)?.userId
+    if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0) { myUserId = raw; break }
+  }
+  if (myUserId === null) return { status: 'identity_missing' }
+  const rows: BossRawMessage[] = []
+  const mids = new Set<string>()
+  const seenRows = new Set<unknown>()
+  for (const element of Array.from(win.querySelectorAll('*'))) {
+    const instance = (element as unknown as { __vue__?: AnyRecord }).__vue__
+    if (!instance || seenRows.has(instance)) continue
+    seenRows.add(instance)
+    let message: AnyRecord | null = null
+    try {
+      const props = asRecord(instance.$props)
+      message = asRecord(props ? props.message : instance.message)
+    } catch { message = null }
+    if (!message) continue
+    const mid = message.mid
+    if ((typeof mid !== 'number' && typeof mid !== 'string') || !('body' in message)) continue
+    const key = String(mid)
+    if (mids.has(key)) continue
+    mids.add(key)
+    const body = asRecord(message.body)
+    const fromId = num(message.fromId)
+    const direction: BossRawMessage['direction'] = fromId === myUserId ? 'out' : fromId === uid ? 'in' : 'system'
+    const bodyText = body && typeof body.text === 'string' ? body.text : ''
+    const topText = typeof message.text === 'string' ? message.text : ''
+    const interview = asRecord(body?.interview)
+    const action = asRecord(body?.action)
+    const dialog = asRecord(body?.dialog)
+    const dialogAids: number[] = []
+    if (dialog && Array.isArray(dialog.buttons)) {
+      for (const button of dialog.buttons as unknown[]) {
+        const record = asRecord(button)
+        const url = typeof record?.url === 'string' ? record.url : ''
+        const match = /[?&]aid=(\d+)/u.exec(url)
+        if (match) dialogAids.push(Number(match[1]))
+      }
+    }
+    rows.push({
+      mid: key,
+      direction,
+      type: String(message.type ?? ''),
+      bizType: num(message.bizType),
+      bodyType: num(body?.type),
+      status: num(message.status),
+      time: num(message.time),
+      text: bodyText || topText,
+      interviewCondition: num(interview?.condition),
+      actionAid: num(action?.aid),
+      templateId: num(body?.templateId),
+      dialogOperated: dialog ? dialog.operated === true : null,
+      dialogAids,
+    })
+  }
+  rows.sort((a, b) => (Number(a.mid) < Number(b.mid) ? -1 : Number(a.mid) > Number(b.mid) ? 1 : 0))
+  return { status: 'ready', uid, friendSource, encryptUid: typeof geek.encryptUid === 'string' ? geek.encryptUid : '', rows }
+}
+
+/** 筛选面板(isolated):两块 `.filters-wrap`(VIP 块带 vip-filters 类且被 `.vip-mask` 盖住),每组名+选项+选中态。 */
+function domReadBossFilterPanel(
+  frameSel: string, panelSel: string, blockSel: string, vipClass: string, groupSel: string, nameSel: string,
+  boxSel: string, optionSel: string, activeClass: string, defaultClass: string, maskSel: string, buttonSel: string,
+): BossFilterPanelRead {
+  const frame = document.querySelector(frameSel)
+  const doc = frame && 'contentDocument' in frame ? (frame as HTMLIFrameElement).contentDocument : null
+  if (!doc) return { frame: false, panel: false, masked: false, groups: [], buttons: [] }
+  const panel = doc.querySelector(panelSel)
+  if (!panel) return { frame: true, panel: false, masked: false, groups: [], buttons: [] }
+  const groups: BossFilterGroupRead[] = []
+  for (const block of Array.from(doc.querySelectorAll(blockSel))) {
+    const vip = block.classList.contains(vipClass)
+    for (const group of Array.from(block.querySelectorAll(groupSel))) {
+      const box = group.querySelector(boxSel)
+      const boxKey = box
+        ? Array.from(box.classList).filter((cls) => cls !== boxSel.replace(/^\./u, '') && /^[A-Za-z0-9_-]+$/u.test(cls))[0] ?? ''
+        : ''
+      groups.push({
+        name: (group.querySelector(nameSel)?.textContent ?? '').trim(),
+        boxKey,
+        vip,
+        options: Array.from(group.querySelectorAll(optionSel)).map((option) => ({
+          text: (option.textContent ?? '').trim(),
+          active: option.classList.contains(activeClass),
+          isDefault: option.classList.contains(defaultClass),
+        })),
+      })
+    }
+  }
+  const mask = doc.querySelector(maskSel)
+  const maskRect = mask ? mask.getBoundingClientRect() : null
+  return {
+    frame: true,
+    panel: true,
+    masked: !!maskRect && maskRect.width > 0 && maskRect.height > 0,
+    groups,
+    buttons: Array.from(doc.querySelectorAll(buttonSel)).map((button) => (button.textContent ?? '').trim()),
+  }
+}
+
+interface BossJobListRead { frame: boolean; tabs: string[]; rows: Array<{ name: string; status: string }>; total: number | null }
+
+/** 职位管理页(isolated):内容在同源无名 iframe `/web/frame/job_v2/list` 里;页脚「共 N 个职位」是读全的判据。 */
+function domReadBossJobList(frameSrc: string, tabSel: string, rowSel: string, nameSel: string, statusSel: string): BossJobListRead {
+  const frames = Array.from(document.querySelectorAll('iframe')).filter((el) => (el.getAttribute('src') ?? '').includes(frameSrc))
+  const frame = frames.length === 1 ? frames[0]! : null
+  const doc = frame ? frame.contentDocument : null
+  if (!doc) return { frame: false, tabs: [], rows: [], total: null }
+  const tabs = Array.from(doc.querySelectorAll(tabSel)).map((tab) => (tab.textContent ?? '').trim())
+  const rows = Array.from(doc.querySelectorAll(rowSel)).map((row) => ({
+    name: (row.querySelector(nameSel)?.textContent ?? '').trim(),
+    status: (row.querySelector(statusSel)?.textContent ?? '').trim(),
+  }))
+  const footer = /共\s*(\d+)\s*个职位/u.exec(doc.body ? doc.body.innerText : '')
+  return { frame: true, tabs, rows, total: footer ? Number(footer[1]) : null }
+}
+
+/** 快捷窗外壳(isolated):开着没有、关闭键在哪。 */
+function domReadBossQuickChatShell(windowSel: string, closeSel: string): { open: boolean; closeCount: number; closeRect: DomRect4 } {
+  const win = document.querySelector(windowSel)
+  if (!win) return { open: false, closeCount: 0, closeRect: { x: 0, y: 0, w: 0, h: 0 } }
+  const closers = Array.from(document.querySelectorAll(closeSel))
+  const closer = closers.length === 1 ? closers[0]! : null
+  const rect = closer ? closer.getBoundingClientRect() : null
+  return { open: true, closeCount: closers.length, closeRect: rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : { x: 0, y: 0, w: 0, h: 0 } }
+}
+
+/** 快捷窗发送前最后一道闸(isolated 那半):落点在唯一的发送钮上,且编辑器文本与文案规范化后相等。目标绑定那半在 MAIN 读 geek.uid。 */
+function domBossQuickSendGate(
+  buttonSelector: string, x: number, y: number, composerId: string, expectedText: string,
+): { onTarget: boolean; found: string } {
+  const normalize = (value: string): string =>
+    value.normalize('NFC').replace(/ /gu, ' ').replace(/\s+/gu, ' ').trim()
+  const buttons = Array.from(document.querySelectorAll(buttonSelector))
+  const button = buttons.length === 1 ? buttons[0] : undefined
+  const at = document.elementFromPoint(x, y)
+  const onButton = !!button && !!at && (at === button || button.contains(at))
+  const composer = document.getElementById(composerId)
+  const composerText = composer ? (composer.textContent ?? '') : ''
+  const textOk = !!composer && normalize(composerText) === normalize(expectedText)
+  const problems: string[] = []
+  if (!button) problems.push(`发送钮命中 ${buttons.length} 个`)
+  else if (!onButton) problems.push(at ? `落点上是 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 8)}」` : '落点上什么都没有')
+  if (!textOk) problems.push(composer ? `输入框内容与文案不同(${composerText.length} 字)` : '输入框不见了')
+  return { onTarget: onButton && textOk, found: problems.length ? problems.join(';') : '发送钮' }
+}
+
+// ── 推荐页编排 helper ───────────────────────────────────────────────────────
+
+type BossRecommendWindowReady = Extract<BossRecommendWindowRead, { status: 'ready' }>
+
+async function readBossRecommendWindow(tabId: number): Promise<BossRecommendWindowRead> {
+  return runInPage(BOSS_INJECT, tabId, mainReadBossRecommendWindow, [
+    RECOMMEND_FRAME, RECOMMEND_SEL.listView, RECOMMEND_SEL.cardList, RECOMMEND_SEL.cardItem, RECOMMEND_SEL.cardInner,
+    RECOMMEND_SEL.cardButton, RECOMMEND_SEL.jobItem, RECOMMEND_SEL.jobItemCurrentClass,
+  ])
+}
+
+async function readBossRecommendTarget(tabId: number, geekId: number): Promise<BossRecommendTargetRead> {
+  return runInPage(BOSS_INJECT, tabId, mainReadBossRecommendTarget, [
+    RECOMMEND_FRAME, RECOMMEND_SEL.cardList, RECOMMEND_SEL.cardItem, RECOMMEND_SEL.cardInner, RECOMMEND_SEL.cardButton,
+    RECOMMEND_SEL.jobItem, RECOMMEND_SEL.jobItemCurrentClass, geekId,
+  ])
+}
+
+async function readBossFilterPanel(tabId: number): Promise<BossFilterPanelRead> {
+  return runInPage(BOSS_DOM, tabId, domReadBossFilterPanel, [
+    RECOMMEND_FRAME, RECOMMEND_SEL.filterPanel, RECOMMEND_SEL.filterBlock, RECOMMEND_SEL.filterVipBlockClass,
+    RECOMMEND_SEL.filterGroup, RECOMMEND_SEL.filterGroupName, RECOMMEND_SEL.filterBox, RECOMMEND_SEL.filterOption,
+    RECOMMEND_SEL.filterOptionActiveClass, RECOMMEND_SEL.filterOptionDefaultClass, RECOMMEND_SEL.vipMask, RECOMMEND_SEL.filterButton,
+  ])
+}
+
+async function readBossQuickChat(tabId: number): Promise<BossQuickChatRead> {
+  return runInPage(BOSS_INJECT, tabId, mainReadBossQuickChat, [QUICK_CHAT_SEL.window, QUICK_CHAT_SEL.messageList])
+}
+
+function bossRecommendWindowReady(read: BossRecommendWindowRead): read is BossRecommendWindowReady {
+  return read.status === 'ready' && !read.loading && read.cards.length >= 1 && read.aligned && read.positionRef !== ''
+}
+
+function describeBossRecommendRead(read: BossRecommendWindowRead): string {
+  if (read.status !== 'ready') return read.status
+  return `loading=${read.loading} 卡=${read.cards.length}/${read.domCount} 对齐=${read.aligned} 职位=${read.positionRef ? '有' : '无'}`
+}
+
+function bossRecommendSignature(read: BossRecommendWindowReady): string {
+  return `${read.positionRef}|${read.loading}|${read.cards.map((card) => card.geekId).join(',')}`
+}
+
+/** 推荐页就绪:iframe 与列表 vm 都在、不在加载、至少一张卡且 DOM 与 pageList 对齐、当前职位可读。 */
+async function waitBossRecommendReady(tabId: number, ctx: PrimitiveContext, maxMs: number): Promise<BossRecommendWindowReady> {
+  const settled = await pollUntil(ctx, () => readBossRecommendWindow(tabId), bossRecommendWindowReady, maxMs)
+  if (!bossRecommendWindowReady(settled.value)) {
+    throw new PlatformError('CTX_NOT_READY',
+      `BOSS 推荐页 ${Math.round(maxMs / 1000)} 秒内未就绪(${describeBossRecommendRead(settled.value)})`, 'afterRecovery', 'pageBroken')
+  }
+  return settled.value
+}
+
+/** 就绪之上再要求签名(职位、加载态、卡片身份序列)连续 RECOMMEND_STABLE_MS 没变:列表刷新与翻页都是异步的。 */
+async function waitBossRecommendStable(tabId: number, ctx: PrimitiveContext, maxMs: number): Promise<BossRecommendWindowReady> {
+  const deadline = Date.now() + maxMs
+  let last: BossRecommendWindowRead = await readBossRecommendWindow(tabId)
+  let signature = bossRecommendWindowReady(last) ? bossRecommendSignature(last) : ''
+  let since = Date.now()
+  while (Date.now() < deadline) {
+    if (bossRecommendWindowReady(last) && signature !== '' && Date.now() - since >= RECOMMEND_STABLE_MS) return last
+    ctx.checkpoint()
+    await sleep(READY_POLL_MS)
+    last = await readBossRecommendWindow(tabId)
+    const next = bossRecommendWindowReady(last) ? bossRecommendSignature(last) : ''
+    if (next !== signature) { signature = next; since = Date.now() }
+  }
+  throw new PlatformError('CTX_NOT_READY',
+    `BOSS 推荐列表 ${Math.round(maxMs / 1000)} 秒内未稳定(${describeBossRecommendRead(last)})`, 'afterRecovery', 'pageBroken')
+}
+
+/** 身份已核对且停在推荐页的标签页;不在推荐页就干净失败——批次内不导航(推荐页运行连续性)。 */
+async function requireBossRecommendTab(fingerprint: string | undefined): Promise<chrome.tabs.Tab> {
+  const tab = await verifiedBossTab(fingerprint)
+  if (!isBossRecommendUrl(tab.url)) {
+    throw new PlatformError('CTX_NOT_READY', '请停在 BOSS 推荐页(当前不是 /web/chat/recommend)', 'afterRecovery', 'pageAbsent')
+  }
+  return tab
+}
+
+/**
+ * 把唯一的 BOSS 标签页导航到指定页并等它加载完。整页加载不是候选人可见动作;调用方只在批次之外用它
+ * (读职位管理页、切到推荐页开批),批次内的原语一律 requireBossRecommendTab。导航代数一变身份缓存即失效,
+ * 返回前重新核身份。
+ */
+async function ensureBossTabAt(
+  tab: chrome.tabs.Tab, ctx: PrimitiveContext, fingerprint: string, url: string,
+  isAt: (value: string | undefined) => boolean, what: string,
+): Promise<chrome.tabs.Tab> {
+  if (isAt(tab.url)) return tab
+  const tabId = tab.id!
+  await chrome.tabs.update(tabId, { url })
+  const deadline = Date.now() + RECOMMEND_NAV_WAIT_MS
+  let latest = await chrome.tabs.get(tabId)
+  const arrived = (): boolean => latest.status === 'complete' && isAt(latest.url)
+  while (!arrived() && Date.now() < deadline) {
+    ctx.checkpoint()
+    await sleep(READY_POLL_MS)
+    latest = await chrome.tabs.get(tabId)
+  }
+  if (!arrived()) {
+    throw new PlatformError('CTX_NOT_READY',
+      `导航到${what}后 ${RECOMMEND_NAV_WAIT_MS / 1000} 秒内未加载完(status=${latest.status ?? '?'})`, 'afterRecovery', 'pageBroken')
+  }
+  return verifiedBossTab(fingerprint)
+}
+
+/** 按 selector(+index)的点击计划:定位、文本核对、命中测试、点后观测全走 domLocateBySelector 一套(支持 `A >>> B`)。 */
+async function selectorClickPlan(
+  tabId: number, selector: string, index: number, expectText: string | null, label: string, expectPrefix?: string,
+): Promise<ClickPlan> {
+  const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [selector, index])
+  if (located.status !== 'ok') {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `${label}定位失败(${located.status}):${located.detail}`, 'afterRecovery')
+  }
+  if (expectText !== null && located.text !== expectText) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `${label}文本不符:页面「${located.text.slice(0, 16)}」,期望「${expectText}」`, 'afterRecovery')
+  }
+  // 前缀核对给带计数后缀的控件:筛选入口有筛选生效时显示「筛选·1」(2026-09-05 真机),逐字相等会把它拒掉。
+  if (expectPrefix !== undefined && !located.text.startsWith(expectPrefix)) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `${label}文本不符:页面「${located.text.slice(0, 16)}」,期望以「${expectPrefix}」开头`, 'afterRecovery')
+  }
+  return {
+    label: `${label}(${located.signature})`,
+    rect: located.clip,
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [selector, located.index, expectText, x, y]),
+    observe: async (): Promise<ClickObservation> => {
+      const after = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [selector, located.index])
+      return { trusted: null, onTarget: null, eventDriftPx: null,
+        after: after.status === 'ok' ? `靶子仍在:${after.signature}` : `靶子已不在(${after.status})` }
+    },
+  }
+}
+
+function recommendClickPlan(
+  tabId: number, innerSelector: string, index: number, expectText: string | null, label: string, expectPrefix?: string,
+): Promise<ClickPlan> {
+  return selectorClickPlan(tabId, `${RECOMMEND_FRAME} >>> ${innerSelector}`, index, expectText, label, expectPrefix)
+}
+
+/** 滚 iframe 文档本身(推荐列表的滚动容器就是它,§十七):与 debug.osScroll 同一内核。 */
+async function scrollBossRecommendDocument(
+  tabId: number, ctx: PrimitiveContext, direction: 'up' | 'down', distancePx: number,
+): Promise<OsScrollResult> {
+  const selector = `${RECOMMEND_FRAME} >>> html`
+  const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [selector, -1])
+  if (located.status !== 'ok') {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `推荐列表滚动容器定位失败(${located.status}):${located.detail}`, 'afterRecovery')
+  }
+  const target: ScrollTarget = {
+    label: `推荐列表 ${located.signature}`,
+    rect: located.clip,
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestIndexed, [selector, located.index, x, y]),
+    readMetrics: async () => {
+      const m = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [selector, located.index])
+      return m.found ? { scrollTop: m.scrollTop, scrollHeight: m.scrollHeight, clientHeight: m.clientHeight } : null
+    },
+  }
+  const result = await runOsScroll(BOSS_INJECT, tabId, ctx, target, direction, distancePx)
+  if (result.outcome === 'handServiceUnavailable') {
+    throw new PlatformError('CTX_NOT_READY', `手服务不可用,推荐列表未滚动(${result.detail ?? ''})`, 'afterRecovery', 'pageBroken')
+  }
+  if (result.outcome === 'refusedByGate') {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `推荐列表滚动被闸拒绝:${result.detail ?? ''}`, 'afterRecovery')
+  }
+  return result
+}
+
+/** 关快捷窗,尽力而为:它盖住卡片右侧整列按钮,不关下一张卡的「打招呼」点不到。关不掉只留痕,不影响本次结果。 */
+async function closeBossQuickChatBestEffort(tabId: number, ctx: PrimitiveContext, why: string): Promise<boolean> {
+  const readShell = (): Promise<{ open: boolean; closeCount: number; closeRect: DomRect4 }> =>
+    runInPage(BOSS_DOM, tabId, domReadBossQuickChatShell, [QUICK_CHAT_SEL.window, QUICK_CHAT_SEL.close])
+  try {
+    const shell = await readShell()
+    if (!shell.open) return true
+    if (shell.closeCount !== 1) {
+      reportHandLog('warn', 'quickChatCloseSkipped', `BOSS 快捷窗关闭键命中 ${shell.closeCount} 个,不点(${why})`)
+      return false
+    }
+    await paceBeforeClick()
+    await osClickOnce(tabId, ctx, {
+      label: '快捷窗关闭键',
+      rect: shell.closeRect,
+      hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestExpected, [QUICK_CHAT_SEL.close, 0, null, x, y]),
+      observe: async (): Promise<ClickObservation> => {
+        const after = await readShell()
+        return { trusted: null, onTarget: null, eventDriftPx: null, after: `快捷窗 ${after.open ? '仍开着' : '已关闭'}` }
+      },
+    }, '关快捷窗')
+    const gone = await pollUntil(ctx, readShell, (shell) => !shell.open, CLEAR_WAIT_MS)
+    if (!gone.satisfied) {
+      reportHandLog('warn', 'quickChatCloseFailed', `BOSS 点了快捷窗关闭键但窗口仍在(${why})`)
+      return false
+    }
+    return true
+  } catch (error) {
+    if (isStopExecution(error)) throw error
+    reportHandLog('warn', 'quickChatCloseFailed', `BOSS 快捷窗关闭异常(${why}):${describeError(error).slice(0, 200)}`)
+    return false
+  }
+}
+
+// ── job.readPublishedList ─────────────────────────────────────────────────────
+
+async function readBossPublishedJobs(ctx: PrimitiveContext, fingerprint: string | undefined): Promise<JobReadPublishedListData> {
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
+  ctx.checkpoint()
+  const tab = await ensureBossTabAt(await verifiedBossTab(fingerprint), ctx, fingerprint, BOSS_JOB_LIST_URL, isBossJobListUrl, '职位管理页')
+  const tabId = tab.id!
+  ctx.progress('核对 BOSS 职位管理页与登录身份', 15)
+  const read = (): Promise<BossJobListRead> => runInPage(BOSS_DOM, tabId, domReadBossJobList,
+    [JOB_LIST_SEL.frameSrc, JOB_LIST_SEL.tab, JOB_LIST_SEL.row, JOB_LIST_SEL.rowName, JOB_LIST_SEL.rowStatus])
+  // 读全的判据:行数等于页脚「共 N 个职位」。分页形态未见(测试账号只有一个职位),超一页会在这里如实停,不截断。
+  const settled = await pollUntil(ctx, read,
+    (list) => list.frame && list.tabs.length >= 1 && (list.rows.length >= 1 || list.total === 0) &&
+      (list.total === null || list.total === list.rows.length),
+    RECOMMEND_NAV_WAIT_MS)
+  const list = settled.value
+  if (!settled.satisfied) {
+    throw new PlatformError('ELEMENT_UNRESOLVED',
+      `BOSS 职位管理页 ${RECOMMEND_NAV_WAIT_MS / 1000} 秒内未完整渲染(iframe=${list.frame} 页签=${list.tabs.length} 行=${list.rows.length} 页脚共=${list.total ?? '未读到'})`,
+      'afterRecovery')
+  }
+  const projected = bossJobListSections(list.tabs, list.rows)
+  if (!projected.ok) throw new PlatformError('ELEMENT_UNRESOLVED', projected.reason, 'afterRecovery')
+  const extras = projected.sections.slice(Math.max(0, list.tabs.filter((tab) => bossFilterGroupName(tab) !== BOSS_JOB_TAB_ALL).length))
+  if (extras.length > 0) {
+    reportHandLog('warn', 'jobListStatusUnknown', `BOSS 职位管理页有行的状态文案不在页签里,按原样另起分区:${extras.map((s) => s.label).join('/')}`)
+  }
+  if (projected.sections.length > 16) throw new PlatformError('ELEMENT_UNRESOLVED', `职位分区数量 ${projected.sections.length} 超出契约上限`, 'afterRecovery')
+  if (projected.sections.reduce((count, section) => count + section.names.length, 0) > 200) {
+    throw new PlatformError('PAYLOAD_LIMIT', '平台职位数量超过当前契约上限', 'manualOnly')
+  }
+  const data: JobReadPublishedListData = { sections: projected.sections, observedAt: Date.now() }
+  if (validatePrimitiveData(PrimitiveName.JobReadPublishedList, 1, data).length !== 0) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '职位分区清单不符合当前契约', 'afterRecovery')
+  }
+  await verifiedBossTab(fingerprint)
+  ctx.progress('BOSS 职位分区清单读取完成', 100)
+  return data
+}
+
+// ── candidate.selectSourcingPosition ─────────────────────────────────────────
+
+/**
+ * 单职位直通:导航到推荐页、等列表就绪、按标题在职位选择器里唯一匹配、核当前项就是它、核全窗卡片的
+ * encryptJobId 都等于它。多职位账号的切换(展开 .ui-dropmenu 点 .job-item)后置未验,目标不是当前项就干净失败。
+ */
+async function selectBossSourcingPosition(
+  args: CandidateSelectSourcingPositionArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<CandidateSelectSourcingPositionData> {
+  if (validatePrimitiveArgs(PrimitiveName.CandidateSelectSourcingPosition, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '选择职位参数不符合当前契约', 'afterRecovery')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
+  ctx.checkpoint()
+  const tab = await ensureBossTabAt(await verifiedBossTab(fingerprint), ctx, fingerprint, BOSS_RECOMMEND_URL, isBossRecommendUrl, '推荐页')
+  const tabId = tab.id!
+  ctx.progress('核对 BOSS 推荐页与登录身份', 10)
+  const ready = await waitBossRecommendReady(tabId, ctx, RECOMMEND_NAV_WAIT_MS)
+  const match = matchBossJobItem(ready.jobItems, args.positionTitle)
+  if (match.status !== 'ok') {
+    throw new PlatformError('ELEMENT_UNRESOLVED',
+      `职位选择器里「${args.positionTitle}」命中 ${match.count} 项(候选:${ready.jobItems.map((item) => bossJobItemName(item.text)).join('/') || '无'})`,
+      'afterRecovery')
+  }
+  if (!match.current) {
+    throw new PlatformError('ELEMENT_UNRESOLVED',
+      `「${match.name}」不是当前选中职位(当前「${bossJobItemName(ready.positionText)}」);BOSS 多职位切换是第二刀后置项,本轮不点`,
+      'afterRecovery')
+  }
+  if (!match.value || match.value !== ready.positionRef) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '当前职位项读不到稳定 value', 'afterRecovery')
+  }
+  const strangers = ready.cards.filter((card) => card.encryptJobId !== match.value).length
+  if (strangers > 0) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `${strangers} 张卡片的职位与选择器当前项不一致,推荐页未稳定`, 'afterRecovery')
+  }
+  const data: CandidateSelectSourcingPositionData = { positionRef: match.value, positionTitle: match.name, observedAt: Date.now() }
+  if (validatePrimitiveData(PrimitiveName.CandidateSelectSourcingPosition, 1, data).length !== 0) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '职位选择结果不符合当前契约', 'afterRecovery')
+  }
+  await verifiedBossTab(fingerprint)
+  ctx.progress('BOSS 当前职位已核对', 100)
+  return data
+}
+
+// ── candidate.applySourcingFilters ───────────────────────────────────────────
+
+/** 当前职位与 args 一致(positionRef 逐字、职位名规范化后相等)。 */
+async function assertBossSourcingPosition(
+  tabId: number, ctx: PrimitiveContext, positionRef: string, positionTitle: string, what: string, maxMs = READY_WAIT_MS,
+): Promise<BossRecommendWindowReady> {
+  const read = await waitBossRecommendReady(tabId, ctx, maxMs)
+  if (read.positionRef !== positionRef) {
+    throw new PlatformError('GUARD_FAILED', `${what}:当前职位与命令不一致`, 'afterRecovery')
+  }
+  if (bossJobItemName(read.positionText) !== normalizeBossMessageText(positionTitle)) {
+    throw new PlatformError('GUARD_FAILED', `${what}:当前职位名「${bossJobItemName(read.positionText)}」与命令「${positionTitle}」不一致`, 'afterRecovery')
+  }
+  return read
+}
+
+/**
+ * 契约流程「逐项差异覆盖 → 完整回读 → 唯一点击确定 → 等待推荐窗口连续稳定 → 重新打开筛选 → 同一读取器回读 → 点击取消」
+ * 在 BOSS 上的形态(2026-09-05 真机):点「筛选」展开面板;点选项即时切 active(「不限」自动退选);点「确定」面板
+ * 自行收起、列表整表刷新;BOSS 没有「取消」键,收起 = 再点一次「筛选」。VIP 锁定组只回读不点。
+ */
+async function applyBossSourcingFilters(
+  args: CandidateApplySourcingFiltersArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<CandidateApplySourcingFiltersData> {
+  if (validatePrimitiveArgs(PrimitiveName.CandidateApplySourcingFilters, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '筛选参数不符合当前契约', 'afterRecovery')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
+  const planned = planBossSourcingFilters(args.filters)
+  if (!planned.ok) throw new PlatformError('GUARD_FAILED', planned.reason, 'afterRecovery')
+  const tab = await requireBossRecommendTab(fingerprint)
+  const tabId = tab.id!
+  ctx.checkpoint()
+  await assertBossSourcingPosition(tabId, ctx, args.positionRef, args.positionTitle, '筛选前')
+  ctx.progress('核对 BOSS 推荐页当前职位', 10)
+  const trace: string[] = []
+  // 入口文案是「筛选」或带计数的「筛选·N」,按前缀认。
+  const filterLabelPlan = (label: string): Promise<ClickPlan> => recommendClickPlan(tabId, RECOMMEND_SEL.filterLabel, -1, null, label, FILTER_LABEL)
+  const openPanel = async (what: string): Promise<BossFilterPanelRead> => {
+    const before = await readBossFilterPanel(tabId)
+    if (!before.frame) throw new PlatformError('CTX_NOT_READY', `${what}:推荐页 iframe 不在`, 'afterRecovery', 'pageBroken')
+    if (before.panel) return before
+    await paceBeforeClick()
+    await osClickOnce(tabId, ctx, await filterLabelPlan('筛选入口'), what)
+    const opened = await pollUntil(ctx, () => readBossFilterPanel(tabId), (read) => read.panel)
+    if (!opened.satisfied) throw new PlatformError('ELEMENT_UNRESOLVED', `${what}后 ${READY_WAIT_MS / 1000} 秒内筛选面板未展开`, 'afterRecovery')
+    trace.push(what)
+    return opened.value
+  }
+  const closePanel = async (what: string): Promise<void> => {
+    const before = await readBossFilterPanel(tabId)
+    if (!before.panel) return
+    await paceBeforeClick()
+    await osClickOnce(tabId, ctx, await filterLabelPlan('筛选入口'), what)
+    const closed = await pollUntil(ctx, () => readBossFilterPanel(tabId), (read) => !read.panel)
+    if (!closed.satisfied) throw new PlatformError('ELEMENT_UNRESOLVED', `${what}后筛选面板仍展开着,未收口`, 'afterRecovery')
+    trace.push(what)
+  }
+  let panel = await openPanel('展开筛选')
+  const clicks = bossFilterClicks(panel, planned.plan)
+  if (!clicks.ok) throw new PlatformError('ELEMENT_UNRESOLVED', clicks.reason, 'afterRecovery')
+  ctx.progress(`筛选面板已展开,${clicks.clicks.length} 项待改`, 25)
+  for (const click of clicks.clicks) {
+    ctx.checkpoint()
+    await paceBeforeClick()
+    const inner = `${RECOMMEND_SEL.filterPanel} .filters-wrap:not(.${RECOMMEND_SEL.filterVipBlockClass}) ${RECOMMEND_SEL.filterBox}.${click.boxKey} ${RECOMMEND_SEL.filterOption}`
+    await osClickOnce(tabId, ctx, await recommendClickPlan(tabId, inner, click.index, click.text, `筛选项「${click.text}」`), `点筛选项「${click.text}」`)
+    const settled = await pollUntil(ctx, () => readBossFilterPanel(tabId), (read) => {
+      const group = read.groups.find((g) => !g.vip && g.boxKey === click.boxKey)
+      const option = group?.options[click.index]
+      return !!option && option.text === click.text && option.active === click.expectActive
+    }, CLEAR_WAIT_MS)
+    if (!settled.satisfied) {
+      throw new PlatformError('ELEMENT_UNRESOLVED', `点了筛选项「${click.text}」但选中态未变成${click.expectActive ? '选中' : '未选'}`, 'afterRecovery')
+    }
+    trace.push(`${click.expectActive ? '选' : '退'}「${click.text}」`)
+  }
+  panel = await readBossFilterPanel(tabId)
+  const first = projectBossSourcingFilters(panel, args.filters)
+  if (!first.ok) throw new PlatformError('ELEMENT_UNRESOLVED', `覆盖后回读与目标不一致:${first.reason}`, 'afterRecovery')
+  const confirmMatches = panel.buttons.map((text, index) => ({ text, index })).filter((b) => b.text === FILTER_CONFIRM)
+  if (confirmMatches.length !== 1) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `筛选面板「${FILTER_CONFIRM}」键命中 ${confirmMatches.length} 个(按钮:${panel.buttons.join('/')})`, 'afterRecovery')
+  }
+  ctx.checkpoint()
+  await paceBeforeClick()
+  await verifiedBossTab(fingerprint)
+  await osClickOnce(tabId, ctx, await recommendClickPlan(tabId, RECOMMEND_SEL.filterButton, confirmMatches[0]!.index, FILTER_CONFIRM, '筛选确定键'), '点筛选确定')
+  trace.push('确定')
+  const collapsed = await pollUntil(ctx, () => readBossFilterPanel(tabId), (read) => !read.panel)
+  if (!collapsed.satisfied) throw new PlatformError('ELEMENT_UNRESOLVED', '点确定后筛选面板未收起', 'afterRecovery')
+  ctx.progress('筛选已提交,等待推荐列表刷新稳定', 55)
+  await waitBossRecommendStable(tabId, ctx, RECOMMEND_NAV_WAIT_MS)
+  await assertBossSourcingPosition(tabId, ctx, args.positionRef, args.positionTitle, '确定后')
+  panel = await openPanel('重开筛选回读')
+  const second = projectBossSourcingFilters(panel, args.filters)
+  if (!second.ok) {
+    await closePanel('回读不一致后收起')
+    throw new PlatformError('ELEMENT_UNRESOLVED', `确定后重开回读与目标不一致:${second.reason}`, 'afterRecovery')
+  }
+  await closePanel('回读后收起')
+  const final = await assertBossSourcingPosition(tabId, ctx, args.positionRef, args.positionTitle, '收起后')
+  const data: CandidateApplySourcingFiltersData = {
+    positionRef: args.positionRef,
+    positionTitle: bossJobItemName(final.positionText),
+    filters: second.filters,
+    observedAt: Date.now(),
+  }
+  if (validatePrimitiveData(PrimitiveName.CandidateApplySourcingFilters, 1, data).length !== 0) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '筛选结果不符合当前契约', 'afterRecovery')
+  }
+  await verifiedBossTab(fingerprint)
+  console.info('[RecruitHelper] boss_apply_sourcing_filters', trace.join(' | '))
+  ctx.progress('BOSS 筛选已生效并回读一致', 100)
+  return data
+}
+
+// ── candidate.readSourcingWindow ─────────────────────────────────────────────
+
+function firstVisibleCardIndex(read: BossRecommendWindowReady): number {
+  return read.cards.findIndex((card) => card.visible)
+}
+
+async function readBossSourcingWindow(
+  args: CandidateReadSourcingWindowArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<CandidateReadSourcingWindowData> {
+  if (validatePrimitiveArgs(PrimitiveName.CandidateReadSourcingWindow, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '窗口读取参数不符合当前契约', 'afterRecovery')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
+  const tab = await requireBossRecommendTab(fingerprint)
+  const tabId = tab.id!
+  ctx.checkpoint()
+  const before = await waitBossRecommendStable(tabId, ctx, READY_WAIT_MS)
+  ctx.progress('推荐窗口已就绪', 20)
+  const trace: string[] = []
+  if (args.move === 'reset' && before.scrollTop > 0) {
+    await paceBeforeClick()
+    const res = await scrollBossRecommendDocument(tabId, ctx, 'up', before.scrollTop + 200)
+    trace.push(`回顶 ${res.outcome} ${res.scrollTopBefore}→${res.scrollTopAfter}`)
+  } else if (args.move === 'next') {
+    const room = before.scrollHeight - before.scrollTop - before.clientHeight
+    if (room > 1) {
+      await paceBeforeClick()
+      // 至多推进一个可见窗口:一屏高;滚到底会触发平台自动加载下一页(+15),由稳定等待吸收。
+      const res = await scrollBossRecommendDocument(tabId, ctx, 'down', Math.max(1, Math.min(before.clientHeight, room)))
+      trace.push(`下翻 ${res.outcome} ${res.scrollTopBefore}→${res.scrollTopAfter}`)
+    } else {
+      trace.push(`已在列表底部(finished=${before.finished})`)
+    }
+  }
+  const after = await waitBossRecommendStable(tabId, ctx, READY_WAIT_MS)
+  if (after.positionRef !== before.positionRef) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '窗口动作前后当前职位发生变化', 'afterRecovery')
+  }
+  const visible = after.cards.filter((card) => card.visible)
+  if (visible.length === 0) throw new PlatformError('ELEMENT_UNRESOLVED', '推荐列表视口内没有卡片', 'afterRecovery')
+  const refs: string[] = []
+  for (const card of visible.slice(0, LIST_WINDOW_MAX)) {
+    if (!(card.geekId > 0) || !Number.isSafeInteger(card.geekId)) {
+      throw new PlatformError('ELEMENT_UNRESOLVED', '有卡片读不到稳定候选人身份(geekId)', 'afterRecovery')
+    }
+    if (card.encryptJobId !== after.positionRef) {
+      throw new PlatformError('ELEMENT_UNRESOLVED', '有卡片的职位与当前职位不一致', 'afterRecovery')
+    }
+    const ref = String(card.geekId)
+    if (refs.includes(ref)) throw new PlatformError('ELEMENT_UNRESOLVED', '视口内候选人身份重复', 'afterRecovery')
+    refs.push(ref)
+  }
+  const moved = args.move === 'current'
+    ? false
+    : after.scrollTop !== before.scrollTop || firstVisibleCardIndex(after) !== firstVisibleCardIndex(before)
+  const title = bossJobItemName(after.positionText)
+  const data: CandidateReadSourcingWindowData = {
+    positionRef: after.positionRef,
+    positionTitle: title && title.length <= 256 ? title : null,
+    platformUserRefs: refs,
+    moved,
+    observedAt: Date.now(),
+  }
+  if (validatePrimitiveData(PrimitiveName.CandidateReadSourcingWindow, 1, data).length !== 0) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '窗口读取结果不符合当前契约', 'afterRecovery')
+  }
+  await verifiedBossTab(fingerprint)
+  if (trace.length > 0) console.info('[RecruitHelper] boss_read_sourcing_window', trace.join(' | '))
+  ctx.progress(`推荐窗口 ${refs.length} 人,moved=${moved}`, 100)
+  return data
+}
+
+// ── candidate.readSourcingTargetResume ───────────────────────────────────────
+
+/**
+ * 只读当前 pageList 里唯一匹配的目标,从卡片 geekInfo 投影五分区;不开详情、不滚动、不点击(出口 §四 第 6 件),
+ * 契约里「关闭详情、确认弹框消失」在 BOSS 上是空操作。目标不在/身份重复/摘要全空按 manualOnly 收:脑侧
+ * skipsUnreadableSourcingTarget 据此跳过该候选人、批次照常;页面级不就绪才 afterRecovery(批次停)。
+ */
+async function readBossSourcingTargetResume(
+  args: CandidateReadSourcingTargetResumeArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<CandidateReadSourcingResumeData> {
+  if (validatePrimitiveArgs(PrimitiveName.CandidateReadSourcingTargetResume, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '目标简历读取参数不符合当前契约', 'afterRecovery')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
+  const geekId = parseBossGeekId(args.platformUserRef)
+  if (geekId === null) throw new PlatformError('GUARD_FAILED', '候选人引用不是本平台形态', 'afterRecovery')
+  const tab = await requireBossRecommendTab(fingerprint)
+  const tabId = tab.id!
+  ctx.checkpoint()
+  const settled = await pollUntil(ctx, () => readBossRecommendTarget(tabId, geekId),
+    (read) => read.status === 'ready' || read.status === 'absent' || read.status === 'duplicated')
+  const read = settled.value
+  if (read.status === 'no_frame' || read.status === 'no_list') {
+    throw new PlatformError('CTX_NOT_READY', `推荐页未就绪(${read.status})`, 'afterRecovery', 'pageBroken')
+  }
+  if (read.status === 'absent') {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '目标不在当前推荐列表里', 'manualOnly')
+  }
+  if (read.status === 'duplicated') {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `目标在推荐列表里出现 ${read.count} 次,身份不唯一`, 'manualOnly')
+  }
+  if (read.card.encryptJobId !== args.positionRef || read.positionRef !== args.positionRef) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '目标卡片的职位与命令职位不一致', 'afterRecovery')
+  }
+  const title = bossJobItemName(read.positionText)
+  const data = projectBossSourcingResume(read.card, args.positionRef, title || null, Date.now())
+  if (!data.displayName && !data.workExperiences && !data.education && !data.selfEvaluation) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '目标卡片摘要全空,不返回空简历冒充读到', 'manualOnly')
+  }
+  if (jsonBytes(data) > RESULT_DATA_BUDGET) throw new PlatformError('PAYLOAD_LIMIT', '简历摘要超过内联载荷上限', 'manualOnly')
+  if (validatePrimitiveData(PrimitiveName.CandidateReadSourcingTargetResume, 1, data).length !== 0) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '简历摘要不符合当前契约', 'manualOnly')
+  }
+  await verifiedBossTab(fingerprint)
+  ctx.progress('目标卡片摘要读取完成', 100)
+  return data
+}
+
+// ── chat.sendGreeting(方案一:首击 → 继续沟通 → 快捷窗打字 → 发送 → 正证 → 关窗) ──
+
+/** 首击已确认之后的一切失败:关系已建立、正文未发出,如实报 possible 交脑验证读(出口 §二 部分失败形态)。 */
+function greetingAfterFirstClick(message: string): PlatformError {
+  return new PlatformError('POSTCONDITION_UNCONFIRMED', `关系已建立,正文未发出:${message}`, 'manualOnly', undefined, 'possible')
+}
+
+/** 目标卡的「打招呼」/「继续沟通」按钮:selector 直接绑 encryptGeekId,列表重排也不会点错人。 */
+function greetButtonSelector(encryptGeekId: string, buttonSel: string): string {
+  return `${RECOMMEND_SEL.cardInner}[data-geekid="${encryptGeekId}"] ${buttonSel}`
+}
+
+/**
+ * 把目标卡滚进视口(至多两次,每次一屏内):脑在采集与发招呼之间可能已把窗口推进到别处。
+ * 只在按钮定位为 offscreen 时才滚;滚完仍看不见就干净失败,不猜。
+ */
+async function bringBossCardIntoView(tabId: number, ctx: PrimitiveContext, encryptGeekId: string, geekId: number): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [`${RECOMMEND_FRAME} >>> ${greetButtonSelector(encryptGeekId, RECOMMEND_SEL.greetButton)}`, -1])
+    if (located.status !== 'offscreen') return
+    const target = await readBossRecommendTarget(tabId, geekId)
+    const window = await readBossRecommendWindow(tabId)
+    if (target.status !== 'ready' || window.status !== 'ready') return
+    const index = window.cards.findIndex((card) => card.geekId === geekId)
+    if (index < 0) return
+    // 用卡片在 pageList 里的序号估方向:前面的卡全在上方。滚一屏,由定位闸再判。
+    const firstVisible = firstVisibleCardIndex(window)
+    const direction: 'up' | 'down' = firstVisible >= 0 && index < firstVisible ? 'up' : 'down'
+    await paceBeforeClick()
+    const res = await scrollBossRecommendDocument(tabId, ctx, direction, Math.max(120, window.clientHeight))
+    if (res.outcome === 'edge' || res.outcome === 'stuck') return
+    await waitBossRecommendStable(tabId, ctx, READY_WAIT_MS)
+  }
+}
+
+async function sendBossGreeting(
+  args: ChatSendGreetingArgs, guards: ChatSendGreetingGuards, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<ChatSendGreetingData> {
+  if (validatePrimitiveArgs(PrimitiveName.ChatSendGreeting, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '招呼参数不符合当前契约', 'afterRecovery')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
+  if (guards.expectUnestablished !== true) throw new PlatformError('GUARD_FAILED', '招呼命令缺少未建联条件写闸', 'afterRecovery')
+  const geekId = parseBossGeekId(args.platformUserRef)
+  if (geekId === null) throw new PlatformError('GUARD_FAILED', '候选人引用不是本平台形态', 'afterRecovery')
+  const normalizedText = normalizeBossMessageText(args.text)
+  if (!normalizedText) throw new PlatformError('GUARD_FAILED', '规范化后的招呼为空,拒绝发送', 'afterRecovery')
+  // 与脑侧 SendFingerprint = HashText(GreetingText) 同配方(NFC、空白折叠、trim 后 sha256)。
+  const contentHash = await sha256Hex(normalizedText)
+  const tab = await requireBossRecommendTab(fingerprint)
+  const tabId = tab.id!
+  ctx.checkpoint()
+  const trace: string[] = []
+  // 快捷窗若开着(上一位候选人关窗失败)先关:它盖住卡片右侧整列按钮。
+  if (!(await closeBossQuickChatBestEffort(tabId, ctx, '首击前清场'))) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '首击前快捷窗关不掉,它会盖住「打招呼」', 'afterRecovery')
+  }
+  // 目标绑定 + 关系未建立(greeting evaluator;点前最后一刻再调同一读法)。
+  const evaluate = async (what: string): Promise<Extract<BossRecommendTargetRead, { status: 'ready' }>> => {
+    const read = await readBossRecommendTarget(tabId, geekId)
+    if (read.status === 'no_frame' || read.status === 'no_list') {
+      throw new PlatformError('CTX_NOT_READY', `${what}:推荐页未就绪(${read.status})`, 'afterRecovery', 'pageBroken')
+    }
+    if (read.status === 'absent') throw new PlatformError('TARGET_NOT_FOUND', `${what}:目标不在当前推荐列表里`, 'afterRecovery')
+    if (read.status === 'duplicated') throw new PlatformError('ELEMENT_UNRESOLVED', `${what}:目标在列表里出现 ${read.count} 次`, 'afterRecovery')
+    if (read.card.encryptJobId !== args.positionRef || read.positionRef !== args.positionRef) {
+      throw new PlatformError('GUARD_FAILED', `${what}:目标卡片的职位与命令职位不一致`, 'afterRecovery')
+    }
+    return read
+  }
+  const first = await evaluate('首击前')
+  const state = bossCardContactState(first.card)
+  if (state !== 'unestablished') {
+    throw new PlatformError('GUARD_FAILED', `目标关系态不是未建立(isFriend=${first.card.isFriend ?? 'null'} 按钮「${first.card.buttonText}」),不打招呼`, 'afterRecovery')
+  }
+  const encryptGeekId = first.card.encryptGeekId
+  const geekSource = first.card.geekSource
+  const conversationRef = bossConversationRef(geekId, geekSource)
+  await bringBossCardIntoView(tabId, ctx, encryptGeekId, geekId)
+  const greetPlan = await recommendClickPlan(tabId, greetButtonSelector(encryptGeekId, RECOMMEND_SEL.greetButton), -1, GREET_TEXT, '打招呼钮')
+  ctx.progress('目标卡片已绑定,准备首击', 20)
+  // 点前最后一刻:同一 evaluator 再读一次,身份、职位、关系态任一变化都在不可逆动作前失败。
+  ctx.checkpoint()
+  await paceBeforeClick()
+  await verifiedBossTab(fingerprint)
+  const again = await evaluate('点击前')
+  if (bossCardContactState(again.card) !== 'unestablished') {
+    throw new PlatformError('GUARD_FAILED', '点击前读到关系已不是未建立,已取消', 'afterRecovery')
+  }
+  if (Date.now() > ctx.irreversibleNotAfterMs) {
+    throw new PlatformError('CTX_LOST_DURING_EXEC', '不可逆动作窗口已过,未点击', 'afterRecovery')
+  }
+  // 证词只能写一次(dispatcher 拒绝同一命令二次 beforeSideEffect):整条命令是一次招呼动作,attempting 紧贴首击。
+  await ctx.beforeSideEffect()
+  const firstProbe = await runOsProbe(BOSS_INJECT, tabId, ctx, greetPlan)
+  if (firstProbe.outcome !== 'clicked') {
+    throw new PlatformError(
+      firstProbe.outcome === 'handServiceUnavailable' ? 'CTX_NOT_READY' : 'ELEMENT_UNRESOLVED',
+      `打招呼钮未点击:${firstProbe.detail ?? firstProbe.outcome}`, 'afterRecovery')
+  }
+  trace.push(`首击 ${firstProbe.detail ?? ''}`)
+  // 首击正证(判据表第一行):同卡 isFriend 0→1,或按钮变「继续沟通」。数秒内没翻就是未确认,不进快捷窗、不打字。
+  const established = await pollUntil(ctx, () => readBossRecommendTarget(tabId, geekId),
+    (read) => read.status === 'ready' && bossCardContactState(read.card) === 'established')
+  if (!(established.value.status === 'ready' && bossCardContactState(established.value.card) === 'established')) {
+    const seen = established.value.status === 'ready'
+      ? `isFriend=${established.value.card.isFriend ?? 'null'} 按钮「${established.value.card.buttonText}」`
+      : established.value.status
+    throw new PlatformError('POSTCONDITION_UNCONFIRMED',
+      `只点击了一次打招呼,但 ${READY_WAIT_MS / 1000} 秒内未见关系建立(${seen};${trace.join(' | ')})`,
+      'manualOnly', undefined, 'possible')
+  }
+  trace.push('关系已建立')
+  ctx.progress('首击已确认关系建立,打开快捷窗', 45)
+  // 第二步:点「继续沟通」弹快捷窗。从这里起任何失败都是「关系已建立,正文未发出」。
+  let continuePlan: ClickPlan
+  try {
+    await paceBeforeClick()
+    continuePlan = await recommendClickPlan(tabId, greetButtonSelector(encryptGeekId, RECOMMEND_SEL.continueButton), -1, CONTINUE_TEXT, '继续沟通钮')
+  } catch (error) {
+    if (isStopExecution(error)) throw error
+    throw greetingAfterFirstClick(`继续沟通钮定位失败:${describeError(error).slice(0, 200)}`)
+  }
+  const continueProbe = await runOsProbe(BOSS_INJECT, tabId, ctx, continuePlan)
+  if (continueProbe.outcome !== 'clicked') throw greetingAfterFirstClick(`继续沟通钮未点击:${continueProbe.detail ?? continueProbe.outcome}`)
+  trace.push('点了继续沟通')
+  const chatReady = await pollUntil(ctx, () => readBossQuickChat(tabId),
+    (chat) => chat.status === 'ready' && chat.uid === geekId && chat.friendSource === geekSource)
+  const chat = chatReady.value
+  if (!(chat.status === 'ready' && chat.uid === geekId && chat.friendSource === geekSource)) {
+    const seen = chat.status === 'ready' ? `快捷窗绑定的是别人(uid 不同)` : `快捷窗 ${chat.status}`
+    throw greetingAfterFirstClick(`${READY_WAIT_MS / 1000} 秒内快捷窗未绑定目标(${seen})`)
+  }
+  const baselineMids = new Set(chat.rows.map((row) => row.mid))
+  trace.push(`快捷窗已绑定目标,基线 ${chat.rows.length} 行`)
+  // 打字:与 sendBossMessage 同一条路(焦点 → 前台闸 → 清空 → 排版 → 播放 → 回读逐字相等)。
+  const composerId = QUICK_CHAT_SEL.composerId
+  const readComposer = (): Promise<ReturnType<typeof mainReadComposer>> => runInPage(BOSS_DOM, tabId, mainReadComposer, [composerId])
+  let composer = await readComposer()
+  if (!composer.found) throw greetingAfterFirstClick('快捷窗里找不到输入框')
+  if (!composer.focused) {
+    try {
+      await paceBeforeClick()
+      await osClickOnce(tabId, ctx, await bossComposerClickPlan(tabId, composerId), '点快捷窗输入框取焦点')
+    } catch (error) {
+      if (isStopExecution(error)) throw error
+      throw greetingAfterFirstClick(describeError(error).slice(0, 200))
+    }
+    composer = await readComposer()
+    if (!composer.focused) throw greetingAfterFirstClick('点中输入框但焦点没到')
+    trace.push('点了输入框取焦点')
+  }
+  const focusWait = await pollUntil(ctx, readComposer, (read) => read.windowFocused)
+  if (!focusWait.value.windowFocused) throw greetingAfterFirstClick(`等了 ${READY_WAIT_MS / 1000} 秒 Chrome 仍不在前台,按键会打到别的应用上`)
+  if (!focusWait.value.focused) throw greetingAfterFirstClick('打字前焦点已离开输入框')
+  if (focusWait.value.text !== '') {
+    try {
+      await clearBossComposerByKeys(tabId, ctx, trace, focusWait.value.text.length, composerId)
+    } catch (error) {
+      if (isStopExecution(error)) throw error
+      throw greetingAfterFirstClick(describeError(error).slice(0, 200))
+    }
+    const cleared = await readComposer()
+    if (!cleared.focused || !cleared.windowFocused) throw greetingAfterFirstClick('清空输入框后焦点或前台状态已变')
+  }
+  const { text: typedText, removed } = newlinesToSpaces(args.text)
+  if (removed > 0) trace.push(`${removed} 个换行符换成空格`)
+  if (typedText === '') throw greetingAfterFirstClick('去掉换行之后没有内容可打')
+  ctx.checkpoint()
+  let composed
+  try {
+    composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0))
+  } catch (error) {
+    throw greetingAfterFirstClick(`排版器自身异常:${describeError(error).slice(0, 200)}`)
+  }
+  if (!composed.ok) throw greetingAfterFirstClick(`文案排不出合格键序(${composed.tries} 次):${composed.reasons.join(';').slice(0, 200)}`)
+  let played
+  try {
+    played = await playTypePlan(composed.plan)
+  } catch (error) {
+    throw greetingAfterFirstClick(isHandServiceDown(error) ? '手服务不可用,打字未开始' : `打字半途失败,输入框可能残留草稿:${describeError(error).slice(0, 200)}`)
+  }
+  trace.push(`发了 ${played.keys} 次按键${played.words ? ` | ${played.words}` : ''}`)
+  const typed = await readComposer()
+  if (normalizeBossMessageText(typed.text) !== normalizeBossMessageText(typedText)) {
+    throw greetingAfterFirstClick(`上屏文本与文案不同,已停在草稿:期望 ${typedText.length} 字,实得「${typed.text.slice(0, 200)}」`)
+  }
+  ctx.progress('招呼正文已上屏,准备发送', 70)
+  // 最后一道闸之后唯一一次点击发送:快捷窗仍绑定目标(MAIN)+ 落点在唯一发送钮上且编辑器文本等于文案(isolated)。
+  const button = await runInPage(BOSS_DOM, tabId, domReadBossSendButton, [QUICK_CHAT_SEL.sendButton])
+  if (!button.found) throw greetingAfterFirstClick(`快捷窗发送钮认不出(命中 ${button.count} 个)`)
+  if (button.text !== SEND_TEXT) throw greetingAfterFirstClick(`发送钮文案不是「${SEND_TEXT}」(读到「${button.text}」)`)
+  const sendPlan: ClickPlan = {
+    label: '快捷窗发送钮',
+    rect: button.rect,
+    hitTest: async (x, y) => {
+      const bound = await readBossQuickChat(tabId)
+      if (!(bound.status === 'ready' && bound.uid === geekId && bound.friendSource === geekSource)) {
+        return { onTarget: false, found: `快捷窗不再绑定目标(${bound.status})` }
+      }
+      return runInPage(BOSS_DOM, tabId, domBossQuickSendGate, [QUICK_CHAT_SEL.sendButton, x, y, composerId, typedText])
+    },
+    observe: async (): Promise<ClickObservation> => {
+      const after = await readComposer()
+      return { trusted: null, onTarget: null, eventDriftPx: null, after: `输入框内容长度=${after.text.length}` }
+    },
+  }
+  ctx.checkpoint()
+  await paceBeforeClick()
+  await verifiedBossTab(fingerprint)
+  if (Date.now() > ctx.irreversibleNotAfterMs) throw greetingAfterFirstClick('不可逆动作窗口已过,已停在草稿')
+  const dispatchedAt = Date.now()
+  const sendProbe = await runOsProbe(BOSS_INJECT, tabId, ctx, sendPlan)
+  if (sendProbe.outcome !== 'clicked') throw greetingAfterFirstClick(`发送钮未点击,已停在草稿:${sendProbe.detail ?? sendProbe.outcome}`)
+  trace.push(`点了发送 ${sendProbe.detail ?? ''}`)
+  // 正文正证(判据表第三行):快捷窗消息数组出现我方文本行,不在基线里、哈希相等、服务端确认(status 1/2)、时间不早于派发。
+  const deadline = Date.now() + READY_WAIT_MS
+  let lastSeen = ''
+  await sleep(500)
+  while (Date.now() < deadline) {
+    ctx.checkpoint()
+    try {
+      const after = await readBossQuickChat(tabId)
+      if (after.status === 'ready' && after.uid === geekId && after.friendSource === geekSource) {
+        const fresh = after.rows.filter((row) => !baselineMids.has(row.mid) && row.direction === 'out' && (row.status === 1 || row.status === 2))
+        let hits = 0
+        for (const row of fresh) {
+          const projected = projectBossMessage(row)
+          if (projected.kind !== 'text') continue
+          if (await sha256Hex(projected.hashInput) !== contentHash) continue
+          if (row.time !== null && row.time < dispatchedAt - SEND_CLOCK_TOLERANCE_MS) continue
+          hits += 1
+        }
+        lastSeen = `新行 ${after.rows.filter((row) => !baselineMids.has(row.mid)).length},命中 ${hits}`
+        if (hits >= 1) {
+          trace.push('正文已可见')
+          await closeBossQuickChatBestEffort(tabId, ctx, '发送后收窗')
+          await verifiedBossTab(fingerprint)
+          ctx.progress('招呼已发出并在快捷窗确认', 100)
+          console.info('[RecruitHelper] boss_send_greeting', trace.join(' | '))
+          return {
+            platformUserRef: args.platformUserRef,
+            positionRef: args.positionRef,
+            conversationRef,
+            contentHash,
+            observedAt: Date.now(),
+          }
+        }
+      } else {
+        lastSeen = `快捷窗 ${after.status === 'ready' ? '绑定已变' : after.status}`
+      }
+    } catch (error) {
+      if (isStopExecution(error)) throw error
+      lastSeen = `读取异常 ${describeError(error).slice(0, 120)}`
+    }
+    await sleep(500)
+  }
+  throw new PlatformError('POSTCONDITION_UNCONFIRMED',
+    `关系已建立、只点击了一次发送,但未在快捷窗确认正文(${lastSeen};${trace.join(' | ')})`,
+    'manualOnly', undefined, 'possible')
+}
+
+// ── chat.readGreetingOutcome(第一版只读推荐卡,出口 §四 第 5 件) ─────────────────
+
+async function readBossGreetingOutcome(
+  args: ChatReadGreetingOutcomeArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<ChatReadGreetingOutcomeData> {
+  if (validatePrimitiveArgs(PrimitiveName.ChatReadGreetingOutcome, 1, args).length !== 0) {
+    throw new PlatformError('GUARD_FAILED', '招呼结果读取参数不符合当前契约', 'manualOnly')
+  }
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  const geekId = parseBossGeekId(args.platformUserRef)
+  if (geekId === null) throw new PlatformError('GUARD_FAILED', '候选人引用不是本平台形态', 'manualOnly')
+  ctx.checkpoint()
+  // intrusive/idempotentReadReceipt 紧贴第一次平台读取设置取消安全点;不写 witness(与智联同款)。
+  await ctx.beforeSideEffect()
+  try {
+    const tab = await requireBossRecommendTab(fingerprint)
+    const read = await readBossRecommendTarget(tab.id!, geekId)
+    if (read.status === 'ready' && read.card.encryptJobId === args.positionRef && bossCardContactState(read.card) === 'established') {
+      return {
+        confirmed: true,
+        contentHash: args.contentHash,
+        conversationRef: bossConversationRef(geekId, read.card.geekSource),
+        observedAt: Date.now(),
+      }
+    }
+    reportHandLog('warn', 'greetingOutcomeUnconfirmed',
+      `BOSS 招呼验证读未取得正证:${read.status === 'ready' ? `isFriend=${read.card.isFriend ?? 'null'} 按钮「${read.card.buttonText}」职位一致=${read.card.encryptJobId === args.positionRef}` : read.status}`)
+  } catch (error) {
+    if (isStopExecution(error)) throw error
+    // 页面不在、目标消失、账号无法复核或读取异常都不证明招呼失败;留痕后如实回未确认。
+    reportHandLog('warn', 'greetingOutcomeReadFailed', `BOSS 招呼验证读异常:${describeError(error).slice(0, 200)}`)
+  }
+  return { confirmed: false, observedAt: Date.now() }
+}
+
 /** 只为 Node 单测导出纯函数与页面函数;生产 bundle 无引用时被 tree-shake。 */
 export const bossTestHooks = Object.freeze({
   bossThreadReadSettled,
@@ -4342,6 +5903,26 @@ export const bossTestHooks = Object.freeze({
   mainReadBossListWindow,
   mainReadBossCurrentConversation,
   mainReadBossThread,
+  // 第二刀(2026-09-05):推荐页采集 + 打招呼。
+  parseBossGeekId,
+  bossFilterGroupName,
+  bossJobItemName,
+  matchBossJobItem,
+  planBossSourcingFilters,
+  bossFilterClicks,
+  projectBossSourcingFilters,
+  bossJobListSections,
+  bossCardContactState,
+  projectBossSourcingResume,
+  mainReadBossRecommendWindow,
+  mainReadBossRecommendTarget,
+  mainReadBossQuickChat,
+  domReadBossFilterPanel,
+  domReadBossJobList,
+  domReadBossQuickChatShell,
+  domBossQuickSendGate,
+  RECOMMEND_SEL,
+  QUICK_CHAT_SEL,
 })
 
 export const bossAdapter = {
@@ -4376,4 +5957,12 @@ export const bossAdapter = {
   captureThreadScreenshot: ({ args, ctx, fingerprint }) => captureBossThreadScreenshot(args, ctx, fingerprint),
   // 建档后的简历补采(2026-09-03 甲方选 B):摘要级、零点击,见 readBossResume。
   readResume: ({ args, ctx, fingerprint }) => readBossResume(args, ctx, fingerprint),
+  // 第二刀的七条(2026-09-05 开工,出口 docs/boss/第二刀出口-采集与打招呼-2026-09-04.md):推荐页采集 + 打招呼。
+  readPublishedJobs: ({ ctx, fingerprint }) => readBossPublishedJobs(ctx, fingerprint),
+  selectSourcingPosition: ({ args, ctx, fingerprint }) => selectBossSourcingPosition(args, ctx, fingerprint),
+  applySourcingFilters: ({ args, ctx, fingerprint }) => applyBossSourcingFilters(args, ctx, fingerprint),
+  readSourcingWindow: ({ args, ctx, fingerprint }) => readBossSourcingWindow(args, ctx, fingerprint),
+  readSourcingTargetResume: ({ args, ctx, fingerprint }) => readBossSourcingTargetResume(args, ctx, fingerprint),
+  sendGreeting: ({ args, guards, ctx, fingerprint }) => sendBossGreeting(args, guards, ctx, fingerprint),
+  readGreetingOutcome: ({ args, ctx, fingerprint }) => readBossGreetingOutcome(args, ctx, fingerprint),
 } satisfies PlatformAdapter

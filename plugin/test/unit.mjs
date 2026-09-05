@@ -15889,7 +15889,9 @@ test('BOSS 站点身份:只认 www.zhipin.com 与沟通页,登录态恒 unknown 
   assert.ok(!bossSite.matches(undefined))
 
   assert.equal(bossSite.pageKind('https://www.zhipin.com/web/chat/index'), 'im')
-  // 推荐页等其余路径尚未真机确认,按「平台枚举面事实门」一律 other,不猜。
+  assert.equal(bossSite.pageKind('https://www.zhipin.com/web/chat/recommend'), 'recommend', '2026-09-04 真机:推荐页路径')
+  // 其余路径(职位管理页、C 端页)按「平台枚举面事实门」一律 other,不猜。
+  assert.equal(bossSite.pageKind('https://www.zhipin.com/web/chat/job/list'), 'other')
   assert.equal(bossSite.pageKind('https://www.zhipin.com/web/geek/recommend'), 'other')
   assert.equal(bossSite.pageKind('不是个 URL'), 'other')
 
@@ -15949,7 +15951,7 @@ test('全文档观察器只给能读登录态的站点装:BOSS 上一个都不�
   }
 })
 
-test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话原语加场景二三条换微信原语加场景三邀面卡一条,其余显式拒绝', () => {
+test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条加场景二三条加场景三一条加第二刀七条,其余显式拒绝', () => {
   assert.equal(bossAdapter.id, 'boss')
   assert.equal(bossAdapter.hostMatch, bossSite.match, '适配器与站点表必须是同一个"BOSS 是谁"')
   // MAIN 是 2026-08-28 取数通道裁决的直接后果:isolated world 拿不到 user$ 与消息数组。
@@ -15965,20 +15967,23 @@ test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条会话
   // **这张名单只在过了出口之后才准变长。** 三条探针(2026-08-28/08-30/09-01 各自出口)之后,
   // 2026-09-03 甲方批准场景一出口,加了七条会话原语——恰好是「仅回复一轮闭环」要的那七条。
   // 2026-09-04 甲方批准场景二出口,加了换微信线三条(sendWechatInvite/acceptWechat/readWechatExchangeOutcome);
-  // 同日批准场景三出口,加了邀面卡一条(sendInviteCard)。采集、招呼一条都没有:第二刀另过出口。
+  // 同日批准场景三出口,加了邀面卡一条(sendInviteCard)。2026-09-04 夜甲方批准第二刀出口(采集 + 打招呼),
+  // 加了七条:职位管理页一条、采集四条、招呼两条(readPublishedJobs / selectSourcingPosition / applySourcingFilters /
+  // readSourcingWindow / readSourcingTargetResume / sendGreeting / readGreetingOutcome)。
   assert.deepEqual(declared, [
-    'acceptWechat', 'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
+    'acceptWechat', 'applySourcingFilters', 'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
     'osClick', 'osProbe', 'osScroll', 'osType', 'probePlatform',
-    'readList', 'readResume', 'readThread', 'readUnreadTotal', 'readWechatExchangeOutcome',
-    'sendInviteCard', 'sendMessage', 'sendWechatInvite',
-  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口;邀面卡:2026-09-04 场景三出口)')
+    'readGreetingOutcome', 'readList', 'readPublishedJobs', 'readResume', 'readSourcingTargetResume', 'readSourcingWindow',
+    'readThread', 'readUnreadTotal', 'readWechatExchangeOutcome',
+    'selectSourcingPosition', 'sendGreeting', 'sendInviteCard', 'sendMessage', 'sendWechatInvite',
+  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口;邀面卡:2026-09-04 场景三出口;第二刀七条:2026-09-04 夜出口)')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
-  assert.throws(() => requireCapability(bossAdapter, 'sendGreeting'), /未实现原语能力/)
-  assert.throws(() => requireCapability(bossAdapter, 'readGreetingOutcome'), /未实现原语能力/, '招呼线是第二刀,尚未过出口')
+  assert.throws(() => requireCapability(bossAdapter, 'readSourcingResume'), /未实现原语能力/, '一次读一位的旧采集原语,BOSS 走窗口 + 目标两条,不实现它')
+  assert.throws(() => requireCapability(bossAdapter, 'readWechatSetting'), /未实现原语能力/, '开工闸按无能力跳过(脑侧 capabilityMissing)')
 })
 
-test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表恰为平台无关四条加探针五条加场景一七条加场景二三条加场景三一条', async () => {
+test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表恰为平台无关四条加探针五条加场景一七条加场景二三条加场景三一条加第二刀七条', async () => {
   // 原语的 capability 字段是与 handler 内 callPlatform 字面量并行的第二份声明;
   // 这两条断言把它钉住:漏填一条,BOSS 表会多出一条(第二条红);填错名字,
   // 智联表会少一条(第一条红)。
@@ -16003,20 +16008,22 @@ test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表�
     assert.deepEqual(tables[0].caps, union.filter((c) => !bossOnly.includes(c)),
       '智联表应等于并集减 BOSS 专属三条')
     assert.deepEqual(tables[1].caps, [
-      'candidate.readResume@1',
+      'candidate.applySourcingFilters@1', 'candidate.readResume@1', 'candidate.readSourcingTargetResume@1',
+      'candidate.readSourcingWindow@1', 'candidate.selectSourcingPosition@1',
       'chat.acceptWechat@1', 'chat.captureThreadScreenshot@1', 'chat.identifyCurrentConversation@1', 'chat.openConversation@1',
-      'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.readWechatExchangeOutcome@1',
-      'chat.sendInviteCard@1', 'chat.sendMessage@1', 'chat.sendWechatInvite@1',
+      'chat.readGreetingOutcome@1', 'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.readWechatExchangeOutcome@1',
+      'chat.sendGreeting@1', 'chat.sendInviteCard@1', 'chat.sendMessage@1', 'chat.sendWechatInvite@1',
       'debug.osClick@1', 'debug.osProbe@1', 'debug.osScroll@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
-      'debug.slowEcho@1', 'debug.switchWindow@1', 'probe.platform@1',
+      'debug.slowEcho@1', 'debug.switchWindow@1', 'job.readPublishedList@1', 'probe.platform@1',
     ], 'BOSS 表变了:要么适配器长了能力(先过出口),要么某条原语漏填 capability')
     for (const capability of tables[1].caps) {
       assert.ok(union.includes(capability), `BOSS 表 ⊆ 并集:${capability}`)
     }
     assert.equal(hasCapability(bossAdapter, 'osType'), true)
     assert.equal(hasCapability(bossAdapter, 'sendMessage'), true)
-    assert.equal(hasCapability(bossAdapter, 'sendGreeting'), false,
-      '招呼是第二刀,场景一的 hello 表里不该有它——脑按表不派,手也不该声明')
+    assert.equal(hasCapability(bossAdapter, 'sendGreeting'), true, '第二刀 2026-09-04 夜过出口,招呼线进表')
+    assert.equal(hasCapability(bossAdapter, 'readSourcingResume'), false,
+      '一次读一位的旧采集原语 BOSS 不声明——脑按表不派,手也不该声明')
   })
 })
 
@@ -17121,6 +17128,345 @@ test('BOSS 命中测试被遮时带出遮挡物签名:类名链、尺寸、文�
     const hit = bossTestHooks.domHitTestIndexed('.chat-message-filter-left span', 0, 10, 10)
     assert.equal(hit.onTarget, false)
     assert.match(hit.found, /^遮挡物 div\.dialog-body\.promo<div\.dialog-wrap\.active\[352x144\]「限时优惠 立即领」$/)
+  } finally { Object.assign(globalThis, saved) }
+})
+
+// ---------------------------------------------------------------------------
+// 第二刀(2026-09-05):推荐页采集 + 打招呼的纯函数与页面函数。页面函数用假 document 跑,
+// 判据全是形状(pageList/geekInfo/geek/message prop、class 与 data-geekid),不认组件名;夹具里没有真实候选人。
+
+test('BOSS 职位选择器匹配:整段/职位名/「标题 _ 」前缀三种相等,名字回传标题本身;零命中与多命中如实,不就近', () => {
+  const { matchBossJobItem, bossJobItemName, parseBossGeekId, bossFilterGroupName } = bossTestHooks
+  const items = [
+    { text: '新媒体运营(获客号操盘） _ 上海  15-25K', value: 'ENCJOB0000000000000000000001', current: true },
+    { text: '销售经理 _ 北京 8-12K', value: 'ENCJOB0000000000000000000002', current: false },
+  ]
+  assert.equal(bossJobItemName(items[0].text), '新媒体运营(获客号操盘）')
+  assert.equal(bossJobItemName('只有职位名'), '只有职位名')
+  assert.deepEqual(matchBossJobItem(items, ' 新媒体运营(获客号操盘） '),
+    { status: 'ok', index: 0, name: '新媒体运营(获客号操盘）', value: 'ENCJOB0000000000000000000001', current: true })
+  assert.equal(matchBossJobItem(items, '销售经理').current, false)
+  assert.deepEqual(matchBossJobItem(items, '新媒体'), { status: 'none', count: 0 }, '前缀不算相等')
+  assert.deepEqual(matchBossJobItem([...items, items[1]], '销售经理'), { status: 'ambiguous', count: 2 })
+  assert.deepEqual(matchBossJobItem(items, ''), { status: 'none', count: 0 })
+  const odd = [{ text: 'A _ B _ 上海 10K', value: 'v', current: true }]
+  assert.equal(matchBossJobItem(odd, 'A _ B').status, 'ok', '标题自带「 _ 」:整段以「标题 _ 」开头也算')
+  assert.equal(matchBossJobItem(odd, 'A _ B').name, 'A _ B')
+  assert.equal(parseBossGeekId('590000001'), 590000001)
+  assert.equal(parseBossGeekId('0590'), null); assert.equal(parseBossGeekId('abc'), null); assert.equal(parseBossGeekId(''), null)
+  assert.equal(bossFilterGroupName('薪资待遇[单选]'), '薪资待遇'); assert.equal(bossFilterGroupName(' 学历要求 '), '学历要求')
+})
+
+test('BOSS 筛选计划:契约枚举 → 面板文案;VIP 锁定组要求不限、MBA 没有对应项都干净失败', () => {
+  const { planBossSourcingFilters } = bossTestHooks
+  const base = { age: { mode: 'any' }, activeWindow: 'any', gender: 'any', excludeViewed: false, excludeCoworkerContacted: false, careerStatuses: [], educations: [] }
+  assert.deepEqual(planBossSourcingFilters(base), { ok: true, plan: { career: [], education: [] } })
+  const some = planBossSourcingFilters({ ...base, careerStatuses: ['leftLooking', 'employedOpen', 'leftLooking'], educations: ['bachelor', 'master'] })
+  assert.deepEqual(some, { ok: true, plan: { career: ['离职-随时到岗', '在职-考虑机会'], education: ['本科', '硕士'] } }, '重复枚举去重')
+  const mba = planBossSourcingFilters({ ...base, educations: ['mbaEmba'] })
+  assert.equal(mba.ok, false); assert.match(mba.reason, /mbaEmba/)
+  const vip = planBossSourcingFilters({ ...base, activeWindow: 'today', gender: 'female', age: { mode: 'range', minAge: 20, maxAge: 30 }, excludeViewed: true })
+  assert.equal(vip.ok, false); assert.match(vip.reason, /年龄\/活跃度\/性别\/近期没有看过/)
+})
+
+const filterPanelRead = (overrides = {}) => {
+  const group = (name, boxKey, options, vip = false, activeIdx = [0]) =>
+    ({ name, boxKey, vip, options: options.map((text, i) => ({ text, active: activeIdx.includes(i), isDefault: i === 0 })) })
+  return {
+    frame: true, panel: true, masked: true, buttons: ['清除', '确定'],
+    groups: [
+      group('活跃度[单选]', 'activation', ['不限', '刚刚活跃', '今日活跃'], true),
+      group('性别', 'gender', ['不限', '男', '女'], true),
+      group('近期没有看过', 'recentNotView', ['不限', '近14天没有'], true),
+      group('是否与同事交换简历', 'exchangeResumeWithColleague', ['不限', '近一个月没有'], true),
+      group('求职状态', 'intention', ['不限', '离职-随时到岗', '在职-暂不考虑', '在职-考虑机会', '在职-月内到岗'], false, overrides.career ?? [0]),
+      group('学历要求', 'degree', ['不限', '初中及以下', '中专/中技', '高中', '大专', '本科', '硕士', '博士'], false, overrides.degree ?? [0]),
+      group('经验要求', 'experience', ['不限', '在校/应届', '1-3年'], false, overrides.experience ?? [0]),
+      group('薪资待遇[单选]', 'salary', ['不限', '3K以下', '3-5K'], false, overrides.salary ?? [0]),
+    ],
+  }
+}
+
+test('BOSS 筛选差异覆盖:目标空就点不限,目标非空先选后退;经验/薪资恒回不限;全一致零点击;缺项与缺组干净失败', () => {
+  const { bossFilterClicks } = bossTestHooks
+  const read = filterPanelRead({ degree: [5], experience: [2], career: [2] })
+  const out = bossFilterClicks(read, { career: ['离职-随时到岗'], education: [] })
+  assert.equal(out.ok, true)
+  assert.deepEqual(out.clicks, [
+    { boxKey: 'intention', index: 1, text: '离职-随时到岗', expectActive: true },
+    { boxKey: 'intention', index: 2, text: '在职-暂不考虑', expectActive: false },
+    { boxKey: 'degree', index: 0, text: '不限', expectActive: true },
+    { boxKey: 'experience', index: 0, text: '不限', expectActive: true },
+  ])
+  assert.deepEqual(bossFilterClicks(filterPanelRead(), { career: [], education: [] }).clicks, [], '全不限时零点击')
+  assert.deepEqual(bossFilterClicks(filterPanelRead({ degree: [5] }), { career: [], education: ['本科'] }).clicks, [], '已是目标态零点击')
+  const missing = bossFilterClicks(filterPanelRead(), { career: [], education: ['MBA'] })
+  assert.equal(missing.ok, false); assert.match(missing.reason, /没有「MBA」项/)
+  const base = filterPanelRead()
+  const noGroup = bossFilterClicks({ ...base, groups: base.groups.filter((g) => g.boxKey !== 'salary') }, { career: [], education: [] })
+  assert.equal(noGroup.ok, false); assert.match(noGroup.reason, /薪资待遇/)
+})
+
+test('BOSS 筛选回读投影:逐组集合相等就原样回传请求(脑侧 DeepEqual 连顺序也比);不等带出组名与实际;VIP 组缺席视为不限、非不限即拒', () => {
+  const { projectBossSourcingFilters } = bossTestHooks
+  const requested = { age: { mode: 'any' }, activeWindow: 'any', gender: 'any', excludeViewed: false, excludeCoworkerContacted: false, careerStatuses: ['employedOpen', 'leftLooking'], educations: ['master', 'bachelor'] }
+  const read = filterPanelRead({ career: [1, 3], degree: [5, 6] })
+  const ok = projectBossSourcingFilters(read, requested)
+  assert.equal(ok.ok, true); assert.equal(ok.filters, requested)
+  const drift = projectBossSourcingFilters(filterPanelRead({ career: [1], degree: [5, 6] }), requested)
+  assert.equal(drift.ok, false); assert.match(drift.reason, /求职状态.*回读为「离职-随时到岗」/)
+  const stale = projectBossSourcingFilters(filterPanelRead({ career: [1, 3], degree: [5, 6], salary: [1] }), requested)
+  assert.equal(stale.ok, false); assert.match(stale.reason, /薪资待遇.*3K以下/, '真人留下的手工筛选不放过')
+  const noVip = projectBossSourcingFilters({ ...read, groups: read.groups.filter((g) => !g.vip) }, requested)
+  assert.equal(noVip.ok, true)
+  const vipOn = filterPanelRead({ career: [1, 3], degree: [5, 6] })
+  vipOn.groups[1].options[2].active = true; vipOn.groups[1].options[0].active = false
+  const rejected = projectBossSourcingFilters(vipOn, requested)
+  assert.equal(rejected.ok, false); assert.match(rejected.reason, /性别/)
+  const unsupported = projectBossSourcingFilters(read, { ...requested, gender: 'male' })
+  assert.equal(unsupported.ok, false); assert.match(unsupported.reason, /VIP 锁定/)
+})
+
+test('BOSS 职位管理页分区:页签定分区(去「全部」与计数后缀)、行按状态归入、「开放中」投影成契约「在线中」、陌生状态原样另起一区', () => {
+  const { bossJobListSections } = bossTestHooks
+  const out = bossJobListSections(['全部 · 4', '开放中 · 2', '待开放', '审核未通过', '已关闭 1'], [
+    { name: ' 新媒体运营 ', status: '开放中' }, { name: '销售', status: '开放中' }, { name: '旧岗', status: '已关闭' }, { name: '怪岗', status: '神秘状态' },
+  ])
+  assert.equal(out.ok, true)
+  assert.deepEqual(out.sections, [
+    { label: '在线中', names: ['新媒体运营', '销售'] }, { label: '待开放', names: [] }, { label: '审核未通过', names: [] },
+    { label: '已关闭', names: ['旧岗'] }, { label: '神秘状态', names: ['怪岗'] },
+  ])
+  assert.equal(bossJobListSections(['全部'], []).ok, false, '只有「全部」不算有分区')
+  assert.match(bossJobListSections(['开放中'], [{ name: 'x', status: '' }]).reason, /读不到状态/)
+  assert.match(bossJobListSections(['开放中'], [{ name: '', status: '开放中' }]).reason, /读不到职位名/)
+  assert.match(bossJobListSections(['开放中', '开放中'], []).reason, /重名/)
+})
+
+const recommendCard = (over = {}) => ({
+  geekId: 590000001, geekSource: 0, encryptGeekId: 'ENCGEEK00000000000000000001', encryptJobId: 'ENCJOB0000000000000000000001',
+  isFriend: 0, buttonText: '打招呼', visible: true,
+  name: '候选甲', ageDesc: '28岁', degree: '本科', workYear: '5年', salary: '15-20K', activeTimeDesc: '刚刚活跃', desc: '  擅长  短视频 ',
+  edus: [{ school: '某大学', major: '新闻', degree: '本科', start: '2014', end: '2018' }],
+  works: [{ company: '某公司', position: '运营', start: '2018.07', end: '至今', responsibility: '负责账号' }, { company: '', position: '', start: '', end: '', responsibility: '' }],
+  expect: { location: '上海', position: '新媒体运营', salary: '15-20' },
+  ...over,
+})
+
+test('BOSS 卡片摘要投影:五分区、标签与智联对齐、空值整行省略;关系态按 isFriend/按钮文案三态', () => {
+  const { projectBossSourcingResume, bossCardContactState } = bossTestHooks
+  const data = projectBossSourcingResume(recommendCard(), 'ENCJOB0000000000000000000001', '新媒体运营', 1700000000000)
+  assert.equal(data.platformUserRef, '590000001'); assert.equal(data.displayName, '候选甲'); assert.equal(data.contactState, 'unestablished')
+  assert.deepEqual(data.basic, [
+    { label: '姓名', value: '候选甲' }, { label: '年龄', value: '28岁' }, { label: '工作经验', value: '5年' },
+    { label: '最高学历', value: '本科' }, { label: '活跃时间', value: '刚刚活跃' },
+  ])
+  assert.deepEqual(data.expectations, [{ label: '期望职位', value: '新媒体运营' }, { label: '期望城市', value: '上海' }, { label: '期望薪资', value: '15-20K' }])
+  assert.equal(data.selfEvaluation, '擅长 短视频')
+  assert.equal(data.education, '2014-2018 某大学 · 新闻 · 本科')
+  assert.equal(data.workExperiences, '2018.07-至今 某公司 · 运营\n负责账号', '空经历整条省略')
+  assert.equal(data.positionTitle, '新媒体运营'); assert.equal(data.positionRef, 'ENCJOB0000000000000000000001'); assert.equal(data.observedAt, 1700000000000)
+  assert.equal(bossCardContactState({ isFriend: 1, buttonText: '打招呼' }), 'established', 'isFriend 翻了就算,按钮渲染晚一拍')
+  assert.equal(bossCardContactState({ isFriend: 0, buttonText: '继续沟通' }), 'established')
+  assert.equal(bossCardContactState({ isFriend: 0, buttonText: '' }), 'unknown')
+  assert.equal(bossCardContactState({ isFriend: null, buttonText: '打招呼' }), 'unknown')
+  const empty = projectBossSourcingResume(recommendCard({ name: '', edus: [], works: [], desc: '', expect: { location: '', position: '', salary: '' }, salary: '' }), 'j', null, 1)
+  assert.equal(empty.displayName, null); assert.equal(empty.education, ''); assert.deepEqual(empty.expectations, []); assert.equal(empty.positionTitle, null)
+})
+
+function installBossRecommendFixture({ cards = [], loading = false, finished = false, jobItems = [], scroll = { top: 0, height: 2814, client: 622 }, misalignIndex = -1, noList = false, quick = null, user = 9 } = {}) {
+  const saved = { document: globalThis.document, window: globalThis.window }
+  const infos = cards.map((c) => ({
+    geekId: c.geekId, geekSource: c.geekSource ?? 0, encryptGeekId: c.enc, encryptJobId: c.job, isFriend: c.isFriend ?? 0,
+    geekName: c.name ?? '', ageDesc: '28岁', geekDegree: '本科', geekWorkYear: '5年', salary: '15-20K', activeTimeDesc: '刚刚活跃',
+    geekDesc: { content: c.desc ?? '' }, geekEdus: c.edus ?? [], geekWorks: c.works ?? [],
+    viewExpect: { location: '上海', position: '运营', lowSalary: 15, highSalary: 20 },
+  }))
+  const items = cards.map((c, i) => ({
+    querySelector(sel) {
+      if (sel === '.card-inner') return { getAttribute: (n) => (n === 'data-geekid' ? (i === misalignIndex ? 'WRONG' : c.enc) : null) }
+      if (sel === '.button-chat-wrap button') return { textContent: ` ${c.button ?? '打招呼'} ` }
+      return null
+    },
+    getBoundingClientRect() { return c.rect ?? { top: i * 190, bottom: i * 190 + 180 } },
+  }))
+  const jobEls = jobItems.map((j) => ({ textContent: j.text, getAttribute: (n) => (n === 'value' ? j.value : null), classList: { contains: (cls) => cls === 'curr' && j.current } }))
+  const inner = {
+    scrollingElement: { clientHeight: scroll.client, scrollTop: scroll.top, scrollHeight: scroll.height },
+    documentElement: { clientHeight: scroll.client },
+    querySelector(sel) {
+      if (sel === 'ul.card-list') return noList ? null : { __vue__: { pageList: infos } }
+      if (sel === '#recommend-list') return { __vue__: { loading, finished } }
+      return null
+    },
+    querySelectorAll(sel) { return sel === 'li.card-item' ? items : sel === '.job-selecter-wrap .job-item' ? jobEls : [] },
+  }
+  const frame = { contentDocument: inner }
+  const topEls = [{ __vue__: user ? { user$: { userId: user } } : { other: 1 } }]
+  globalThis.window = { innerWidth: 1470, innerHeight: 746 }
+  globalThis.document = {
+    querySelector(sel) { return sel === 'iframe[name=recommendFrame]' ? frame : sel === '.chat-global-conversation' ? quick : null },
+    querySelectorAll(sel) { return sel === '*' ? topEls : [] },
+    getElementById() { return null },
+  }
+  return { restore() { Object.assign(globalThis, saved) }, infos }
+}
+
+const quickWindow = (geek, messages) => {
+  const rowEls = messages.map((m) => ({ __vue__: { $props: { message: m } } }))
+  return {
+    querySelector(sel) { return sel === '.chat-global-msg-content' ? { __vue__: { geek } } : null },
+    querySelectorAll(sel) { return sel === '*' ? [{ __vue__: { other: 1 } }, ...rowEls, ...rowEls.slice(0, 1)] : [] },
+  }
+}
+
+test('BOSS 推荐窗口页面读:pageList 与 DOM 对齐才就绪、可见性按 iframe 视口、当前职位取 .curr 的 value;没 iframe/没列表如实', () => {
+  const { mainReadBossRecommendWindow, RECOMMEND_SEL: S } = bossTestHooks
+  const call = () => mainReadBossRecommendWindow('iframe[name=recommendFrame]', S.listView, S.cardList, S.cardItem, S.cardInner, S.cardButton, S.jobItem, S.jobItemCurrentClass)
+  const cards = [
+    { geekId: 11, enc: 'E11', job: 'J1' },
+    { geekId: 12, enc: 'E12', job: 'J1', isFriend: 1, button: '继续沟通' },
+    { geekId: 13, enc: 'E13', job: 'J1', rect: { top: 700, bottom: 880 } },
+  ]
+  const jobItems = [{ text: ' 新媒体运营 _ 上海  15-25K ', value: 'J1', current: true }]
+  const page = installBossRecommendFixture({ cards, jobItems, scroll: { top: 300, height: 2814, client: 622 } })
+  try {
+    const read = call()
+    assert.equal(read.status, 'ready'); assert.equal(read.aligned, true); assert.equal(read.loading, false); assert.equal(read.finished, false)
+    assert.equal(read.positionRef, 'J1'); assert.equal(read.positionText, '新媒体运营 _ 上海 15-25K')
+    assert.deepEqual(read.cards.map((c) => [c.geekId, c.isFriend, c.buttonText, c.visible, c.encryptGeekId, c.encryptJobId]),
+      [[11, 0, '打招呼', true, 'E11', 'J1'], [12, 1, '继续沟通', true, 'E12', 'J1'], [13, 0, '打招呼', false, 'E13', 'J1']])
+    assert.equal(read.domCount, 3); assert.equal(read.scrollTop, 300); assert.equal(read.scrollHeight, 2814); assert.equal(read.clientHeight, 622)
+    assert.deepEqual(read.jobItems, [{ text: '新媒体运营 _ 上海 15-25K', value: 'J1', current: true }])
+  } finally { page.restore() }
+  const misaligned = installBossRecommendFixture({ cards, jobItems, misalignIndex: 1 })
+  try { assert.equal(call().aligned, false, '刚翻页的卡 vm 晚挂,data-geekid 对不上就是没就绪') } finally { misaligned.restore() }
+  const twoCurrent = installBossRecommendFixture({ cards, jobItems: [...jobItems, { text: 'x _ y', value: 'J2', current: true }] })
+  try { assert.equal(call().positionRef, '', '两个 .curr 不猜') } finally { twoCurrent.restore() }
+  const noList = installBossRecommendFixture({ cards, jobItems, noList: true })
+  try { assert.equal(call().status, 'no_list') } finally { noList.restore() }
+  const saved = { document: globalThis.document }
+  globalThis.document = { querySelector() { return null } }
+  try { assert.equal(call().status, 'no_frame') } finally { Object.assign(globalThis, saved) }
+})
+
+test('BOSS 目标卡页面读:按 geekId 唯一匹配、DOM 卡对齐才交、摘要字段从 geekInfo 取;不在/重复如实', () => {
+  const { mainReadBossRecommendTarget, RECOMMEND_SEL: S } = bossTestHooks
+  const call = (id) => mainReadBossRecommendTarget('iframe[name=recommendFrame]', S.cardList, S.cardItem, S.cardInner, S.cardButton, S.jobItem, S.jobItemCurrentClass, id)
+  const cards = [
+    { geekId: 11, enc: 'E11', job: 'J1', name: '候选甲', desc: '简介',
+      edus: [{ school: 'U', major: 'M', degreeName: '本科', startDate: 2014, endDate: 2018 }],
+      works: [{ company: 'C', positionName: 'P', startDate: '2018', endDate: '至今', responsibility: 'R' }] },
+    { geekId: 12, enc: 'E12', job: 'J1' }, { geekId: 12, enc: 'E12b', job: 'J1' },
+  ]
+  const page = installBossRecommendFixture({ cards, jobItems: [{ text: '新媒体运营 _ 上海 15-25K', value: 'J1', current: true }] })
+  try {
+    const read = call(11)
+    assert.equal(read.status, 'ready'); assert.equal(read.positionRef, 'J1'); assert.equal(read.positionText, '新媒体运营 _ 上海 15-25K')
+    assert.equal(read.card.name, '候选甲'); assert.equal(read.card.desc, '简介'); assert.equal(read.card.buttonText, '打招呼'); assert.equal(read.card.isFriend, 0)
+    assert.deepEqual(read.card.edus, [{ school: 'U', major: 'M', degree: '本科', start: '2014', end: '2018' }], '数字日期转成字符串')
+    assert.deepEqual(read.card.works, [{ company: 'C', position: 'P', start: '2018', end: '至今', responsibility: 'R' }])
+    assert.deepEqual(read.card.expect, { location: '上海', position: '运营', salary: '15-20' })
+    assert.equal(call(99).status, 'absent')
+    assert.deepEqual(call(12), { status: 'duplicated', count: 2 })
+  } finally { page.restore() }
+  const misaligned = installBossRecommendFixture({ cards, misalignIndex: 0 })
+  try { assert.equal(call(11).status, 'absent', 'DOM 卡与 pageList 对不上不交') } finally { misaligned.restore() }
+})
+
+test('BOSS 快捷窗页面读:geek 绑定谁、消息从各 message-component 的 message prop 收并按 mid 排序去重、方向只认 fromId==我方;没窗/没 geek/没身份如实', () => {
+  const { mainReadBossQuickChat, QUICK_CHAT_SEL: Q } = bossTestHooks
+  const msgs = [
+    { mid: 200, body: { text: '你好', type: 1 }, bizType: 101, fromId: 9, time: 1700000000500, status: 1 },
+    { mid: 100, body: { type: 9 }, bizType: 21050004, fromId: 590000001, time: 1700000000000, status: 2 },
+  ]
+  const page = installBossRecommendFixture({ quick: quickWindow({ uid: 590000001, friendSource: 0, encryptUid: 'ENC' }, msgs) })
+  try {
+    const read = mainReadBossQuickChat(Q.window, Q.messageList)
+    assert.equal(read.status, 'ready'); assert.equal(read.uid, 590000001); assert.equal(read.friendSource, 0); assert.equal(read.encryptUid, 'ENC')
+    assert.deepEqual(read.rows.map((r) => [r.mid, r.direction, r.text, r.status, r.bizType]), [['100', 'in', '', 2, 21050004], ['200', 'out', '你好', 1, 101]])
+  } finally { page.restore() }
+  const closed = installBossRecommendFixture({})
+  try { assert.deepEqual(mainReadBossQuickChat(Q.window, Q.messageList), { status: 'closed' }) } finally { closed.restore() }
+  const noGeek = installBossRecommendFixture({ quick: quickWindow(null, []) })
+  try { assert.deepEqual(mainReadBossQuickChat(Q.window, Q.messageList), { status: 'no_geek' }) } finally { noGeek.restore() }
+  const noUser = installBossRecommendFixture({ quick: quickWindow({ uid: 1, friendSource: 0 }, []), user: 0 })
+  try { assert.deepEqual(mainReadBossQuickChat(Q.window, Q.messageList), { status: 'identity_missing' }, '读不到我方身份判不了方向,不猜') } finally { noUser.restore() }
+})
+
+test('BOSS 筛选面板页面读:两块按 vip-filters 分、组名/组键/选项选中态、遮罩与按钮;面板不在或 iframe 不在如实', () => {
+  const { domReadBossFilterPanel, RECOMMEND_SEL: S } = bossTestHooks
+  const call = () => domReadBossFilterPanel('iframe[name=recommendFrame]', S.filterPanel, S.filterBlock, S.filterVipBlockClass, S.filterGroup, S.filterGroupName,
+    S.filterBox, S.filterOption, S.filterOptionActiveClass, S.filterOptionDefaultClass, S.vipMask, S.filterButton)
+  const opt = (text, classes) => ({ textContent: ` ${text} `, classList: { contains: (c) => classes.includes(c) } })
+  const group = (name, key, options) => ({
+    querySelector: (sel) => sel === '.name' ? { textContent: name } : sel === '.check-box' ? { classList: ['check-box', key] } : null,
+    querySelectorAll: (sel) => sel === '.option' ? options : [],
+  })
+  const blocks = [
+    { classList: { contains: (c) => c === 'vip-filters' }, querySelectorAll: (sel) => sel === '.filter-wrap' ? [group('性别', 'gender', [opt('不限', ['default', 'active']), opt('男', []), opt('女', [])])] : [] },
+    { classList: { contains: () => false }, querySelectorAll: (sel) => sel === '.filter-wrap' ? [group('学历要求', 'degree', [opt('不限', ['default']), opt('本科', ['active'])])] : [] },
+  ]
+  const inner = {
+    querySelector: (sel) => sel === '.filter-panel' ? {} : sel === '.vip-mask' ? { getBoundingClientRect: () => ({ width: 861, height: 298 }) } : null,
+    querySelectorAll: (sel) => sel === '.filter-panel .filters-wrap' ? blocks : sel === '.filter-panel .btns .btn' ? [{ textContent: '清除' }, { textContent: ' 确定 ' }] : [],
+  }
+  const saved = { document: globalThis.document }
+  globalThis.document = { querySelector: (sel) => sel === 'iframe[name=recommendFrame]' ? { contentDocument: inner } : null }
+  try {
+    const read = call()
+    assert.equal(read.frame, true); assert.equal(read.panel, true); assert.equal(read.masked, true); assert.deepEqual(read.buttons, ['清除', '确定'])
+    assert.deepEqual(read.groups, [
+      { name: '性别', boxKey: 'gender', vip: true, options: [{ text: '不限', active: true, isDefault: true }, { text: '男', active: false, isDefault: false }, { text: '女', active: false, isDefault: false }] },
+      { name: '学历要求', boxKey: 'degree', vip: false, options: [{ text: '不限', active: false, isDefault: true }, { text: '本科', active: true, isDefault: false }] },
+    ])
+    inner.querySelector = () => null
+    assert.deepEqual(call(), { frame: true, panel: false, masked: false, groups: [], buttons: [] })
+    globalThis.document = { querySelector: () => null }
+    assert.equal(call().frame, false)
+  } finally { Object.assign(globalThis, saved) }
+})
+
+test('BOSS 职位管理页页面读:按 src 找唯一 iframe、页签与行、页脚「共 N 个职位」;iframe 不唯一或不在如实', () => {
+  const { domReadBossJobList } = bossTestHooks
+  const args = ['/web/frame/job_v2/list', '.tab-item', 'li.job-item-container', '.job-name', '.status-box']
+  const row = (name, status) => ({ querySelector: (sel) => sel === '.job-name' ? { textContent: ` ${name} ` } : sel === '.status-box' ? { textContent: status } : null })
+  const inner = {
+    body: { innerText: '全部 开放中 ... 共 2 个职位' },
+    querySelectorAll: (sel) => sel === '.tab-item' ? [{ textContent: '全部' }, { textContent: ' 开放中 ' }] : sel === 'li.job-item-container' ? [row('A', '开放中'), row('B', '已关闭')] : [],
+  }
+  const frame = { getAttribute: (n) => n === 'src' ? 'https://www.zhipin.com/web/frame/job_v2/list?x=1' : null, contentDocument: inner }
+  const saved = { document: globalThis.document }
+  globalThis.document = { querySelectorAll: (sel) => sel === 'iframe' ? [frame, { getAttribute: () => '/other', contentDocument: {} }] : [] }
+  try {
+    assert.deepEqual(domReadBossJobList(...args), { frame: true, tabs: ['全部', '开放中'], rows: [{ name: 'A', status: '开放中' }, { name: 'B', status: '已关闭' }], total: 2 })
+    inner.body.innerText = '没有页脚'
+    assert.equal(domReadBossJobList(...args).total, null)
+    globalThis.document = { querySelectorAll: () => [frame, frame] }
+    assert.equal(domReadBossJobList(...args).frame, false, '两个同 src 的 iframe 不猜')
+  } finally { Object.assign(globalThis, saved) }
+})
+
+test('BOSS 快捷窗发送闸与外壳:落点在唯一发送钮且编辑器文本规范化后等于文案才放行;关闭键唯一才给矩形', () => {
+  const { domBossQuickSendGate, domReadBossQuickChatShell, QUICK_CHAT_SEL: Q } = bossTestHooks
+  const button = { contains: (n) => n === button }
+  const composer = { textContent: '你好  方便聊聊吗 ' }
+  const saved = { document: globalThis.document }
+  globalThis.document = {
+    querySelectorAll: (sel) => sel === Q.sendButton ? [button] : sel === Q.close ? [{ getBoundingClientRect: () => ({ x: 1, y: 2, width: 24, height: 24 }) }] : [],
+    elementFromPoint: () => button,
+    getElementById: (id) => (id === Q.composerId ? composer : null),
+    querySelector: (sel) => (sel === Q.window ? {} : null),
+  }
+  try {
+    assert.deepEqual(domBossQuickSendGate(Q.sendButton, 1, 1, Q.composerId, '你好 方便聊聊吗'), { onTarget: true, found: '发送钮' })
+    const wrong = domBossQuickSendGate(Q.sendButton, 1, 1, Q.composerId, '别的话')
+    assert.equal(wrong.onTarget, false); assert.match(wrong.found, /输入框内容与文案不同/)
+    assert.deepEqual(domReadBossQuickChatShell(Q.window, Q.close), { open: true, closeCount: 1, closeRect: { x: 1, y: 2, w: 24, h: 24 } })
+    globalThis.document.elementFromPoint = () => ({ tagName: 'DIV', textContent: '别的' })
+    assert.match(domBossQuickSendGate(Q.sendButton, 1, 1, Q.composerId, '你好 方便聊聊吗').found, /落点上是 div/)
+    globalThis.document.querySelector = () => null
+    assert.equal(domReadBossQuickChatShell(Q.window, Q.close).open, false)
   } finally { Object.assign(globalThis, saved) }
 })
 
