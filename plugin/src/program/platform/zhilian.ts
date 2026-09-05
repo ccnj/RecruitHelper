@@ -2061,6 +2061,46 @@ async function mainApplySourcingFilters(
     }
     return node.classList.contains('km-radio--checked')
   }
+  // 年龄「自定义」当场有没有把区间下拉弹出来。null=年龄格本身不可见/不唯一。
+  const customAgeSelectorVisible = (): boolean | null => {
+    const group = liveGroup('age')
+    if (!group) return null
+    return visibleAll(group, '.recommend-checkbox-group__selector').length === 1
+  }
+  // optionSettled:某选项是否已处于期望态(true/false),null=读不出。
+  // 除年龄「自定义→选中」外,一律就看选中态是否等于期望。
+  //
+  // 年龄「自定义→选中」的成功信号不是格子高亮,是区间下拉出现。7-24 事实记录 §3.3
+  // (docs/0724当日计划3-筛选面事实记录.md):点「自定义」只让
+  // .recommend-checkbox-group__selector 出现,格子要到选完下限才成为唯一选中项。
+  // 2026-09-05 3.27.0 首日,全网唯一装了它的客户机 20/20 筛选失败、当日零采集——
+  // 就是把「格子高亮」当成点击后的确认信号:2 秒等不到再点一下,三下之后报
+  // option_click_exhausted;同一台机前一日旧代码 12/12 成功,旧代码等的正是下拉出现。
+  // 这里回到同一个信号,下拉已在就算达标、绝不再点(第二下会不会把下拉收回去,不必验)。
+  const optionSettled = (
+    key: FilterKey,
+    label: string,
+    desiredSelected: boolean,
+  ): boolean | null => {
+    const selected = optionSelected(key, label)
+    if (key === 'age' && label === '自定义' && desiredSelected) {
+      if (selected === true) return true
+      const selectorVisible = customAgeSelectorVisible()
+      if (selectorVisible === true) return true
+      return selected === null && selectorVisible === null ? null : false
+    }
+    return selected === null ? null : selected === desiredSelected
+  }
+  // 补点耗尽时最后一次回读到的实际值,随 option_click_exhausted 的现场带出
+  // (「错误收敛必须留痕」)。09-05 那次现场只写了"哪一格没点动",少这一句就只能猜。
+  let lastOptionReadback = ''
+  const describeOptionReadback = (key: FilterKey, label: string): string => {
+    const selected = optionSelected(key, label)
+    const base = `选中态=${selected === null ? '读不出' : String(selected)}`
+    if (key !== 'age' || label !== '自定义') return base
+    const selectorVisible = customAgeSelectorVisible()
+    return `${base},下拉=${selectorVisible === null ? '年龄格不可见' : selectorVisible ? '在' : '无'}`
+  }
   // 定位与 click 必须待在同一个同步块里。interact 会先睡满平台节奏下限(1 秒以上)
   // 再执行回调,若在睡之前就把节点取出来,这一秒足够 Vue 把整组重渲染一遍——旧节点
   // 脱离文档后 click() 既不抛异常也不生效,页面上就是"点了没反应",而代码毫不知情。
@@ -2074,8 +2114,9 @@ async function mainApplySourcingFilters(
   // 因此本函数改为"点了还要看见它变了":每轮先回读,已达目标态就直接收工(不点),
   // 否则点一次再以短条件等待确认。先回读这一步是防抖动的关键——上一轮点击若只是
   // 渲染晚到,这里直接认账,不会再点一次把 checkbox 又 toggle 回去。
+  // "目标态"由 optionSettled 定义——年龄「自定义」以下拉出现为准,见其注释(09-05 事故)。
   // 至多 CLICK_OPTION_MAX_ATTEMPTS 轮;每轮 interact 自带 ≥1 秒平台节奏下限,
-  // 加确认等待最坏约 10 秒,而本原语执行预算 240 秒(真机成功用时约 33 秒)。
+  // 加确认等待最坏约 10 秒,而本原语执行预算 240 秒(真机成功用时约 20~33 秒)。
   const CLICK_OPTION_MAX_ATTEMPTS = 3
   const CLICK_OPTION_SETTLE_MS = 2_000
   const clickOption = async (
@@ -2084,7 +2125,7 @@ async function mainApplySourcingFilters(
     desiredSelected: boolean,
   ): Promise<boolean> => {
     for (let attempt = 0; attempt < CLICK_OPTION_MAX_ATTEMPTS; attempt += 1) {
-      if (optionSelected(key, label) === desiredSelected) return true
+      if (optionSettled(key, label, desiredSelected) === true) return true
       let clicked = false
       await interact(() => {
         const group = liveGroup(key)
@@ -2097,11 +2138,12 @@ async function mainApplySourcingFilters(
       })
       if (!clicked) continue
       const settled = await waitFor(
-        () => optionSelected(key, label) === desiredSelected ? true : null,
+        () => optionSettled(key, label, desiredSelected) === true ? true : null,
         CLICK_OPTION_SETTLE_MS,
       )
       if (settled === true) return true
     }
+    lastOptionReadback = describeOptionReadback(key, label)
     return false
   }
   const desiredLabels = (filters: CandidateSourcingFilters): Record<FilterKey, string[]> => {
@@ -2206,27 +2248,27 @@ async function mainApplySourcingFilters(
       if (key === 'age' || key === 'activeTime' || key === 'gender') {
         if (group.selectedLabels[0] !== targetLabels[0] &&
             !await clickOption(key, targetLabels[0], true)) {
-          return failed('option_click_exhausted', `${key}/${targetLabels[0]}=选中`)
+          return failed('option_click_exhausted', `${key}/${targetLabels[0]}=选中；${lastOptionReadback}`)
         }
         continue
       }
       if (targetLabels.length === 1 && targetLabels[0] === '不限') {
         if (!(group.selectedLabels.length === 1 && group.selectedLabels[0] === '不限') &&
             !await clickOption(key, '不限', true)) {
-          return failed('option_click_exhausted', `${key}/不限=选中`)
+          return failed('option_click_exhausted', `${key}/不限=选中；${lastOptionReadback}`)
         }
         continue
       }
       for (const selected of group.selectedLabels) {
         if (selected !== '不限' && !targetLabels.includes(selected) &&
             !await clickOption(key, selected, false)) {
-          return failed('option_click_exhausted', `${key}/${selected}=取消`)
+          return failed('option_click_exhausted', `${key}/${selected}=取消；${lastOptionReadback}`)
         }
       }
       for (const desired of targetLabels) {
         if (!group.selectedLabels.includes(desired) &&
             !await clickOption(key, desired, true)) {
-          return failed('option_click_exhausted', `${key}/${desired}=选中`)
+          return failed('option_click_exhausted', `${key}/${desired}=选中；${lastOptionReadback}`)
         }
       }
     }

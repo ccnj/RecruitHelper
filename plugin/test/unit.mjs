@@ -3540,6 +3540,8 @@ function installM6SourcingFilterFixture(options = {}) {
     groupReads: new Map(),
     titleReads: new Map(),
     staleClicks: 0,
+    // 年龄「自定义」的区间下拉是否已弹出;初态即目标时下拉本来就在。
+    ageCustomOpen: options.initialTarget === true,
   }
   const classList = (...initial) => {
     const values = new Set(initial)
@@ -3654,6 +3656,12 @@ function installM6SourcingFilterFixture(options = {}) {
           interact(`choose-range-${kind}-${value}`)
           rangeValues[kind] = value === '及以上' ? value : `${value}岁`
           state.popover = null
+          // 7-24 事实记录 §3.3:选完下限,「自定义」才成为唯一年龄选中项。
+          if (kind === 'start') {
+            for (const candidate of currentAgeGroup().optionNodes) {
+              candidate.setSelected(candidate.textContent === '自定义')
+            }
+          }
         }
         return option
       })
@@ -3707,6 +3715,14 @@ function installM6SourcingFilterFixture(options = {}) {
       option.click = () => {
         interact(`click-${key}-${label}`)
         if (swallowClick(key, label)) return
+        if (key === 'age' && label === '自定义') {
+          // 真实平台(7-24 事实记录 §3.3):点「自定义」只让区间下拉出现,格子此刻
+          // 不亮,要到选完下限才成为唯一选中项。2026-09-05 3.27.0 首日零采集,就是
+          // 夹具此前把它建模成"点哪个哪个立刻亮",让错的确认信号在测试里全绿。
+          // 再点一下按最坏情况建模——下拉收回(真机未验;代码不该走到这一步)。
+          state.ageCustomOpen = !state.ageCustomOpen
+          return
+        }
         if (spec.control === 'radio' || key === 'age') {
           for (const candidate of optionNodes) candidate.setSelected(candidate === option)
           return
@@ -3739,9 +3755,7 @@ function installM6SourcingFilterFixture(options = {}) {
         return options.driftOptionSet === key ? optionNodes.slice(0, -1) : optionNodes
       }
       if (query === '.recommend-checkbox-group__selector') {
-        const custom = optionNodes.find((candidate) => candidate.textContent === '自定义')
-        return key === 'age' &&
-          custom.classList.contains('recommend-checkbox-group__active') ? [selector] : []
+        return key === 'age' && state.ageCustomOpen ? [selector] : []
       }
       return []
     }
@@ -3899,7 +3913,9 @@ test('candidate.applySourcingFilters MAIN 只点差异、年龄精确覆盖并�
     assert.equal(names.filter((name) => name === 'confirm').length, 1)
     assert.equal(names.includes('click-careerStatuses-不限'), false, '相同多选不得冗余点击')
     assert.equal(names.includes('click-gender-不限'), false, '相同单选不得冗余点击')
-    assert.ok(names.includes('click-age-自定义'))
+    // 2026-09-05 事故回归:点「自定义」后下拉出现、格子未亮,这就是达标,不得再点第二下。
+    assert.equal(names.filter((name) => name === 'click-age-自定义').length, 1,
+      '「自定义」只点一次:下拉已出现即达标,格子亮不亮不是此刻的判据')
     assert.ok(names.includes('choose-range-start-25'))
     assert.ok(names.includes('choose-range-end-45'))
     for (let index = 1; index < fixture.state.interactions.length; index += 1) {
@@ -3926,7 +3942,8 @@ test('candidate.applySourcingFilters MAIN 年龄组初读后被重建仍点得�
     assert.equal(result.status, 'ready', '组被重建不该让筛选失败')
     assert.equal(fixture.state.staleClicks, 0, '不得再对脱离文档的旧节点派点击')
     const names = fixture.state.interactions.map(([name]) => name)
-    assert.ok(names.includes('click-age-自定义'), '必须点中重建后的自定义')
+    assert.equal(names.filter((name) => name === 'click-age-自定义').length, 1,
+      '必须点中重建后的自定义,且只点一次')
     assert.ok(names.includes('choose-range-start-25'))
     assert.ok(names.includes('choose-range-end-45'))
     assert.equal(fixture.state.confirms, 1, '筛选命令仍只点一次确定')
@@ -3980,6 +3997,8 @@ test('candidate.applySourcingFilters MAIN 点击持续被吞时按选项失配�
       '点不中就是点不中,要在这一步响亮失败,不许带着「不限」往下走;'
       + '且要与「平台改版、选项集不认识」的 option_set_mismatch 分开')
     assert.ok(String(result.scene).includes('age/自定义'), '失败要带上是哪一格没点动')
+    assert.ok(String(result.scene).includes('选中态=false,下拉=无'),
+      '失败要带上最后一次回读到的实际值(09-05 现场少了这一句只能猜)')
     const names = fixture.state.interactions.map(([name]) => name)
     assert.equal(names.filter((name) => name === 'click-age-自定义').length, 3, '补点至多三次')
     assert.equal(fixture.state.confirms, 0, '没点中不得提交')
