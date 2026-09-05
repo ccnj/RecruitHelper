@@ -32,12 +32,13 @@ function matchesBoss(value: string | undefined): boolean {
   }
 }
 
-// 只认真机见过的一种页:`/web/chat/index` 是沟通页。
-// 推荐页等其余形态**尚未真机确认路径**,一律 other——认不出就不猜。
+// 只认真机见过的两种页:`/web/chat/index` 是沟通页,`/web/chat/recommend` 是推荐页(2026-09-04 真机,
+// 整张列表在同源 iframe 里,见平台事实 §十七)。其余形态(职位管理页等)一律 other——认不出就不猜。
 function bossPageKind(value: string): PageKind {
   try {
     const path = new URL(value).pathname
     if (path === '/web/chat/index' || path.startsWith('/web/chat/index/')) return PageKind.Im
+    if (path === '/web/chat/recommend') return PageKind.Recommend
   } catch {
     return PageKind.Other
   }
