@@ -5578,6 +5578,16 @@ function greetingAfterFirstClick(message: string): PlatformError {
   return new PlatformError('POSTCONDITION_UNCONFIRMED', `关系已建立,正文未发出:${message}`, 'manualOnly', undefined, 'possible')
 }
 
+/** 首击确认之后的整段:sideEffect=none 的平台失败一律升成 possible(世界已脏);possible 与 StopExecution 原样透传。 */
+async function afterFirstClick<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (error instanceof PlatformError && error.sideEffect === 'none') throw greetingAfterFirstClick(error.message)
+    throw error
+  }
+}
+
 /** 目标卡的「打招呼」/「继续沟通」按钮:selector 直接绑 encryptGeekId,列表重排也不会点错人。 */
 function greetButtonSelector(encryptGeekId: string, buttonSel: string): string {
   return `${RECOMMEND_SEL.cardInner}[data-geekid="${encryptGeekId}"] ${buttonSel}`
@@ -5684,153 +5694,157 @@ async function sendBossGreeting(
       'manualOnly', undefined, 'possible')
   }
   trace.push('关系已建立')
-  ctx.progress('首击已确认关系建立,打开快捷窗', 45)
-  // 第二步:点「继续沟通」弹快捷窗。从这里起任何失败都是「关系已建立,正文未发出」。
-  let continuePlan: ClickPlan
-  try {
-    await paceBeforeClick()
-    continuePlan = await recommendClickPlan(tabId, greetButtonSelector(encryptGeekId, RECOMMEND_SEL.continueButton), -1, CONTINUE_TEXT, '继续沟通钮')
-  } catch (error) {
-    if (isStopExecution(error)) throw error
-    throw greetingAfterFirstClick(`继续沟通钮定位失败:${describeError(error).slice(0, 200)}`)
-  }
-  const continueProbe = await runOsProbe(BOSS_INJECT, tabId, ctx, continuePlan)
-  if (continueProbe.outcome !== 'clicked') throw greetingAfterFirstClick(`继续沟通钮未点击:${continueProbe.detail ?? continueProbe.outcome}`)
-  trace.push('点了继续沟通')
-  const chatReady = await pollUntil(ctx, () => readBossQuickChat(tabId),
-    (chat) => chat.status === 'ready' && chat.uid === geekId && chat.friendSource === geekSource)
-  const chat = chatReady.value
-  if (!(chat.status === 'ready' && chat.uid === geekId && chat.friendSource === geekSource)) {
-    const seen = chat.status === 'ready' ? `快捷窗绑定的是别人(uid 不同)` : `快捷窗 ${chat.status}`
-    throw greetingAfterFirstClick(`${READY_WAIT_MS / 1000} 秒内快捷窗未绑定目标(${seen})`)
-  }
-  const baselineMids = new Set(chat.rows.map((row) => row.mid))
-  trace.push(`快捷窗已绑定目标,基线 ${chat.rows.length} 行`)
-  // 打字:与 sendBossMessage 同一条路(焦点 → 前台闸 → 清空 → 排版 → 播放 → 回读逐字相等)。
-  const composerId = QUICK_CHAT_SEL.composerId
-  const readComposer = (): Promise<ReturnType<typeof mainReadComposer>> => runInPage(BOSS_DOM, tabId, mainReadComposer, [composerId])
-  let composer = await readComposer()
-  if (!composer.found) throw greetingAfterFirstClick('快捷窗里找不到输入框')
-  if (!composer.focused) {
+  // 从这里起世界已脏:首击确认之后的任何失败——包括 runInPage 注入失败、身份复核失败这类默认 sideEffect=none 的平台错误——
+  // 都要如实升成 possible 交验证读,不能让脑记成「没发」(出口审查 O1)。
+  return afterFirstClick(async (): Promise<ChatSendGreetingData> => {
+    ctx.progress('首击已确认关系建立,打开快捷窗', 45)
+    // 第二步:点「继续沟通」弹快捷窗。从这里起任何失败都是「关系已建立,正文未发出」。
+    let continuePlan: ClickPlan
     try {
       await paceBeforeClick()
-      await osClickOnce(tabId, ctx, await bossComposerClickPlan(tabId, composerId), '点快捷窗输入框取焦点')
+      continuePlan = await recommendClickPlan(tabId, greetButtonSelector(encryptGeekId, RECOMMEND_SEL.continueButton), -1, CONTINUE_TEXT, '继续沟通钮')
     } catch (error) {
       if (isStopExecution(error)) throw error
-      throw greetingAfterFirstClick(describeError(error).slice(0, 200))
+      throw greetingAfterFirstClick(`继续沟通钮定位失败:${describeError(error).slice(0, 200)}`)
     }
-    composer = await readComposer()
-    if (!composer.focused) throw greetingAfterFirstClick('点中输入框但焦点没到')
-    trace.push('点了输入框取焦点')
-  }
-  const focusWait = await pollUntil(ctx, readComposer, (read) => read.windowFocused)
-  if (!focusWait.value.windowFocused) throw greetingAfterFirstClick(`等了 ${READY_WAIT_MS / 1000} 秒 Chrome 仍不在前台,按键会打到别的应用上`)
-  if (!focusWait.value.focused) throw greetingAfterFirstClick('打字前焦点已离开输入框')
-  if (focusWait.value.text !== '') {
-    try {
-      await clearBossComposerByKeys(tabId, ctx, trace, focusWait.value.text.length, composerId)
-    } catch (error) {
-      if (isStopExecution(error)) throw error
-      throw greetingAfterFirstClick(describeError(error).slice(0, 200))
+    const continueProbe = await runOsProbe(BOSS_INJECT, tabId, ctx, continuePlan)
+    if (continueProbe.outcome !== 'clicked') throw greetingAfterFirstClick(`继续沟通钮未点击:${continueProbe.detail ?? continueProbe.outcome}`)
+    trace.push('点了继续沟通')
+    const chatReady = await pollUntil(ctx, () => readBossQuickChat(tabId),
+      (chat) => chat.status === 'ready' && chat.uid === geekId && chat.friendSource === geekSource)
+    const chat = chatReady.value
+    if (!(chat.status === 'ready' && chat.uid === geekId && chat.friendSource === geekSource)) {
+      const seen = chat.status === 'ready' ? `快捷窗绑定的是别人(uid 不同)` : `快捷窗 ${chat.status}`
+      throw greetingAfterFirstClick(`${READY_WAIT_MS / 1000} 秒内快捷窗未绑定目标(${seen})`)
     }
-    const cleared = await readComposer()
-    if (!cleared.focused || !cleared.windowFocused) throw greetingAfterFirstClick('清空输入框后焦点或前台状态已变')
-  }
-  const { text: typedText, removed } = newlinesToSpaces(args.text)
-  if (removed > 0) trace.push(`${removed} 个换行符换成空格`)
-  if (typedText === '') throw greetingAfterFirstClick('去掉换行之后没有内容可打')
-  ctx.checkpoint()
-  let composed
-  try {
-    composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0))
-  } catch (error) {
-    throw greetingAfterFirstClick(`排版器自身异常:${describeError(error).slice(0, 200)}`)
-  }
-  if (!composed.ok) throw greetingAfterFirstClick(`文案排不出合格键序(${composed.tries} 次):${composed.reasons.join(';').slice(0, 200)}`)
-  let played
-  try {
-    played = await playTypePlan(composed.plan)
-  } catch (error) {
-    throw greetingAfterFirstClick(isHandServiceDown(error) ? '手服务不可用,打字未开始' : `打字半途失败,输入框可能残留草稿:${describeError(error).slice(0, 200)}`)
-  }
-  trace.push(`发了 ${played.keys} 次按键${played.words ? ` | ${played.words}` : ''}`)
-  const typed = await readComposer()
-  if (normalizeBossMessageText(typed.text) !== normalizeBossMessageText(typedText)) {
-    throw greetingAfterFirstClick(`上屏文本与文案不同,已停在草稿:期望 ${typedText.length} 字,实得「${typed.text.slice(0, 200)}」`)
-  }
-  ctx.progress('招呼正文已上屏,准备发送', 70)
-  // 最后一道闸之后唯一一次点击发送:快捷窗仍绑定目标(MAIN)+ 落点在唯一发送钮上且编辑器文本等于文案(isolated)。
-  const button = await runInPage(BOSS_DOM, tabId, domReadBossSendButton, [QUICK_CHAT_SEL.sendButton])
-  if (!button.found) throw greetingAfterFirstClick(`快捷窗发送钮认不出(命中 ${button.count} 个)`)
-  if (button.text !== SEND_TEXT) throw greetingAfterFirstClick(`发送钮文案不是「${SEND_TEXT}」(读到「${button.text}」)`)
-  const sendPlan: ClickPlan = {
-    label: '快捷窗发送钮',
-    rect: button.rect,
-    hitTest: async (x, y) => {
-      const bound = await readBossQuickChat(tabId)
-      if (!(bound.status === 'ready' && bound.uid === geekId && bound.friendSource === geekSource)) {
-        return { onTarget: false, found: `快捷窗不再绑定目标(${bound.status})` }
+    const baselineMids = new Set(chat.rows.map((row) => row.mid))
+    trace.push(`快捷窗已绑定目标,基线 ${chat.rows.length} 行`)
+    // 打字:与 sendBossMessage 同一条路(焦点 → 前台闸 → 清空 → 排版 → 播放 → 回读逐字相等)。
+    const composerId = QUICK_CHAT_SEL.composerId
+    const readComposer = (): Promise<ReturnType<typeof mainReadComposer>> => runInPage(BOSS_DOM, tabId, mainReadComposer, [composerId])
+    let composer = await readComposer()
+    if (!composer.found) throw greetingAfterFirstClick('快捷窗里找不到输入框')
+    if (!composer.focused) {
+      try {
+        await paceBeforeClick()
+        await osClickOnce(tabId, ctx, await bossComposerClickPlan(tabId, composerId), '点快捷窗输入框取焦点')
+      } catch (error) {
+        if (isStopExecution(error)) throw error
+        throw greetingAfterFirstClick(describeError(error).slice(0, 200))
       }
-      return runInPage(BOSS_DOM, tabId, domBossQuickSendGate, [QUICK_CHAT_SEL.sendButton, x, y, composerId, typedText])
-    },
-    observe: async (): Promise<ClickObservation> => {
-      const after = await readComposer()
-      return { trusted: null, onTarget: null, eventDriftPx: null, after: `输入框内容长度=${after.text.length}` }
-    },
-  }
-  ctx.checkpoint()
-  await paceBeforeClick()
-  await verifiedBossTab(fingerprint)
-  if (Date.now() > ctx.irreversibleNotAfterMs) throw greetingAfterFirstClick('不可逆动作窗口已过,已停在草稿')
-  const dispatchedAt = Date.now()
-  const sendProbe = await runOsProbe(BOSS_INJECT, tabId, ctx, sendPlan)
-  if (sendProbe.outcome !== 'clicked') throw greetingAfterFirstClick(`发送钮未点击,已停在草稿:${sendProbe.detail ?? sendProbe.outcome}`)
-  trace.push(`点了发送 ${sendProbe.detail ?? ''}`)
-  // 正文正证(判据表第三行):快捷窗消息数组出现我方文本行,不在基线里、哈希相等、服务端确认(status 1/2)、时间不早于派发。
-  const deadline = Date.now() + READY_WAIT_MS
-  let lastSeen = ''
-  await sleep(500)
-  while (Date.now() < deadline) {
+      composer = await readComposer()
+      if (!composer.focused) throw greetingAfterFirstClick('点中输入框但焦点没到')
+      trace.push('点了输入框取焦点')
+    }
+    const focusWait = await pollUntil(ctx, readComposer, (read) => read.windowFocused)
+    if (!focusWait.value.windowFocused) throw greetingAfterFirstClick(`等了 ${READY_WAIT_MS / 1000} 秒 Chrome 仍不在前台,按键会打到别的应用上`)
+    if (!focusWait.value.focused) throw greetingAfterFirstClick('打字前焦点已离开输入框')
+    if (focusWait.value.text !== '') {
+      try {
+        await clearBossComposerByKeys(tabId, ctx, trace, focusWait.value.text.length, composerId)
+      } catch (error) {
+        if (isStopExecution(error)) throw error
+        throw greetingAfterFirstClick(describeError(error).slice(0, 200))
+      }
+      const cleared = await readComposer()
+      if (!cleared.focused || !cleared.windowFocused) throw greetingAfterFirstClick('清空输入框后焦点或前台状态已变')
+    }
+    const { text: typedText, removed } = newlinesToSpaces(args.text)
+    if (removed > 0) trace.push(`${removed} 个换行符换成空格`)
+    if (typedText === '') throw greetingAfterFirstClick('去掉换行之后没有内容可打')
     ctx.checkpoint()
+    let composed
     try {
-      const after = await readBossQuickChat(tabId)
-      if (after.status === 'ready' && after.uid === geekId && after.friendSource === geekSource) {
-        const fresh = after.rows.filter((row) => !baselineMids.has(row.mid) && row.direction === 'out' && (row.status === 1 || row.status === 2))
-        let hits = 0
-        for (const row of fresh) {
-          const projected = projectBossMessage(row)
-          if (projected.kind !== 'text') continue
-          if (await sha256Hex(projected.hashInput) !== contentHash) continue
-          if (row.time !== null && row.time < dispatchedAt - SEND_CLOCK_TOLERANCE_MS) continue
-          hits += 1
-        }
-        lastSeen = `新行 ${after.rows.filter((row) => !baselineMids.has(row.mid)).length},命中 ${hits}`
-        if (hits >= 1) {
-          trace.push('正文已可见')
-          await closeBossQuickChatBestEffort(tabId, ctx, '发送后收窗')
-          await verifiedBossTab(fingerprint)
-          ctx.progress('招呼已发出并在快捷窗确认', 100)
-          console.info('[RecruitHelper] boss_send_greeting', trace.join(' | '))
-          return {
-            platformUserRef: args.platformUserRef,
-            positionRef: args.positionRef,
-            conversationRef,
-            contentHash,
-            observedAt: Date.now(),
-          }
-        }
-      } else {
-        lastSeen = `快捷窗 ${after.status === 'ready' ? '绑定已变' : after.status}`
-      }
+      composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0))
     } catch (error) {
-      if (isStopExecution(error)) throw error
-      lastSeen = `读取异常 ${describeError(error).slice(0, 120)}`
+      throw greetingAfterFirstClick(`排版器自身异常:${describeError(error).slice(0, 200)}`)
     }
+    if (!composed.ok) throw greetingAfterFirstClick(`文案排不出合格键序(${composed.tries} 次):${composed.reasons.join(';').slice(0, 200)}`)
+    let played
+    try {
+      played = await playTypePlan(composed.plan)
+    } catch (error) {
+      throw greetingAfterFirstClick(isHandServiceDown(error) ? '手服务不可用,打字未开始' : `打字半途失败,输入框可能残留草稿:${describeError(error).slice(0, 200)}`)
+    }
+    trace.push(`发了 ${played.keys} 次按键${played.words ? ` | ${played.words}` : ''}`)
+    const typed = await readComposer()
+    if (normalizeBossMessageText(typed.text) !== normalizeBossMessageText(typedText)) {
+      throw greetingAfterFirstClick(`上屏文本与文案不同,已停在草稿:期望 ${typedText.length} 字,实得「${typed.text.slice(0, 200)}」`)
+    }
+    ctx.progress('招呼正文已上屏,准备发送', 70)
+    // 最后一道闸之后唯一一次点击发送:快捷窗仍绑定目标(MAIN)+ 落点在唯一发送钮上且编辑器文本等于文案(isolated)。
+    const button = await runInPage(BOSS_DOM, tabId, domReadBossSendButton, [QUICK_CHAT_SEL.sendButton])
+    if (!button.found) throw greetingAfterFirstClick(`快捷窗发送钮认不出(命中 ${button.count} 个)`)
+    if (button.text !== SEND_TEXT) throw greetingAfterFirstClick(`发送钮文案不是「${SEND_TEXT}」(读到「${button.text}」)`)
+    const sendPlan: ClickPlan = {
+      label: '快捷窗发送钮',
+      rect: button.rect,
+      hitTest: async (x, y) => {
+        const bound = await readBossQuickChat(tabId)
+        if (!(bound.status === 'ready' && bound.uid === geekId && bound.friendSource === geekSource)) {
+          return { onTarget: false, found: `快捷窗不再绑定目标(${bound.status})` }
+        }
+        return runInPage(BOSS_DOM, tabId, domBossQuickSendGate, [QUICK_CHAT_SEL.sendButton, x, y, composerId, typedText])
+      },
+      observe: async (): Promise<ClickObservation> => {
+        const after = await readComposer()
+        return { trusted: null, onTarget: null, eventDriftPx: null, after: `输入框内容长度=${after.text.length}` }
+      },
+    }
+    ctx.checkpoint()
+    await paceBeforeClick()
+    await verifiedBossTab(fingerprint)
+    if (Date.now() > ctx.irreversibleNotAfterMs) throw greetingAfterFirstClick('不可逆动作窗口已过,已停在草稿')
+    const dispatchedAt = Date.now()
+    const sendProbe = await runOsProbe(BOSS_INJECT, tabId, ctx, sendPlan)
+    if (sendProbe.outcome !== 'clicked') throw greetingAfterFirstClick(`发送钮未点击,已停在草稿:${sendProbe.detail ?? sendProbe.outcome}`)
+    trace.push(`点了发送 ${sendProbe.detail ?? ''}`)
+    // 正文正证(判据表第三行):快捷窗消息数组出现我方文本行,不在基线里、哈希相等、服务端确认(status 1/2)、时间不早于派发。
+    const deadline = Date.now() + READY_WAIT_MS
+    let lastSeen = ''
     await sleep(500)
-  }
-  throw new PlatformError('POSTCONDITION_UNCONFIRMED',
-    `关系已建立、只点击了一次发送,但未在快捷窗确认正文(${lastSeen};${trace.join(' | ')})`,
-    'manualOnly', undefined, 'possible')
+    while (Date.now() < deadline) {
+      ctx.checkpoint()
+      try {
+        const after = await readBossQuickChat(tabId)
+        if (after.status === 'ready' && after.uid === geekId && after.friendSource === geekSource) {
+          const fresh = after.rows.filter((row) => !baselineMids.has(row.mid) && row.direction === 'out' && (row.status === 1 || row.status === 2))
+          let hits = 0
+          for (const row of fresh) {
+            const projected = projectBossMessage(row)
+            if (projected.kind !== 'text') continue
+            if (await sha256Hex(projected.hashInput) !== contentHash) continue
+            if (row.time !== null && row.time < dispatchedAt - SEND_CLOCK_TOLERANCE_MS) continue
+            hits += 1
+          }
+          lastSeen = `新行 ${after.rows.filter((row) => !baselineMids.has(row.mid)).length},命中 ${hits}`
+          if (hits >= 1) {
+            trace.push('正文已可见')
+            await closeBossQuickChatBestEffort(tabId, ctx, '发送后收窗')
+            await verifiedBossTab(fingerprint)
+            ctx.progress('招呼已发出并在快捷窗确认', 100)
+            console.info('[RecruitHelper] boss_send_greeting', trace.join(' | '))
+            return {
+              platformUserRef: args.platformUserRef,
+              positionRef: args.positionRef,
+              conversationRef,
+              contentHash,
+              observedAt: Date.now(),
+            }
+          }
+        } else {
+          lastSeen = `快捷窗 ${after.status === 'ready' ? '绑定已变' : after.status}`
+        }
+      } catch (error) {
+        if (isStopExecution(error)) throw error
+        lastSeen = `读取异常 ${describeError(error).slice(0, 120)}`
+      }
+      await sleep(500)
+    }
+    throw new PlatformError('POSTCONDITION_UNCONFIRMED',
+      `关系已建立、只点击了一次发送,但未在快捷窗确认正文(${lastSeen};${trace.join(' | ')})`,
+      'manualOnly', undefined, 'possible')
+  })
 }
 
 // ── chat.readGreetingOutcome(第一版只读推荐卡,出口 §四 第 5 件) ─────────────────
