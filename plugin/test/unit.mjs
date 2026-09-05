@@ -17237,6 +17237,8 @@ test('BOSS 职位管理页分区:页签定分区(去「全部」与计数后缀)
     { label: '在线中', names: ['新媒体运营', '销售'] }, { label: '待开放', names: [] }, { label: '审核未通过', names: [] },
     { label: '已关闭', names: ['旧岗'] }, { label: '神秘状态', names: ['怪岗'] },
   ])
+  assert.deepEqual(out.extraLabels, ['神秘状态'], '陌生状态单独带出,给日志留痕用')
+  assert.deepEqual(bossJobListSections(['开放中'], [{ name: 'a', status: '开放中' }]).extraLabels, [])
   assert.equal(bossJobListSections(['全部'], []).ok, false, '只有「全部」不算有分区')
   assert.match(bossJobListSections(['开放中'], [{ name: 'x', status: '' }]).reason, /读不到状态/)
   assert.match(bossJobListSections(['开放中'], [{ name: '', status: '开放中' }]).reason, /读不到职位名/)

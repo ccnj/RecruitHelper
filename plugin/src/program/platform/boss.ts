@@ -4573,7 +4573,7 @@ export function projectBossSourcingFilters(
  */
 export function bossJobListSections(
   tabs: readonly string[], rows: ReadonlyArray<{ name: string; status: string }>,
-): { ok: true; sections: JobPostingSection[] } | { ok: false; reason: string } {
+): { ok: true; sections: JobPostingSection[]; extraLabels: string[] } | { ok: false; reason: string } {
   const stripCount = (raw: string): string => normalizeBossMessageText(raw).replace(/[\s·]*\d+$/u, '').trim()
   const labels = tabs.map(stripCount).filter((label) => label !== '' && label !== BOSS_JOB_TAB_ALL)
   if (labels.length === 0) return { ok: false, reason: '职位管理页没有状态分区页签' }
@@ -4598,7 +4598,7 @@ export function bossJobListSections(
     }
   }
   for (const [label, names] of extras) sections.push({ label, names })
-  return { ok: true, sections }
+  return { ok: true, sections, extraLabels: [...extras.keys()] }
 }
 
 export interface BossRecommendCardLite {
@@ -5259,10 +5259,10 @@ async function readBossPublishedJobs(ctx: PrimitiveContext, fingerprint: string 
   ctx.progress('核对 BOSS 职位管理页与登录身份', 15)
   const read = (): Promise<BossJobListRead> => runInPage(BOSS_DOM, tabId, domReadBossJobList,
     [JOB_LIST_SEL.frameSrc, JOB_LIST_SEL.tab, JOB_LIST_SEL.row, JOB_LIST_SEL.rowName, JOB_LIST_SEL.rowStatus])
-  // 读全的判据:行数等于页脚「共 N 个职位」。分页形态未见(测试账号只有一个职位),超一页会在这里如实停,不截断。
+  // 读全的判据:页脚「共 N 个职位」读到且等于行数。页脚没读到不放行(出口审查 O3:分批渲染时先看见几行、
+  // 页脚还没挂,放行就是部分结果);分页形态未见(测试账号只有一个职位),超一页会在这里如实停,不截断。
   const settled = await pollUntil(ctx, read,
-    (list) => list.frame && list.tabs.length >= 1 && (list.rows.length >= 1 || list.total === 0) &&
-      (list.total === null || list.total === list.rows.length),
+    (list) => list.frame && list.tabs.length >= 1 && list.total !== null && list.total === list.rows.length,
     RECOMMEND_NAV_WAIT_MS)
   const list = settled.value
   if (!settled.satisfied) {
@@ -5272,9 +5272,8 @@ async function readBossPublishedJobs(ctx: PrimitiveContext, fingerprint: string 
   }
   const projected = bossJobListSections(list.tabs, list.rows)
   if (!projected.ok) throw new PlatformError('ELEMENT_UNRESOLVED', projected.reason, 'afterRecovery')
-  const extras = projected.sections.slice(Math.max(0, list.tabs.filter((tab) => bossFilterGroupName(tab) !== BOSS_JOB_TAB_ALL).length))
-  if (extras.length > 0) {
-    reportHandLog('warn', 'jobListStatusUnknown', `BOSS 职位管理页有行的状态文案不在页签里,按原样另起分区:${extras.map((s) => s.label).join('/')}`)
+  if (projected.extraLabels.length > 0) {
+    reportHandLog('warn', 'jobListStatusUnknown', `BOSS 职位管理页有行的状态文案不在页签里,按原样另起分区:${projected.extraLabels.join('/')}`)
   }
   if (projected.sections.length > 16) throw new PlatformError('ELEMENT_UNRESOLVED', `职位分区数量 ${projected.sections.length} 超出契约上限`, 'afterRecovery')
   if (projected.sections.reduce((count, section) => count + section.names.length, 0) > 200) {
