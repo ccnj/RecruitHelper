@@ -17374,24 +17374,35 @@ test('BOSS 目标卡页面读:按 geekId 唯一匹配、DOM 卡对齐才交、�
   try { assert.equal(call(11).status, 'absent', 'DOM 卡与 pageList 对不上不交') } finally { misaligned.restore() }
 })
 
-test('BOSS 快捷窗页面读:geek 绑定谁、消息从各 message-component 的 message prop 收并按 mid 排序去重、方向只认 fromId==我方;没窗/没 geek/没身份如实', () => {
+test('BOSS 快捷窗页面读:geek 绑定谁、消息从各 message-component 的 message prop 收并按 mid 排序去重、方向首选 isSelf、退回 fromId==我方($parent 上行找 user$)、都没有归 system;没窗/没 geek 如实', () => {
   const { mainReadBossQuickChat, QUICK_CHAT_SEL: Q } = bossTestHooks
   const msgs = [
-    { mid: 200, body: { text: '你好', type: 1 }, bizType: 101, fromId: 9, time: 1700000000500, status: 1 },
-    { mid: 100, body: { type: 9 }, bizType: 21050004, fromId: 590000001, time: 1700000000000, status: 2 },
+    { mid: 200, body: { text: '你好', type: 1 }, bizType: 101, fromId: 9, isSelf: true, time: 1700000000500, status: 1 },
+    { mid: 100, body: { type: 9 }, bizType: 21050004, fromId: 590000001, isSelf: false, time: 1700000000000, status: 2 },
+    { mid: 300, body: { text: '旧形态', type: 1 }, bizType: 101, fromId: 9, time: 1700000000600, status: 1 },
+    { mid: 400, body: { text: '谁发的', type: 1 }, bizType: 101, fromId: 77, isSelf: false, time: 1700000000700, status: 1 },
   ]
   const page = installBossRecommendFixture({ quick: quickWindow({ uid: 590000001, friendSource: 0, encryptUid: 'ENC' }, msgs) })
   try {
     const read = mainReadBossQuickChat(Q.window, Q.messageList)
     assert.equal(read.status, 'ready'); assert.equal(read.uid, 590000001); assert.equal(read.friendSource, 0); assert.equal(read.encryptUid, 'ENC')
-    assert.deepEqual(read.rows.map((r) => [r.mid, r.direction, r.text, r.status, r.bizType]), [['100', 'in', '', 2, 21050004], ['200', 'out', '你好', 1, 101]])
+    assert.deepEqual(read.rows.map((r) => [r.mid, r.direction, r.text, r.status, r.bizType]),
+      [['100', 'in', '', 2, 21050004], ['200', 'out', '你好', 1, 101], ['300', 'out', '旧形态', 1, 101], ['400', 'system', '谁发的', 1, 101]],
+      'isSelf 优先;没 isSelf 时退回 fromId==我方(夹具顶层元素自持 user$);isSelf=false 且 fromId 不是对方归 system')
   } finally { page.restore() }
   const closed = installBossRecommendFixture({})
   try { assert.deepEqual(mainReadBossQuickChat(Q.window, Q.messageList), { status: 'closed' }) } finally { closed.restore() }
   const noGeek = installBossRecommendFixture({ quick: quickWindow(null, []) })
   try { assert.deepEqual(mainReadBossQuickChat(Q.window, Q.messageList), { status: 'no_geek' }) } finally { noGeek.restore() }
-  const noUser = installBossRecommendFixture({ quick: quickWindow({ uid: 1, friendSource: 0 }, []), user: 0 })
-  try { assert.deepEqual(mainReadBossQuickChat(Q.window, Q.messageList), { status: 'identity_missing' }, '读不到我方身份判不了方向,不猜') } finally { noUser.restore() }
+  // 顶层元素自身没有 user$、要沿 $parent 上行才有(推荐页真机形态,§十七):没 isSelf 的行仍能定方向。
+  const parentUser = installBossRecommendFixture({ quick: quickWindow({ uid: 1, friendSource: 0 }, [{ mid: 5, body: { text: 'x', type: 1 }, bizType: 101, fromId: 9, time: 1, status: 1 }]), user: 0 })
+  globalThis.document.querySelectorAll = (sel) => (sel === '*' ? [{ __vue__: { $parent: { $parent: { user$: { userId: 9 } } } } }] : [])
+  try { assert.equal(mainReadBossQuickChat(Q.window, Q.messageList).rows[0].direction, 'out') } finally { parentUser.restore() }
+  const nobody = installBossRecommendFixture({ quick: quickWindow({ uid: 1, friendSource: 0 }, [{ mid: 5, body: { text: 'x', type: 1 }, bizType: 101, fromId: 9, time: 1, status: 1 }]), user: 0 })
+  try {
+    const read = mainReadBossQuickChat(Q.window, Q.messageList)
+    assert.equal(read.status, 'ready'); assert.equal(read.rows[0].direction, 'system', '既没 isSelf 又找不到我方身份,永不猜成 out——正证读不到只会 possible')
+  } finally { nobody.restore() }
 })
 
 test('BOSS 筛选面板页面读:两块按 vip-filters 分、组名/组键/选项选中态、遮罩与按钮;面板不在或 iframe 不在如实', () => {

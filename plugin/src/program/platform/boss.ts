@@ -4862,14 +4862,15 @@ function mainReadBossRecommendTarget(
 type BossQuickChatRead =
   | { status: 'closed' }
   | { status: 'no_geek' }
-  | { status: 'identity_missing' }
   | { status: 'ready'; uid: number; friendSource: number; encryptUid: string; rows: BossRawMessage[] }
 
 /**
  * 顶层快捷聊天窗(平台事实 §十七「继续沟通与快捷聊天窗」):`.chat-global-conversation` 里
  * `.chat-global-msg-content` 的 vm 自持 `geek`(与 IM 列表行同形:uid/friendSource/encryptUid);消息行是与 IM 页
  * 同一个 message-component,从各实例的 `message` prop 收(mid/body/fromId/time/status 同形)。顶层没有 IM 页那套
- * `list$/conversation$`,所以不能复用 mainReadBossThread。方向只认 fromId === 我方 userId(与 IM 同一判据)。
+ * `list$/conversation$/user$`(§十七),所以不能复用 mainReadBossThread,也不能靠扫元素自有的 `user$` 定我方身份。
+ * 方向首选消息对象自带的 `isSelf`(出口判据表第三行);它不是布尔时退回 fromId === 我方 userId(沿 `$parent` 上行找
+ * `user$`,与 mainReadBossPrincipal 同一走法);两者都没有就归 system——永不猜成 out(出口审查 O2)。
  */
 function mainReadBossQuickChat(windowSel: string, listSel: string): BossQuickChatRead {
   type AnyRecord = Record<string, unknown>
@@ -4886,17 +4887,20 @@ function mainReadBossQuickChat(windowSel: string, listSel: string): BossQuickCha
   const uid = geek.uid
   const friendSource = geek.friendSource
   let myUserId: number | null = null
-  const seen = new Set<unknown>()
+  const visited = new Set<unknown>()
   for (const element of Array.from(document.querySelectorAll('*'))) {
-    const instance = (element as unknown as { __vue__?: AnyRecord }).__vue__
-    if (!instance || seen.has(instance)) continue
-    seen.add(instance)
-    let user: unknown
-    try { user = instance.user$ } catch { continue }
-    const raw = asRecord(user)?.userId
-    if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0) { myUserId = raw; break }
+    let node = (element as unknown as { __vue__?: AnyRecord }).__vue__
+    for (let hops = 0; node && hops < 100; hops += 1) {
+      if (visited.has(node)) break
+      visited.add(node)
+      let user: unknown
+      try { user = node.user$ } catch { user = undefined }
+      const raw = asRecord(user)?.userId
+      if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0) { myUserId = raw; break }
+      node = asRecord(node.$parent) ?? undefined
+    }
+    if (myUserId !== null) break
   }
-  if (myUserId === null) return { status: 'identity_missing' }
   const rows: BossRawMessage[] = []
   const mids = new Set<string>()
   const seenRows = new Set<unknown>()
@@ -4917,7 +4921,10 @@ function mainReadBossQuickChat(windowSel: string, listSel: string): BossQuickCha
     mids.add(key)
     const body = asRecord(message.body)
     const fromId = num(message.fromId)
-    const direction: BossRawMessage['direction'] = fromId === myUserId ? 'out' : fromId === uid ? 'in' : 'system'
+    const isSelf = message.isSelf
+    const direction: BossRawMessage['direction'] = typeof isSelf === 'boolean'
+      ? (isSelf ? 'out' : fromId === uid ? 'in' : 'system')
+      : (myUserId !== null && fromId === myUserId ? 'out' : fromId === uid ? 'in' : 'system')
     const bodyText = body && typeof body.text === 'string' ? body.text : ''
     const topText = typeof message.text === 'string' ? message.text : ''
     const interview = asRecord(body?.interview)
