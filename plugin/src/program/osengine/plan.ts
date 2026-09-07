@@ -177,11 +177,24 @@ export function planMove(input: MovePlanInput): MovePlan {
  *
  * 与 `planMove` 不同,这里没有坐标——打字不需要标定。
  */
+/**
+ * macOS 上的上屏键只用空格(2026-09-07 甲方裁决)。默认表里 14% 的词用数字键「选第 N 个候选」:
+ * Windows 自研 TIP 不看候选、直接上屏计划词,数字只是拟人;macOS 没有 TIP,系统拼音会老老实实
+ * 选第 N 个候选——而它的第 N 个常常是更长的词组(真机:「上午」→「商务部」、「看」→「看一下」),
+ * 这正是 Mac 上漂移与多字的来源。真人基线本就「未见明显数字选词」(params.mjs 注),只留空格不失真。
+ * 依据是手服务如实报出的 OS(与清空键选 Command/Control 同一来源),不是测试分支。
+ */
+const DARWIN_COMMIT_KEYS = [{ code: 'Space', p: 1 }] as const
+
 export async function planType(
-  text: string, seed: number, options: { readonly sanitize?: boolean } = {},
+  text: string, seed: number, options: { readonly sanitize?: boolean; readonly os?: string } = {},
 ): Promise<ComposeResult> {
   // sanitize 是上游自带的清洗档:先摘掉打不出的字元再排,摘了什么随 dropped 带回。
   // 生产发送路径自 2026-09-07「实发正文即事实」起开着它(打不出的字元不再停整条,
   // 实发正文回脑落账);debug.osType 仍不传——它要的正是「打不出就如实说打不出」。
-  return await compose(text, { seed, ...(options.sanitize ? { sanitize: true } : {}) })
+  return await compose(text, {
+    seed,
+    ...(options.sanitize ? { sanitize: true } : {}),
+    ...(options.os === 'darwin' ? { params: { commitKeys: [...DARWIN_COMMIT_KEYS] } } : {}),
+  })
 }

@@ -18207,6 +18207,27 @@ test('会话行滚进视口的计划:带内不滚、带外朝行滚到带中心�
   assert.equal(planBossRowScroll({ count: 0, rect: rect(0) }, band, 'up').direction, 'up')
 })
 
+test('上屏键按 OS 选:darwin 只用空格,windows 与不传 OS 沿用默认表(含数字选词)', async () => {
+  const { planType: plan } = await import(unitBundleURL)
+  const text = '您好，看到您的简历和我们岗位很匹配，方便的话聊一聊近期的求职打算，期待您的回复，谢谢。'
+  const commits = (result) => result.plan.words.filter((w) => w.commit).map((w) => w.commit.code)
+  for (const seed of [3, 11, 29]) {
+    const mac = await plan(text, seed, { sanitize: true, os: 'darwin' })
+    assert.equal(mac.ok, true, `darwin seed=${seed}: ${mac.ok ? '' : mac.reasons.join(';')}`)
+    const macCommits = commits(mac)
+    assert.ok(macCommits.length > 10, 'fixture 得有足够多的组字词')
+    assert.ok(macCommits.every((code) => code === 'Space'), `darwin 只能用空格上屏: ${macCommits.filter((c) => c !== 'Space').join(',')}`)
+  }
+  const digitSeen = new Set()
+  for (const seed of [3, 11, 29, 47]) {
+    const win = await plan(text, seed, { sanitize: true, os: 'windows' })
+    const plain = await plan(text, seed, { sanitize: true })
+    assert.equal(win.ok && plain.ok, true)
+    for (const code of [...commits(win), ...commits(plain)]) if (code !== 'Space') digitSeen.add(code)
+  }
+  assert.ok(digitSeen.size > 0, `windows / 不传 OS 应保留默认表的数字选词(14%),四个种子一个都没抽到不合理`)
+})
+
 for (const { name, fn } of tests) {
   try {
     await fn()

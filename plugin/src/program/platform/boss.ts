@@ -2679,9 +2679,17 @@ async function sendBossMessage(
   if (removed > 0) trace.push(`${removed} 个换行符换成空格`)
   if (typedText === '') throw new PlatformError('GUARD_FAILED', '去掉换行之后没有内容可打', 'afterRecovery')
   ctx.checkpoint()
+  // 上屏键按 OS 选:macOS 只用空格(数字选词在系统拼音下是错字来源),Windows 默认表(见 planType)。
+  let handOS: string | undefined
+  try {
+    handOS = await readHandOS()
+  } catch (error) {
+    if (isHandServiceDown(error)) throw new PlatformError('CTX_NOT_READY', '手服务不可用,打字未开始', 'afterRecovery', 'pageBroken')
+    throw error
+  }
   let composed
   try {
-    composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0), { sanitize: true })
+    composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0), { sanitize: true, ...(handOS ? { os: handOS } : {}) })
   } catch (error) {
     throw new PlatformError('ELEMENT_UNRESOLVED', `排版器自身异常:${describeError(error).slice(0, 300)}`, 'afterRecovery')
   }
@@ -6123,9 +6131,15 @@ async function sendBossGreeting(
     if (removed > 0) trace.push(`${removed} 个换行符换成空格`)
     if (typedText === '') throw greetingAfterFirstClick('去掉换行之后没有内容可打')
     ctx.checkpoint()
+    let handOS: string | undefined
+    try {
+      handOS = await readHandOS()
+    } catch (error) {
+      throw greetingAfterFirstClick(isHandServiceDown(error) ? '手服务不可用,打字未开始' : describeError(error).slice(0, 200))
+    }
     let composed
     try {
-      composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0), { sanitize: true })
+      composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0), { sanitize: true, ...(handOS ? { os: handOS } : {}) })
     } catch (error) {
       throw greetingAfterFirstClick(`排版器自身异常:${describeError(error).slice(0, 200)}`)
     }

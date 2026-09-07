@@ -110,6 +110,11 @@ export interface ComposeOptions {
    * 我们当前不传:`debug.osType` 要的正是"打不出就如实说打不出";生产路径再议。
    */
   sanitize?: boolean
+  /**
+   * 排版参数覆盖,经 `withParams` 浅合并到默认表(`params.mjs`)上。当前只用到 `commitKeys`:
+   * macOS 没有 TIP、系统拼音会老老实实选第 N 个候选,数字选词在那儿是错字来源,故只留空格。
+   */
+  params?: { commitKeys?: Array<{ code: string; p: number }> }
 }
 
 /**
