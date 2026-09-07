@@ -306,7 +306,6 @@ const MAIN_SOURCING_WINDOW_FAILURE_REASONS = [
   'position_identity_mismatch',
   'position_title_ambiguous',
   'position_title_mismatch',
-  'scroll_unavailable',
   'page_unstable',
   'unexpected',
 ] as const
@@ -2544,8 +2543,13 @@ async function mainReadSourcingWindow(
     if ('status' in initial) return initial
     const initialSignature = signature(initial)
     const beforeTop = scroller ? scrollTop(scroller) : 0
-    if (move !== 'current') {
-      if (!scroller) return failed('scroll_unavailable')
+    // 列表短到没有任何可滚祖先、document root 也不溢出时,整个列表已经在视口里,
+    // reset/next 都无处可滚。这不是页面故障:按契约 next「至多推进一个可见窗口」,
+    // 推不动就照常走下面的稳定采样、如实报 moved=false,交由脑侧无进展预算收口。
+    // 立案:2026-09-05~07 俞炳冬01 真机,「团队发展总监」推荐流只剩 1~3 人,此处
+    // 报 scroll_unavailable → 脑记 windowReadFailed(非跳过类)→ 整日计划终止,
+    // 连续三天丢掉末两个职位约 30 个名额;09-04 同职位 5 人可滚则正常收口。
+    if (move !== 'current' && scroller) {
       if (move === 'reset') {
         scrollTo(scroller, 0)
       } else {
@@ -5937,9 +5941,6 @@ function throwSourcingResumeFailure(result: MainSourcingResumeFailed): never {
 function throwSourcingWindowFailure(result: MainSourcingWindowFailed): never {
   if (result.reason === 'route_changed') {
     throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '窗口读取期间当前推荐页发生变化', 'manualOnly')
-  }
-  if (result.reason === 'scroll_unavailable') {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐列表滚动窗口无法唯一确定', 'manualOnly')
   }
   if (result.reason === 'page_unstable') {
     throw new ZhilianPlatformError(
