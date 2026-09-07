@@ -5701,7 +5701,10 @@ async function readBossSourcingTargetResume(
  * (2026-09-07 第四趟真机:两条招呼正文没发,原因得靠离线重放排版器才找回来——排版器拒了「」)。留痕不能只靠 result。
  */
 function greetingAfterFirstClick(message: string): PlatformError {
-  reportHandLog('warn', 'greetingTextNotSent', `BOSS 招呼:关系已建立,正文未发出——${message}`.slice(0, 600))
+  // 手侧日志进脑侧普通日志:引号里的上屏原文(招呼正文/候选人称呼)不进普通日志,只留长度与原因;
+  // 原文留在 result 里(命令审计快照,48 小时)。
+  const redacted = message.replace(/「[^」]*」/gu, '「…」')
+  reportHandLog('warn', 'greetingTextNotSent', `BOSS 招呼:关系已建立,正文未发出——${redacted}`.slice(0, 600))
   return new PlatformError('POSTCONDITION_UNCONFIRMED', `关系已建立,正文未发出:${message}`, 'manualOnly', undefined, 'possible')
 }
 
