@@ -15279,13 +15279,13 @@ test('埋点上报自检由适配器声明驱动:没声明守卫的平台不探�
 // ---------------------------------------------------------------------------
 
 const OSENGINE_FIXTURE = JSON.parse(
-  readFileSync('test/fixtures/osengine-hiboss-948afb5.json', 'utf8'),
+  readFileSync('test/fixtures/osengine-hiboss-60e3880.json', 'utf8'),
 )
 
 test('osengine 与 hiBoss 原件逐点一致(基准由上游原始文件生成)', () => {
   const { from, to, targetW, maxDwellMs, cases } = OSENGINE_FIXTURE
   assert.equal(maxDwellMs, DEFAULT_MAX_DWELL_MS, '基准的截断值必须与我们的缺省一致')
-  assert.equal(OSENGINE_SOURCE.commit, '948afb5', '版本钉子与基准文件名必须同步')
+  assert.equal(OSENGINE_SOURCE.commit, '60e3880', '版本钉子与基准文件名必须同步')
 
   for (const [seedText, expected] of Object.entries(cases)) {
     const plan = planMove({ from, to, targetW, maxDwellMs, seed: Number(seedText) })
@@ -15345,7 +15345,7 @@ test('osengine 的 pressMs 来自实测池而不是常数', () => {
 // ---------------------------------------------------------------------------
 
 const COMPOSE_FIXTURE = JSON.parse(
-  readFileSync('test/fixtures/osengine-compose-hiboss-948afb5.json', 'utf8'),
+  readFileSync('test/fixtures/osengine-compose-hiboss-60e3880.json', 'utf8'),
 )
 
 /** 上游 injector.go 的 shiftGuard:Shift 必须在下一个键按下前至少这么久松开。 */
@@ -15362,7 +15362,7 @@ function flattenPlanKeys(plan) {
 }
 
 test('osengine/compose 与 hiBoss 原件逐字段一致(基准由上游原始文件生成)', async () => {
-  assert.equal(OSENGINE_SOURCE.commit, '948afb5', '版本钉子与基准文件名必须同步')
+  assert.equal(OSENGINE_SOURCE.commit, '60e3880', '版本钉子与基准文件名必须同步')
   assert.ok(OSENGINE_SOURCE.files.includes('compose'), '版本钉子要覆盖排版器的来源')
 
   for (const [name, { text, bySeed }] of Object.entries(COMPOSE_FIXTURE.cases)) {
@@ -15377,7 +15377,7 @@ test('osengine/compose 与 hiBoss 原件逐字段一致(基准由上游原始文
   }
 })
 
-test('osengine/compose 同步上游 948afb5:「」【】『』·–￥ 有键位了——「」走 BracketLeft/Right 不带 Shift,『』同键带 Shift,– 与 — 同键;第四趟真机就是「」把两条招呼正文拦在打字前', async () => {
+test('osengine/compose 同步上游 60e3880:「」【】『』·–￥ 有键位了——「」走 BracketLeft/Right 不带 Shift,『』同键带 Shift,– 与 — 同键;第四趟真机就是「」把两条招呼正文拦在打字前', async () => {
   const r = await planType('看到您做过「获客号」运营，在『上海』，薪资20–35K', 1)
   assert.ok(r.ok, `应当排得出:${(r.reasons ?? []).join(';')}`)
   const direct = r.plan.words.filter((w) => w.direct)
