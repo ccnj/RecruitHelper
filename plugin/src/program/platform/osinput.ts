@@ -142,15 +142,38 @@ export interface ClickPlan {
    * 落点上的元素是不是靶子。**用平台自己的命中测试问**——
    * 「这个像素上是谁」是浏览器的公开语义,而"标定够不够准"我们答不了。
    */
-  hitTest(clientX: number, clientY: number): Promise<{ onTarget: boolean; found: string }>
+  hitTest(clientX: number, clientY: number): Promise<HitTestResult>
   /** 点击之后:页面观测到的 click 事件 + 平台的可见后置状态。 */
   observe(): Promise<ClickObservation>
+  /**
+   * 退让点(2026-09-07 真机):靶子被顶层 hover 弹层盖住(命中测试报 `occluded`)时,先把光标落到这块
+   * 平台指定的空白区让弹层自己收回,再从那里靠近一次——**不重瞄**,同一个瞄点、同一道命中测试判,
+   * 每个计划至多退让一次。真人碰出弹层也是往旁边一挪。没给就照旧连拒两次收场。
+   */
+  readonly retreat?: RetreatPlan
   /**
    * 缺省 `click`。`land` 表示**只落不点**:走完靠近、落点确认与命中测试就停,收场是 landed——
    * 滚轮(先把光标放到容器上)与 debug.osClick 的仅移动模式用它。三道闸里的前两道照过,
    * 第三道(光标此刻还在原处)由手服务在下一步的 /scroll 或 /click 里各自再核。
    */
   readonly action?: 'click' | 'land'
+}
+
+/**
+ * 命中测试的答案。`occluded` 由平台在「落点上是别的东西盖着靶子」时置真——它只是给退让一个理由,
+ * 放不放行仍只看 onTarget。
+ */
+export interface HitTestResult {
+  readonly onTarget: boolean
+  readonly found: string
+  readonly occluded?: boolean
+}
+
+export interface RetreatPlan {
+  /** 空白区矩形(视口 CSS 坐标),光标落到这里不会碰出任何东西。 */
+  readonly rect: { x: number; y: number; w: number; h: number }
+  /** 退让落点是不是真落在空白处;没给就不核。 */
+  hitTest?(clientX: number, clientY: number): Promise<{ onTarget: boolean; found: string }>
 }
 
 export interface ClickObservation {
@@ -172,6 +195,8 @@ export interface ClickObservation {
  * 两次都不过就停手不点 —— 失效方向是不点,不是接着飞。
  */
 const CLICK_APPROACH_ATTEMPTS = 2
+/** 退让之后给 hover 弹层收回的时间:mouseleave 后弹层常有几百毫秒延时才关。 */
+const RETREAT_SETTLE_MS = 1_200
 
 /** 按压时长。上游实测池的中位数附近,手服务对 0~2000ms 之外一律拒。 */
 const CLICK_PRESS_MS = 96
@@ -869,8 +894,12 @@ async function approachAndClick(
   // 那一帧鼠标根本没动、浏览器不派发事件,而这几帧恰恰是贴靶子的最后几帧。
   let unreachable = 0
   let lagMaxUs = 0
+  // 退让过一次就多给一次靠近:退让不是重瞄,是等盖着靶子的东西自己走开。
+  let retreated = false
+  let approaches = 0
 
-  for (let approach = 1; approach <= CLICK_APPROACH_ATTEMPTS; approach += 1) {
+  for (let approach = 1; approach <= CLICK_APPROACH_ATTEMPTS + (retreated ? 1 : 0); approach += 1) {
+    approaches = approach
     ctx.checkpoint()
     await pace()
 
@@ -920,6 +949,14 @@ async function approachAndClick(
     }
     if (!hit.onTarget) {
       lastRefusal = `落点上不是靶子,而是 ${hit.found}`
+      if (plan.retreat && !retreated && hit.occluded === true) {
+        retreated = true
+        const failed = await retreatAway(inject, tabId, ctx, plan.retreat, trace, approach)
+        if (failed !== null) {
+          lastRefusal = `${lastRefusal};退让未成(${failed})`
+          break
+        }
+      }
       continue
     }
     if (plan.action === 'land') {
@@ -950,8 +987,45 @@ async function approachAndClick(
   return {
     outcome: 'refusedByGate', unreachable, lagMaxUs,
     ...(drift === undefined ? {} : { landingDriftPx: drift }),
-    detail: `${CLICK_APPROACH_ATTEMPTS} 次靠近都没过闸,最后一次:${lastRefusal} | ${trace.join(' | ')}`,
+    detail: `${approaches} 次靠近${retreated ? '(含退让后一次)' : ''}都没过闸,最后一次:${lastRefusal} | ${trace.join(' | ')}`,
   }
+}
+
+/**
+ * 退让:光标落到平台指定的空白区,等盖着靶子的 hover 弹层自己收回。这一步一下都不点,只喂一次标定。
+ * 返回 null 表示退让完成;否则是失败原因,调用方据此收场(退让都落不到空白处,再靠近也没意义)。
+ */
+async function retreatAway(
+  inject: InjectOptions,
+  tabId: number,
+  ctx: PrimitiveContext,
+  retreat: RetreatPlan,
+  trace: string[],
+  approach: number,
+): Promise<string | null> {
+  ctx.checkpoint()
+  await pace()
+  const state = await callHand<HandState>('/state')
+  if (state.cursorCssX === null || state.cursorCssY === null) return '读不到光标'
+  const spot = clickAimPoint(retreat.rect, mulberry32(seedFrom(ctx.cmdMsgId, 9100 + approach)))
+  const move = planMove({
+    from: { x: state.cursorCssX, y: state.cursorCssY },
+    to: spot,
+    targetW: Math.max(8, Math.round(retreat.rect.w)),
+    maxDwellMs: DEFAULT_MAX_DWELL_MS,
+    seed: seedFrom(ctx.cmdMsgId, 300 + approach),
+  })
+  if (move.points.length === 0) return '退让计划为空'
+  ctx.progress(`靶子被盖住,退让到空白处:${move.points.length} 帧`)
+  await callHand<PlayResponse>('/play', { points: move.points })
+  const landed = await readSettledLanding(inject, tabId)
+  if (landed.x === null || landed.y === null) return '退让后页面没观测到 mousemove'
+  await callHand<LandingResponse>('/landing', { clientX: landed.x, clientY: landed.y })
+  const check = retreat.hitTest ? await retreat.hitTest(landed.x, landed.y) : { onTarget: true, found: '未核' }
+  trace.push(`退让 靶(${spot.x},${spot.y}) 落(${landed.x},${landed.y}) 空白=${check.onTarget ? '是' : '否'}(${check.found})`)
+  if (!check.onTarget) return check.found
+  await new Promise((r) => setTimeout(r, RETREAT_SETTLE_MS))
+  return null
 }
 
 /**
