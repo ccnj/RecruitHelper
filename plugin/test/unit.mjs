@@ -18192,6 +18192,21 @@ test('快捷窗打开后先看一眼再打字:停顿落在 3~6 秒的有界区�
   assert.ok(seen.size > 50, '必须是随机值,不是常数')
 })
 
+test('会话行滚进视口的计划:带内不滚、带外朝行滚到带中心、不在 DOM 按扫描方向滚一屏', () => {
+  const { planBossRowScroll } = bossTestHooks
+  // 2026-09-07 只读考古的真实尺寸:容器 y=196 高 446,行高 74,窗口 662 高时可见带里 5 行
+  const band = { top: 196, bottom: 642 }
+  const rect = (y) => ({ x: 219, y, w: 359, h: 74 })
+  assert.equal(planBossRowScroll({ count: 1, rect: rect(272) }, band, 'down'), null, '带内不滚')
+  assert.deepEqual(planBossRowScroll({ count: 1, rect: rect(1000) }, band, 'down'), { direction: 'down', distancePx: 618 }, '带外朝行滚到带中心')
+  const above = planBossRowScroll({ count: 1, rect: rect(-200) }, band, 'down')
+  assert.deepEqual([above.direction, above.distancePx >= 74], ['up', true])
+  const partial = planBossRowScroll({ count: 1, rect: rect(600) }, band, 'down')
+  assert.deepEqual([partial.direction, partial.distancePx], ['down', 218], '只露一半也要滚:距离至少一行高')
+  assert.deepEqual(planBossRowScroll({ count: 0, rect: rect(0) }, band, 'down'), { direction: 'down', distancePx: 446 }, '虚拟列表没渲染:按扫描方向滚一屏')
+  assert.equal(planBossRowScroll({ count: 0, rect: rect(0) }, band, 'up').direction, 'up')
+})
+
 for (const { name, fn } of tests) {
   try {
     await fn()

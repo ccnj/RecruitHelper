@@ -806,6 +806,10 @@ const SEND_CLOCK_TOLERANCE_MS = 5_000
 /** 侧栏 IM 未读总角标。全页唯一(2026-09-03 实测);零态未观测,节点缺席按 null。 */
 const BOSS_UNREAD_BADGE_SELECTOR = '.menu-chat-badge'
 const ROW_SELECTOR = '.geek-item'
+/** IM 页会话列表的滚动容器(平台事实 §十七,2026-09-03 经 debug.osScroll 真机量过:真实滚轮一格 120px)。 */
+const USER_LIST_SELECTOR = 'div.user-list.b-scroll-stable'
+/** 把目标行滚进视口的轮数上限:内存 58 行 × 74px ≈ 4300px,每轮至多一屏或直达目标,8 轮足够扫完整张列表。 */
+const ROW_SCROLL_MAX_ROUNDS = 8
 const ROW_SELECTED_CLASS = 'selected'
 const ROW_BUBBLE_SELECTOR = '.badge-count'
 const LABEL_TAB_SELECTOR = '.chat-label-item'
@@ -2054,14 +2058,105 @@ async function osClickOnce(tabId: number, ctx: PrimitiveContext, plan: ClickPlan
   throw new PlatformError('ELEMENT_UNRESOLVED', `${what}未点击:${probe.detail ?? probe.outcome}`, 'afterRecovery')
 }
 
+export type BossRowScrollPlan = { direction: 'up' | 'down'; distancePx: number }
+
+/**
+ * 点行之前先把它滚进列表可见带(2026-09-07:巡检 21 连败「目标行不在视口内」的修法)。会话列表是
+ * 虚拟列表(2026-09-07 只读考古:内存 58 行只渲染 40 个节点,窗口 662px 高时可见带里只有 5 行),
+ * 更远的行在 DOM 里没有节点,只能按扫描方向一屏一屏滚。纯函数,单测钉住三种形态:
+ * 行在带内 → null;行在 DOM 但不在带内 → 朝它滚到带中心;行不在 DOM → 按扫描方向滚一屏。
+ */
+export function planBossRowScroll(
+  row: { count: number; rect: DomRect4 }, band: { top: number; bottom: number }, sweep: 'up' | 'down',
+): BossRowScrollPlan | null {
+  const bandHeight = Math.max(1, band.bottom - band.top)
+  if (row.count !== 1) return { direction: sweep, distancePx: Math.round(bandHeight) }
+  const top = row.rect.y
+  const bottom = row.rect.y + row.rect.h
+  if (top >= band.top && bottom <= band.bottom) return null
+  const rowCenter = (top + bottom) / 2
+  const bandCenter = (band.top + band.bottom) / 2
+  return {
+    direction: rowCenter < bandCenter ? 'up' : 'down',
+    distancePx: Math.max(Math.round(row.rect.h), Math.round(Math.abs(rowCenter - bandCenter))),
+  }
+}
+
+/** 滚会话列表容器,走与推荐页同一条 OS 滚轮链(scrollBossRecommendDocument 同款,只换容器)。 */
+async function scrollBossUserList(
+  tabId: number, ctx: PrimitiveContext, direction: 'up' | 'down', distancePx: number,
+): Promise<OsScrollResult> {
+  const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [USER_LIST_SELECTOR, -1])
+  if (located.status !== 'ok') {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `会话列表滚动容器定位失败(${located.status}):${located.detail}`, 'afterRecovery')
+  }
+  const retreat = await bossRetreatPlan(tabId)
+  const target: ScrollTarget = {
+    label: `会话列表 ${located.signature}`,
+    rect: located.clip,
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestIndexed, [USER_LIST_SELECTOR, located.index, x, y]),
+    readMetrics: async () => {
+      const m = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [USER_LIST_SELECTOR, located.index])
+      return m.found ? { scrollTop: m.scrollTop, scrollHeight: m.scrollHeight, clientHeight: m.clientHeight } : null
+    },
+    ...(retreat === undefined ? {} : { retreat }),
+  }
+  const result = await runOsScroll(BOSS_INJECT, tabId, ctx, target, direction, distancePx)
+  if (result.outcome === 'handServiceUnavailable') {
+    throw new PlatformError('CTX_NOT_READY', `手服务不可用,会话列表未滚动(${result.detail ?? ''})`, 'afterRecovery', 'pageBroken')
+  }
+  if (result.outcome === 'refusedByGate') {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `会话列表滚动被闸拒绝:${result.detail ?? ''}`, 'afterRecovery')
+  }
+  return result
+}
+
+/**
+ * 把目标会话行滚进列表可见带。行在 DOM 里就朝它滚;不在 DOM(虚拟列表没渲染)就先向下扫,到底
+ * 还没有再向上扫,两头都到过仍没有即目标不在列表里。行在 DOM 里却已到边(再滚也靠不近)就停手,
+ * 由 rowClickPlan 按视口判据裁决。失效方向永远是不点。
+ */
+async function ensureBossRowVisible(tabId: number, ctx: PrimitiveContext, conversationRef: string): Promise<void> {
+  let sweep: 'up' | 'down' = 'down'
+  let edges = 0
+  const trace: string[] = []
+  for (let round = 0; round < ROW_SCROLL_MAX_ROUNDS; round += 1) {
+    ctx.checkpoint()
+    const row = await locateRow(tabId, conversationRef)
+    if (row.count > 1) return
+    const container = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [USER_LIST_SELECTOR, -1])
+    if (container.status !== 'ok') {
+      throw new PlatformError('ELEMENT_UNRESOLVED', `会话列表滚动容器定位失败(${container.status}):${container.detail}`, 'afterRecovery')
+    }
+    const plan = planBossRowScroll(row, { top: container.clip.y, bottom: container.clip.y + container.clip.h }, sweep)
+    if (plan === null) {
+      if (trace.length > 0) console.info('[RecruitHelper] boss_row_scroll', trace.join(' | '))
+      return
+    }
+    if (round > 0) await sleep(1_000 + Math.floor(Math.random() * 401))
+    const result = await scrollBossUserList(tabId, ctx, plan.direction, plan.distancePx)
+    trace.push(`#${round + 1} 行=${row.count} ${plan.direction} ${plan.distancePx}px → ${result.outcome} ${result.scrollTopBefore}→${result.scrollTopAfter}`)
+    if (result.outcome === 'stuck') {
+      throw new PlatformError('ELEMENT_UNRESOLVED', `会话列表滚不动:${result.detail ?? ''}`, 'afterRecovery')
+    }
+    if (result.outcome === 'edge') {
+      if (row.count === 1) break
+      edges += 1
+      if (edges >= 2) throw new PlatformError('TARGET_NOT_FOUND', `扫完整张会话列表也没有目标行(${trace.join(' | ')})`, 'no')
+      sweep = sweep === 'down' ? 'up' : 'down'
+    }
+  }
+  reportHandLog('warn', 'rowScrollExhausted', `BOSS 会话行滚进视口 ${ROW_SCROLL_MAX_ROUNDS} 轮未收敛:${trace.join(' | ').slice(0, 400)}`)
+}
+
 async function rowClickPlan(tabId: number, conversationRef: string): Promise<ClickPlan> {
   const located = await runInPage(BOSS_DOM, tabId, domLocateBossRow,
     [ROW_SELECTOR, conversationRef, ROW_SELECTED_CLASS, ROW_BUBBLE_SELECTOR])
   if (located.count === 0) throw new PlatformError('TARGET_NOT_FOUND', '目标会话不在当前列表里', 'no')
   if (located.count > 1) throw new PlatformError('ELEMENT_UNRESOLVED', '目标会话在列表里不唯一', 'afterRecovery')
   if (!located.inViewport) {
-    // BOSS 上没有滚动注入:行不在视口里就点不到。失效方向是不点,由下轮再来。
-    throw new PlatformError('ELEMENT_UNRESOLVED', '目标行不在视口内,BOSS 尚无滚动注入', 'afterRecovery')
+    // ensureBossThreadOpen 点前已经 ensureBossRowVisible 滚过;仍不在视口就是没法靠近,不点,由下轮再来。
+    throw new PlatformError('ELEMENT_UNRESOLVED', '目标行滚动后仍不在视口内', 'afterRecovery')
   }
   return {
     label: `会话行(点前 选中=${located.selected ? '是' : '否'} 气泡=${located.bubbleText || '无'})`,
@@ -2290,6 +2385,7 @@ async function ensureBossThreadOpen(
   const tabId = tab.id!
   const before = await locateRow(tabId, conversationRef)
   if (before.count === 1 && before.selected) return false
+  await ensureBossRowVisible(tabId, ctx, conversationRef)
   const plan = await rowClickPlan(tabId, conversationRef)
   ctx.checkpoint()
   // 上一条命令可能刚点过页签;相邻可见交互再留 1s+抖动(runOsProbe 靠近阶段另有一次)。
@@ -6215,6 +6311,7 @@ export const bossTestHooks = Object.freeze({
   // 第二刀(2026-09-05):推荐页采集 + 打招呼。
   // 实发正文即事实(2026-09-07):地板、TIP 核对、认行三个纯判定点。
   typedTextFloor,
+  planBossRowScroll,
   sampleQuickChatReadPause,
   QUICK_CHAT_READ_PAUSE_MS,
   levenshteinChars,
