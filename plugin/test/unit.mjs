@@ -15990,12 +15990,12 @@ test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条加场
   // 加了七条:职位管理页一条、采集四条、招呼两条(readPublishedJobs / selectSourcingPosition / applySourcingFilters /
   // readSourcingWindow / readSourcingTargetResume / sendGreeting / readGreetingOutcome)。
   assert.deepEqual(declared, [
-    'acceptWechat', 'applySourcingFilters', 'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
+    'acceptWechat', 'applySourcingFilters', 'captureThreadScreenshot', 'ensureSurface', 'identifyCurrentConversation', 'openConversation',
     'osClick', 'osProbe', 'osScroll', 'osType', 'probePlatform',
     'readGreetingOutcome', 'readList', 'readPublishedJobs', 'readResume', 'readSourcingTargetResume', 'readSourcingWindow',
     'readThread', 'readUnreadTotal', 'readWechatExchangeOutcome',
     'selectSourcingPosition', 'sendGreeting', 'sendInviteCard', 'sendMessage', 'sendWechatInvite',
-  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口;邀面卡:2026-09-04 场景三出口;第二刀七条:2026-09-04 夜出口)')
+  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口;邀面卡:2026-09-04 场景三出口;第二刀七条:2026-09-04 夜出口;ensureSurface:2026-09-07 首趟真机后甲方批)')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'readSourcingResume'), /未实现原语能力/, '一次读一位的旧采集原语,BOSS 走窗口 + 目标两条,不实现它')
@@ -16033,7 +16033,7 @@ test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表�
       'chat.readGreetingOutcome@1', 'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.readWechatExchangeOutcome@1',
       'chat.sendGreeting@1', 'chat.sendInviteCard@1', 'chat.sendMessage@1', 'chat.sendWechatInvite@1',
       'debug.osClick@1', 'debug.osProbe@1', 'debug.osScroll@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
-      'debug.slowEcho@1', 'debug.switchWindow@1', 'job.readPublishedList@1', 'probe.platform@1',
+      'debug.slowEcho@1', 'debug.switchWindow@1', 'job.readPublishedList@1', 'nav.ensureSurface@1', 'probe.platform@1',
     ], 'BOSS 表变了:要么适配器长了能力(先过出口),要么某条原语漏填 capability')
     for (const capability of tables[1].caps) {
       assert.ok(union.includes(capability), `BOSS 表 ⊆ 并集:${capability}`)

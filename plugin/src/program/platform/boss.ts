@@ -22,7 +22,7 @@ import { osScrollContractData, runOsScroll } from './osscroll'
 import type { OsScrollResult, ScrollTarget } from './osscroll'
 import type { ClickObservation, ClickPlan, RetreatPlan } from './osinput'
 import { PlatformError } from './types'
-import { BOSS_MATCH, BOSS_ORIGIN, BOSS_PLATFORM, bossSite } from './bossSite'
+import { BOSS_CHAT_URL, BOSS_MATCH, BOSS_ORIGIN, BOSS_PLATFORM, bossSite } from './bossSite'
 import type { InjectOptions } from './inject'
 import type { PlatformAdapter } from './types'
 import type { PrimitiveContext } from '../registry'
@@ -84,6 +84,8 @@ import type {
   JobPostingSection,
   JobReadPublishedListData,
   MessageAnchor,
+  NavEnsureSurfaceArgs,
+  NavEnsureSurfaceData,
   PeerSummary,
   ProbePlatformData,
   SourcingCareerStatus,
@@ -5332,6 +5334,36 @@ async function closeBossQuickChatBestEffort(tabId: number, ctx: PrimitiveContext
   }
 }
 
+// ── nav.ensureSurface(沟通页) ──────────────────────────────────────────────────
+
+/**
+ * 把唯一的 BOSS 标签页带到沟通页并等列表页签渲染。脑侧巡检在 readList 报 pageAbsent 时走 surfaceRecovery
+ * 调它(2026-09-07 首趟真机:采集批次收口后标签页停在推荐页,巡检每两分钟失败一次)。没有 BOSS 标签页就新开一个。
+ * 登录态:身份核对过就是 in——BOSS 站点不感知掉登录(bossSite),永不报 out。
+ */
+async function ensureBossSurface(
+  args: NavEnsureSurfaceArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<NavEnsureSurfaceData> {
+  if (args.surface !== 'im') throw new PlatformError('TARGET_NOT_FOUND', '当前手不支持该页面 surface', 'no')
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
+  ctx.checkpoint()
+  let tab = await bossTab()
+  let createdTab = false
+  if (!tab || tab.id === undefined) {
+    tab = await chrome.tabs.create({ url: BOSS_CHAT_URL, active: false })
+    createdTab = true
+  }
+  if (tab.id === undefined) throw new PlatformError('CTX_NOT_READY', 'BOSS 标签页缺少 id', 'afterRecovery', 'pageBroken')
+  const isIm = (url: string | undefined): boolean => !!url && bossSite.pageKind(url) === 'im'
+  const ready = await ensureBossTabAt(tab, ctx, fingerprint, BOSS_CHAT_URL, isIm, '沟通页')
+  const tabId = ready.id!
+  const settled = await pollUntil(ctx, () => readListState(tabId), (state) => state.labelTabs.length > 0)
+  await dismissBossOverlaysBestEffort(ready, ctx)
+  await verifiedBossTab(fingerprint)
+  ctx.progress(settled.satisfied ? 'BOSS 沟通页已就绪' : 'BOSS 沟通页列表页签未就绪', 100)
+  return { createdTab, loginState: 'in', ready: settled.satisfied }
+}
+
 // ── job.readPublishedList ─────────────────────────────────────────────────────
 
 async function readBossPublishedJobs(ctx: PrimitiveContext, fingerprint: string | undefined): Promise<JobReadPublishedListData> {
@@ -6073,6 +6105,7 @@ export const bossAdapter = {
   // 建档后的简历补采(2026-09-03 甲方选 B):摘要级、零点击,见 readBossResume。
   readResume: ({ args, ctx, fingerprint }) => readBossResume(args, ctx, fingerprint),
   // 第二刀的七条(2026-09-05 开工,出口 docs/boss/第二刀出口-采集与打招呼-2026-09-04.md):推荐页采集 + 打招呼。
+  ensureSurface: ({ args, ctx, fingerprint }) => ensureBossSurface(args, ctx, fingerprint),
   readPublishedJobs: ({ ctx, fingerprint }) => readBossPublishedJobs(ctx, fingerprint),
   selectSourcingPosition: ({ args, ctx, fingerprint }) => selectBossSourcingPosition(args, ctx, fingerprint),
   applySourcingFilters: ({ args, ctx, fingerprint }) => applyBossSourcingFilters(args, ctx, fingerprint),
