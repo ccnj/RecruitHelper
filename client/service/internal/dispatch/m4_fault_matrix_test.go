@@ -567,3 +567,41 @@ func TestGreetingConcurrentCASAndExactRetryDoNotGrowLedger(t *testing.T) {
 		}
 	})
 }
+
+// 实发正文即事实(2026-09-07):招呼 ok result 带 sentText 时,seq 1 的招呼行按实发正文落账,
+// 档案与会话推进与原样相同,并留 sent_text_differs 审计。
+func TestGreetingOkResultWithSentTextLandsActualText(t *testing.T) {
+	d, st, m := newDisp(t)
+	fixture := seedGreetingTarget(t, st, m, "sent-text")
+	receipt, err := d.SendGreeting(sendGreetingRequest(fixture, "intent-greeting-sent-text", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := fixture.GreetingText + "花"
+	data, _ := protocol.Encode(protocol.ChatSendGreetingData{
+		PlatformUserRef: fixture.PlatformUserRef, PositionRef: fixture.PositionRef,
+		ConversationRef: fixture.ConversationRef, ContentHash: syncledger.HashText(actual), SentText: actual,
+		ObservedAt: time.Now().UnixMilli(),
+	})
+	result := protocol.ResultBody{
+		Ref: receipt.MsgID, Status: protocol.ResultStatusOk, Data: data,
+		Evidence: []protocol.Evidence{{Type: string(protocol.SendGreetingEvidenceTypeOutboundGreetingObserved)}},
+	}
+	if outcome, _, err := d.applyResultMessage(fixture.HandID, "result-greeting-sent-text", result); err != nil || outcome != ocDone {
+		t.Fatalf("带 sentText 的招呼 result: outcome=%v err=%v", outcome, err)
+	}
+	assertGreetingSuccess(t, st, fixture, receipt.IntentID)
+	key := store.ConversationKey{Platform: fixture.Platform, AccountRef: fixture.AccountRef, ConversationRef: fixture.ConversationRef}
+	messages, _ := st.MessagesForConversation(key)
+	if len(messages) != 1 || messages[0].Text == nil || *messages[0].Text != actual ||
+		messages[0].ContentHash != syncledger.HashText(actual) {
+		t.Fatalf("招呼行未按实发正文落账: %+v", messages)
+	}
+	intent, _ := st.EffectIntentByID(receipt.IntentID)
+	if intent == nil || intent.SendFingerprint != syncledger.HashText(fixture.GreetingText) {
+		t.Fatalf("招呼意图的计划指纹不得被改写: %+v", intent)
+	}
+	if !hasAudit(t, st, "sent_text_differs", receipt.MsgID) {
+		t.Fatal("招呼实发正文与计划不同必须留审计")
+	}
+}

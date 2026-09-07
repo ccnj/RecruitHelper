@@ -448,6 +448,10 @@ type ResultCommandMutation struct {
 	// 普通命令不得设置。
 	KeepCommandOpen bool
 	Effect          *EffectResultMutation
+	// Audits 随本次 result 入账在同一事务里落下的审计条目(如实发正文即事实的
+	// sent_text_differs)。事务回调内不能反入 Store(单连接 SQLite 会自锁),需要留痕的
+	// 计划把条目放这里,由入账事务代写;At 为零值时取入账时刻。
+	Audits []AuditEntry
 }
 
 type EffectResultMutation struct {
@@ -579,6 +583,15 @@ func (s *Store) ApplyResultMessage(
 		if err := tx.Save(&command).Error; err != nil {
 			return err
 		}
+		for i := range plan.Audits {
+			entry := plan.Audits[i]
+			if entry.At.IsZero() {
+				entry.At = time.Now()
+			}
+			if err := tx.Create(&entry).Error; err != nil {
+				return err
+			}
+		}
 		if plan.Effect != nil {
 			if command.IntentID == "" {
 				return ErrEffectIntentConflict
@@ -616,7 +629,9 @@ func (s *Store) ApplyResultMessage(
 					return err
 				}
 				intent.ResultMessageSeq = &message.Seq
-				intent.SendFingerprint = plan.Effect.ContentHash
+				// 意图上的 SendFingerprint 永远是计划正文的指纹,不随实发正文改写
+				// (2026-09-07 实发正文即事实):HTTP 幂等重试、多气泡父子链与招呼生成
+				// 记录绑定都拿它与计划正文比;实发正文的指纹只在消息行上。
 				intent.ResolvedAt = &effectAt
 			}
 			if plan.Effect.Retract {
@@ -1700,6 +1715,16 @@ func (s *Store) RebuildConversationBaseline(req RebuildConversationBaselineReque
 		return nil, err
 	}
 	return result, nil
+}
+
+// SourceKeysForConversation 列出该会话账本里已有稳定身份的全部行的 sourceKey,
+// **含已撤回行**:验证读按窗口认行时(《协议规格-v1》§9.4.1,2026-09-07)要排除
+// 账本已知身份的行,一条已撤回的旧行同样不是本次。
+func (s *Store) SourceKeysForConversation(key ConversationKey) ([]string, error) {
+	var keys []string
+	err := s.db.Model(&Message{}).Where(conversationWhere(key), conversationArgs(key)...).
+		Where("source_key IS NOT NULL").Pluck("source_key", &keys).Error
+	return keys, err
 }
 
 func (s *Store) MessagesForConversation(key ConversationKey) ([]Message, error) {

@@ -451,8 +451,14 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 			validationErr = fmt.Errorf("解析发送 args: %w", err)
 		} else if err := json.Unmarshal(res.Data, &data); err != nil {
 			validationErr = fmt.Errorf("解析发送 data: %w", err)
-		} else if data.ConversationRef != args.ConversationRef || data.ContentHash != syncledger.HashText(args.Text) {
-			validationErr = errors.New("发送 result 的 conversationRef/contentHash 与原始意图不一致")
+		} else if data.ConversationRef != args.ConversationRef {
+			validationErr = errors.New("发送 result 的 conversationRef 与原始意图不一致")
+		} else if !syncledger.SentTextUsable(data.SentText) {
+			validationErr = errors.New("发送 result 的 sentText 规范化后为空")
+		} else if data.ContentHash != syncledger.ResolveSentText(args.Text, data.SentText).Hash {
+			// 实发正文即事实(2026-09-07):带 sentText 时 contentHash 必须是它的规范哈希,
+			// 不带时仍必须是计划正文的。两者的关系不核,只在落账时留痕。
+			validationErr = errors.New("发送 result 的 contentHash 与实发正文(或原始意图)不一致")
 		} else if data.SourceKey != "" && !validLowerHex64(data.SourceKey) {
 			validationErr = errors.New("发送 result 的 sourceKey 非法")
 		}
@@ -464,9 +470,12 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 			validationErr = fmt.Errorf("解析招呼 args: %w", err)
 		} else if err := json.Unmarshal(res.Data, &data); err != nil {
 			validationErr = fmt.Errorf("解析招呼 data: %w", err)
-		} else if data.PlatformUserRef != args.PlatformUserRef || data.PositionRef != args.PositionRef ||
-			data.ContentHash != syncledger.HashText(args.Text) {
-			validationErr = errors.New("招呼 result 的候选人/职位/contentHash 与原始意图不一致")
+		} else if data.PlatformUserRef != args.PlatformUserRef || data.PositionRef != args.PositionRef {
+			validationErr = errors.New("招呼 result 的候选人/职位与原始意图不一致")
+		} else if !syncledger.SentTextUsable(data.SentText) {
+			validationErr = errors.New("招呼 result 的 sentText 规范化后为空")
+		} else if data.ContentHash != syncledger.ResolveSentText(args.Text, data.SentText).Hash {
+			validationErr = errors.New("招呼 result 的 contentHash 与实发正文(或原始意图)不一致")
 		}
 	}
 	if validationErr == nil && cmd.Name == protocol.PrimChatSendWechatInvite && res.Status == protocol.ResultStatusOk {
@@ -1211,6 +1220,12 @@ func (d *Dispatcher) realSendMessageResultPlan(
 		r.SuspectReason = ""
 		applyResultError(r, res)
 		plan.Effect = resultEffect(store.EffectIntentOk, true, data.ObservedAt, data.TsApprox, data.SourceKey, "")
+		// 实发正文即事实(2026-09-07):账本行取手带回的实发正文,不同于计划正文时只留痕。
+		sent := syncledger.ResolveSentText(args.Text, data.SentText)
+		plan.Effect.Text, plan.Effect.ContentHash = sent.Text, sent.Hash
+		if entry := sentTextDiffersAudit(r, sent, "result"); entry != nil {
+			plan.Audits = append(plan.Audits, *entry)
+		}
 		if wasHumanResolved || wasSuspect {
 			*oc = ocSuspectCleared
 		}
@@ -1323,10 +1338,14 @@ func (d *Dispatcher) realGreetingResultPlan(
 		r.SuspectReason = ""
 		applyResultError(r, res)
 		plan.Effect = resultEffect(store.EffectIntentOk, "")
+		sent := syncledger.ResolveSentText(args.Text, data.SentText)
 		plan.Effect.Greeting = &store.GreetingResultMutation{
 			PlatformUserRef: data.PlatformUserRef, PositionRef: data.PositionRef,
-			ConversationRef: data.ConversationRef, Text: args.Text,
-			ContentHash: data.ContentHash, ObservedAtMs: data.ObservedAt,
+			ConversationRef: data.ConversationRef, Text: sent.Text,
+			ContentHash: sent.Hash, ObservedAtMs: data.ObservedAt,
+		}
+		if entry := sentTextDiffersAudit(r, sent, "result"); entry != nil {
+			plan.Audits = append(plan.Audits, *entry)
 		}
 		if wasHumanResolved || wasSuspect {
 			*oc = ocSuspectCleared
@@ -1536,5 +1555,20 @@ func baseBudgetMs(m protocol.PrimitiveMeta) int64 {
 		return protocol.DefaultExecBudgetDefaultMsEffectful
 	default:
 		return protocol.DefaultExecBudgetDefaultMsReadonly
+	}
+}
+
+// sentTextDiffersAudit 在实发正文与计划正文不同时给出一条审计(实发正文即事实,2026-09-07):
+// 只记两个 hash 与字数,不记正文(候选人可见正文不进审计 detail)。它是日后标定
+// 地板阈值与裁决存废的唯一数据来源之一,与手侧留痕互为印证。条目随 result 入账事务
+// 由 store 代写——事务回调内不能反入 Store(单连接 SQLite 会自锁)。
+func sentTextDiffersAudit(r *store.CmdRecord, sent syncledger.SentText, via string) *store.AuditEntry {
+	if !sent.Differs {
+		return nil
+	}
+	return &store.AuditEntry{
+		Category: "sent_text_differs", HandID: r.HandID, RefMsgID: r.MsgID,
+		Detail: fmt.Sprintf("primitive=%s via=%s plannedHash=%s sentHash=%s sentRunes=%d",
+			r.Name, via, sent.PlannedHash, sent.Hash, len([]rune(syncledger.NormalizeText(sent.Text)))),
 	}
 }
