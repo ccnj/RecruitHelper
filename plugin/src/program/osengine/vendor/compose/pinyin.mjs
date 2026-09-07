@@ -156,17 +156,40 @@ function toKeyboardPinyin(ch, rawPy) {
  * 这是 2026-08-21 真机注入实测抓到的 —— 计划里写「？」，屏幕上出来的是「/」，
  * 因为映射只记了键位。「，」「。」无需 Shift（实测 Comma 直接出「，」），
  * 但「？！：（）《》—…" 」这一批都要。
+ *
+ * **键位只关乎「像不像人」，不关乎「能不能打」**（2026-09-07 补括号那一批时定下的）。
+ * TIP 不认字：上屏键只推进词表，词的文本由 Go 原样送来上屏。所以任何字元都装得进
+ * 这张表，问题只是选哪个键。选键的依据是「真输入法在这个键上出什么」：
+ *
+ *   【】  微软拼音 `[` `]` 默认出的就是它们
+ *   「」  微软拼音默认不出（出【】），搜狗有开关切成「」；键位相同，不带 Shift ——
+ *         BOSS 没有文本判据，只看键码，两对在它眼里一模一样，而不带 Shift 就不必
+ *         给词中间的 Shift 编时序
+ *   『』  同一对键加 Shift，与「」配套
+ *   ·    微软拼音 `` ` `` 出「·」（间隔号，「Base·深圳」）
+ *   ￥¥  Shift+4：微软拼音出全角 ￥（U+FFE5），macOS 拼音出 ¥（U+00A5），两个都收
+ *   –    en dash（U+2013）没有输入法先例，是脑写文案时爱用的；不收的话清理器会把
+ *         「20–35K」摘成「2035K」—— 一个错的数。键位跟 — 同。
+ *
+ * 全角 ％＋－／＠＆＊＝． 这一批**故意不收**：任何主流输入法在中文标点模式下这几个键
+ * 出的仍是半角，脑也几乎不写它们；真出现了清理器会报出来，届时再决定。
  */
 export const PUNCT_KEY = {
   '，': { code: 'Comma' },      '。': { code: 'Period' },
   '、': { code: 'Backslash' },  '；': { code: 'Semicolon' },
   '’': { code: 'Quote' },       '‘': { code: 'Quote' },
+  '·': { code: 'Backquote' },
+  '【': { code: 'BracketLeft' }, '】': { code: 'BracketRight' },
+  '「': { code: 'BracketLeft' }, '」': { code: 'BracketRight' },
   '？': { code: 'Slash', shift: true },      '！': { code: 'Digit1', shift: true },
   '：': { code: 'Semicolon', shift: true },  '～': { code: 'Backquote', shift: true },
   '（': { code: 'Digit9', shift: true },     '）': { code: 'Digit0', shift: true },
   '《': { code: 'Comma', shift: true },      '》': { code: 'Period', shift: true },
+  '『': { code: 'BracketLeft', shift: true }, '』': { code: 'BracketRight', shift: true },
   '—': { code: 'Minus', shift: true },       '…': { code: 'Digit6', shift: true },
+  '–': { code: 'Minus', shift: true },
   '“': { code: 'Quote', shift: true },       '”': { code: 'Quote', shift: true },
+  '￥': { code: 'Digit4', shift: true },     '¥': { code: 'Digit4', shift: true },
 }
 /**
  * 半角字元 → 物理键。**按下去出来的就是它自己**，所以走透传：TIP 不吃这个键，
@@ -261,9 +284,9 @@ export function keyFor(tok) {
     case 'asciiPunct':
       return direct(ASCII_KEY[tok.ch])
     default:
-      // 被 pinyin-pro 判为非汉字的生僻字与 emoji —— 以及 `’ ‘ “ ” — …`
-      // 这六个全角标点（U+2000 段，既不是 cjkPunct 也不是 asciiPunct）。
-      // latin 也会落到这里并得到 null —— 这是对的，它根本不该走 keyFor。
+      // 被 pinyin-pro 判为非汉字的生僻字与 emoji —— 以及 `’ ‘ “ ” — … – · ¥`
+      // 这批不在 CJK 区间的标点（U+2000 段与 Latin-1 段，既不是 cjkPunct 也不是
+      // asciiPunct）。latin 也会落到这里并得到 null —— 这是对的，它根本不该走 keyFor。
       return compose(PUNCT_KEY[tok.ch])
   }
 }
