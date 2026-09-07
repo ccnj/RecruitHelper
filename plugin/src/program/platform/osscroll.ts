@@ -26,7 +26,7 @@
 
 import { mulberry32 } from '../osengine/plan'
 import { isHandServiceDown, playScroll, runOsProbe, seedFrom } from './osinput'
-import type { ClickPlan, ScrollPlayResult } from './osinput'
+import type { ClickPlan, RetreatPlan, ScrollPlayResult } from './osinput'
 import type { InjectOptions } from './inject'
 import type { PrimitiveContext } from '../registry'
 import type { DebugOsScrollData, OsScrollDirection } from '../../base/protocol'
@@ -121,6 +121,8 @@ export interface ScrollTarget {
   hitTest(clientX: number, clientY: number): Promise<{ onTarget: boolean; found: string }>
   /** 回读指标;容器没了返回 null。 */
   readMetrics(): Promise<ScrollMetrics | null>
+  /** 落点被顶层弹层盖住时的退让点,语义同 ClickPlan.retreat。 */
+  readonly retreat?: RetreatPlan
 }
 
 export interface OsScrollResult {
@@ -223,6 +225,7 @@ export async function runOsScroll(
     action: 'land',
     hitTest: (x, y) => target.hitTest(x, y),
     observe: async () => ({ trusted: null, onTarget: null, eventDriftPx: null, after: '' }),
+    ...(target.retreat === undefined ? {} : { retreat: target.retreat }),
   }
   const probe = await runOsProbe(inject, tabId, ctx, plan)
   attempts = probe.attempts

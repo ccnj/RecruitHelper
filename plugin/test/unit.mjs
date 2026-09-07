@@ -15990,12 +15990,12 @@ test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条加场
   // 加了七条:职位管理页一条、采集四条、招呼两条(readPublishedJobs / selectSourcingPosition / applySourcingFilters /
   // readSourcingWindow / readSourcingTargetResume / sendGreeting / readGreetingOutcome)。
   assert.deepEqual(declared, [
-    'acceptWechat', 'applySourcingFilters', 'captureThreadScreenshot', 'identifyCurrentConversation', 'openConversation',
+    'acceptWechat', 'applySourcingFilters', 'captureThreadScreenshot', 'ensureSurface', 'identifyCurrentConversation', 'openConversation',
     'osClick', 'osProbe', 'osScroll', 'osType', 'probePlatform',
     'readGreetingOutcome', 'readList', 'readPublishedJobs', 'readResume', 'readSourcingTargetResume', 'readSourcingWindow',
     'readThread', 'readUnreadTotal', 'readWechatExchangeOutcome',
     'selectSourcingPosition', 'sendGreeting', 'sendInviteCard', 'sendMessage', 'sendWechatInvite',
-  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口;邀面卡:2026-09-04 场景三出口;第二刀七条:2026-09-04 夜出口)')
+  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口;邀面卡:2026-09-04 场景三出口;第二刀七条:2026-09-04 夜出口;ensureSurface:2026-09-07 首趟真机后甲方批)')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'readSourcingResume'), /未实现原语能力/, '一次读一位的旧采集原语,BOSS 走窗口 + 目标两条,不实现它')
@@ -16033,7 +16033,7 @@ test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表�
       'chat.readGreetingOutcome@1', 'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.readWechatExchangeOutcome@1',
       'chat.sendGreeting@1', 'chat.sendInviteCard@1', 'chat.sendMessage@1', 'chat.sendWechatInvite@1',
       'debug.osClick@1', 'debug.osProbe@1', 'debug.osScroll@1', 'debug.osType@1', 'debug.ping@1', 'debug.reload@1',
-      'debug.slowEcho@1', 'debug.switchWindow@1', 'job.readPublishedList@1', 'probe.platform@1',
+      'debug.slowEcho@1', 'debug.switchWindow@1', 'job.readPublishedList@1', 'nav.ensureSurface@1', 'probe.platform@1',
     ], 'BOSS 表变了:要么适配器长了能力(先过出口),要么某条原语漏填 capability')
     for (const capability of tables[1].caps) {
       assert.ok(union.includes(capability), `BOSS 表 ⊆ 并集:${capability}`)
@@ -16930,8 +16930,10 @@ test('考古定位的框架跳转 A >>> B:矩形加 iframe 偏移换算回顶层
     topAt = { tagName: 'DIV', textContent: '快捷聊天窗', className: 'chat-global-outer-wrap', parentElement: null, getBoundingClientRect() { return rectOf({ x: 900, y: 100, w: 500, h: 500 }) } }
     const covered = domHitTestExpected('iframe[name=recommendFrame] >>> button.btn-greet', 0, '打招呼', 1336, 146)
     assert.equal(covered.onTarget, false); assert.match(covered.found, /顶层的别的元素/, '顶层浮层盖住 iframe 时在顶层就拒')
+    assert.equal(covered.occluded, true, '顶层遮挡要报 occluded,引擎据此退让一次')
     const coveredIdx = domHitTestIndexed('iframe[name=recommendFrame] >>> button.btn-greet', 0, 1336, 146)
     assert.equal(coveredIdx.onTarget, false); assert.match(coveredIdx.found, /遮挡物\(顶层\)/, '滚轮探针把顶层遮挡物签名带出去')
+    assert.equal(coveredIdx.occluded, true)
     topAt = frame; innerAt = half
     assert.match(domHitTestExpected('iframe[name=recommendFrame] >>> button.btn-greet', 0, '打招呼', 1336, 146).found, /别的元素/, 'iframe 里落点上是别的元素')
     // 滚动指标:靶子是 iframe 的 html 时读 scrollingElement,不读 html.scrollTop(标准模式恒 0)。
@@ -17499,6 +17501,89 @@ test('BOSS 快捷窗发送闸与外壳:落点在唯一发送钮且编辑器文�
     assert.match(domBossQuickSendGate(Q.sendButton, 1, 1, Q.composerId, '你好 方便聊聊吗').found, /落点上是 div/)
     globalThis.document.querySelector = () => null
     assert.equal(domReadBossQuickChatShell(Q.window, Q.close).open, false)
+  } finally { Object.assign(globalThis, saved) }
+})
+
+test('靶子被盖住就退让一次再靠近:命中测试报 occluded 且计划带退让点时,先落到空白处等弹层收回,再从那里靠近同一个瞄点;仍盖着就收场,一下都不点', async () => {
+  const retreat = { rect: { x: 176, y: 160, w: 40, h: 300 }, async hitTest() { return { onTarget: true, found: '空白 div' } } }
+  // 第一次靠近被顶层弹层盖住,退让后第二次命中。
+  const hand = osClickHarness({ calibrated: true })
+  try {
+    let calls = 0
+    const plan = {
+      ...togglePlan({ onTarget: true, observed: { trusted: true, onTarget: true, eventDriftPx: 0, after: '切了' } }),
+      async hitTest() { calls += 1; return calls === 1 ? { onTarget: false, occluded: true, found: '落点上是顶层的别的元素 a「王依琳」' } : { onTarget: true, found: '靶子(div)' } },
+      retreat,
+    }
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), plan)
+    assert.equal(out.outcome, 'clicked', out.detail)
+    assert.equal(hand.clicks(), 1)
+    assert.equal(hand.plays(), 3, '靠近、退让、再靠近各一趟')
+    assert.match(out.detail, /退让 靶\(\d+,\d+\) 落\(\d+,\d+\) 空白=是/)
+    const [, away] = hand.playTargets()
+    assert.ok(away[0] >= 176 && away[0] <= 216 && away[1] >= 160 && away[1] <= 460, `退让要落在空白带里,实际 (${away})`)
+  } finally { hand.restore() }
+  // 一直盖着:退让后再靠近一次仍拒,三次靠近收场,零点击。
+  const stuck = osClickHarness({ calibrated: true })
+  try {
+    const plan = {
+      ...togglePlan({ onTarget: false, observed: null }),
+      async hitTest() { return { onTarget: false, occluded: true, found: '遮挡物(顶层) div.dialog' } },
+      retreat,
+    }
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), plan)
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(stuck.clicks(), 0)
+    assert.equal(stuck.plays(), 4, '两次靠近 + 一次退让 + 退让后一次靠近')
+    assert.match(out.detail, /3 次靠近\(含退让后一次\)都没过闸/)
+  } finally { stuck.restore() }
+  // 没报 occluded:照旧连拒两次,不多走一步。
+  const plain = osClickHarness({ calibrated: true })
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      { ...togglePlan({ onTarget: false, observed: null }), retreat })
+    assert.equal(out.outcome, 'refusedByGate'); assert.equal(plain.plays(), 2, '没报 occluded 就不退让')
+    assert.match(out.detail, /2 次靠近都没过闸/)
+  } finally { plain.restore() }
+  // 退让落点不在空白处(比如落到了卡片上):不再靠近,如实收场。
+  const bad = osClickHarness({ calibrated: true })
+  try {
+    const plan = {
+      ...togglePlan({ onTarget: false, observed: null }),
+      async hitTest() { return { onTarget: false, occluded: true, found: '遮挡物(顶层) div.dialog' } },
+      retreat: { ...retreat, async hitTest() { return { onTarget: false, found: '落在 li.card-item 上,不是空白处' } } },
+    }
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), plan)
+    assert.equal(out.outcome, 'refusedByGate'); assert.equal(bad.plays(), 2, '靠近一次 + 退让一次,退让没落到空白处就停')
+    assert.match(out.detail, /退让未成\(落在 li\.card-item 上/)
+  } finally { bad.restore() }
+})
+
+test('BOSS 停靠空白带:iframe 左侧边距里的一条竖带,上下各留 120px;闸只认顶层是 iframe 且 iframe 内落点不在卡片/页头/面板/可点元素上', () => {
+  const { domReadBossParkSpot, domBossParkGate } = bossTestHooks
+  const saved = { document: globalThis.document, window: globalThis.window }
+  const busyLi = { tagName: 'LI', className: 'card-item' }
+  let innerAt = { tagName: 'DIV', className: '', closest: () => null }
+  const inner = { elementFromPoint: () => innerAt }
+  const frame = { contentDocument: inner, clientLeft: 0, clientTop: 0, getBoundingClientRect: () => ({ left: 168, top: 40, right: 1470, bottom: 662, width: 1302, height: 622 }) }
+  let topAt = frame
+  globalThis.window = { innerWidth: 1470, innerHeight: 662 }
+  globalThis.document = { querySelector: (sel) => (sel === 'iframe[name=recommendFrame]' ? frame : null), elementFromPoint: () => topAt }
+  try {
+    assert.deepEqual(domReadBossParkSpot('iframe[name=recommendFrame]'), { found: true, rect: { x: 176, y: 160, w: 40, h: 382 } })
+    assert.deepEqual(domBossParkGate('iframe[name=recommendFrame]', 190, 300), { onTarget: true, found: '空白 div' })
+    innerAt = { tagName: 'DIV', className: 'name-wrap', closest: (sel) => (sel.includes('li.card-item') ? busyLi : null) }
+    assert.match(domBossParkGate('iframe[name=recommendFrame]', 190, 300).found, /落在 li\.card-item 上/)
+    innerAt = { tagName: 'DIV', className: '', closest: () => null }
+    topAt = { tagName: 'DIV' }
+    assert.match(domBossParkGate('iframe[name=recommendFrame]', 190, 300).found, /顶层是 div/)
+    globalThis.window = { innerWidth: 1470, innerHeight: 300 }
+    assert.equal(domReadBossParkSpot('iframe[name=recommendFrame]').found, true, '视口矮也还有 60px 以上就给')
+    globalThis.window = { innerWidth: 1470, innerHeight: 200 }
+    assert.equal(domReadBossParkSpot('iframe[name=recommendFrame]').found, false, '不足 60px 的带子不给,别硬凑')
+    globalThis.document = { querySelector: () => null }
+    assert.equal(domReadBossParkSpot('iframe[name=recommendFrame]').found, false)
+    assert.equal(domBossParkGate('iframe[name=recommendFrame]', 1, 1).onTarget, false)
   } finally { Object.assign(globalThis, saved) }
 })
 

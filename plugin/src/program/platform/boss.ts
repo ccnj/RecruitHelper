@@ -20,9 +20,9 @@ import { composeClearKeys, isHandServiceDown, osClickContractData, osProbeContra
 import { planType } from '../osengine/plan'
 import { osScrollContractData, runOsScroll } from './osscroll'
 import type { OsScrollResult, ScrollTarget } from './osscroll'
-import type { ClickObservation, ClickPlan } from './osinput'
+import type { ClickObservation, ClickPlan, RetreatPlan } from './osinput'
 import { PlatformError } from './types'
-import { BOSS_MATCH, BOSS_ORIGIN, BOSS_PLATFORM, bossSite } from './bossSite'
+import { BOSS_CHAT_URL, BOSS_MATCH, BOSS_ORIGIN, BOSS_PLATFORM, bossSite } from './bossSite'
 import type { InjectOptions } from './inject'
 import type { PlatformAdapter } from './types'
 import type { PrimitiveContext } from '../registry'
@@ -84,6 +84,8 @@ import type {
   JobPostingSection,
   JobReadPublishedListData,
   MessageAnchor,
+  NavEnsureSurfaceArgs,
+  NavEnsureSurfaceData,
   PeerSummary,
   ProbePlatformData,
   SourcingCareerStatus,
@@ -973,7 +975,7 @@ function domLocateBossRow(
 /** 落点上的元素是不是某个 selector 序列里第 index 个(或其后代)。 */
 function domHitTestIndexed(
   selector: string, index: number, x: number, y: number,
-): { onTarget: boolean; found: string } {
+): { onTarget: boolean; found: string; occluded?: boolean } {
   const signature = (node: Element): string => {
     const parts: string[] = []
     let cursor: Element | null = node
@@ -1018,13 +1020,13 @@ function domHitTestIndexed(
   if (!target || !root) return { onTarget: false, found: '靶子已经不在原来的位置上' }
   if (frame) {
     const topAt = document.elementFromPoint(x, y)
-    if (topAt !== frame) return { onTarget: false, found: topAt ? `遮挡物(顶层) ${signature(topAt)}` : '落点上什么都没有' }
+    if (topAt !== frame) return topAt ? { onTarget: false, occluded: true, found: `遮挡物(顶层) ${signature(topAt)}` } : { onTarget: false, found: '落点上什么都没有' }
   }
   const at = root.elementFromPoint(x - offX, y - offY)
   if (!at) return { onTarget: false, found: '落点上什么都没有' }
   const onTarget = at === target || target.contains(at)
   // 不命中时把遮挡物的签名带出去(类名链、尺寸、文本头几个字):它是清场白名单的唯一数据来源。
-  return { onTarget, found: onTarget ? `靶子(${at.tagName.toLowerCase()})` : `遮挡物 ${signature(at)}` }
+  return onTarget ? { onTarget, found: `靶子(${at.tagName.toLowerCase()})` } : { onTarget, occluded: true, found: `遮挡物 ${signature(at)}` }
 }
 
 /** 落点上的元素是不是 data-id 为 conversationRef 的行(或其后代)。 */
@@ -1809,7 +1811,7 @@ function domReadScrollMetrics(selector: string, index: number): { found: boolean
  */
 function domHitTestExpected(
   selector: string, index: number, expectText: string | null, x: number, y: number,
-): { onTarget: boolean; found: string } {
+): { onTarget: boolean; found: string; occluded?: boolean } {
   const hop = selector.split('>>>')
   let root: Document | null = document
   let inner = selector
@@ -1842,13 +1844,14 @@ function domHitTestExpected(
   if (frame) {
     const topAt = document.elementFromPoint(x, y)
     if (topAt !== frame) {
-      return { onTarget: false, found: `落点上是顶层的别的元素 ${topAt ? topAt.tagName.toLowerCase() + '「' + (topAt.textContent ?? '').trim().slice(0, 8) + '」' : '(空)'}` }
+      // 顶层盖在 iframe 上的东西(头像 hover 弹层、快捷窗):报 occluded 给引擎一个退让的理由。
+      return { onTarget: false, occluded: true, found: `落点上是顶层的别的元素 ${topAt ? topAt.tagName.toLowerCase() + '「' + (topAt.textContent ?? '').trim().slice(0, 8) + '」' : '(空)'}` }
     }
   }
   const at = root.elementFromPoint(x - offX, y - offY)
   if (!at) return { onTarget: false, found: '落点上什么都没有' }
   if (!(at === target || target.contains(at))) {
-    return { onTarget: false, found: `落点上是别的元素 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 8)}」` }
+    return { onTarget: false, occluded: true, found: `落点上是别的元素 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 8)}」` }
   }
   if (expectText !== null) {
     const now = (target.textContent ?? '').trim()
@@ -5044,7 +5047,37 @@ function domBossQuickSendGate(
   if (!button) problems.push(`发送钮命中 ${buttons.length} 个`)
   else if (!onButton) problems.push(at ? `落点上是 ${at.tagName.toLowerCase()}「${(at.textContent ?? '').trim().slice(0, 8)}」` : '落点上什么都没有')
   if (!textOk) problems.push(composer ? `输入框内容与文案不同(${composerText.length} 字)` : '输入框不见了')
-  return { onTarget: onButton && textOk, found: problems.length ? problems.join(';') : '发送钮' }
+  const occluded = !!button && !onButton && !!at
+  return { onTarget: onButton && textOk, found: problems.length ? problems.join(';') : '发送钮', ...(occluded ? { occluded } : {}) }
+}
+
+/**
+ * 停靠/退让用的空白带(isolated):推荐页 iframe 左侧 56px 边距里没有任何控件(2026-09-07 真机:
+ * 落点处是无类名的包裹 div),取其中一条竖带,上下各留 120px 避开 iframe 页头与视口底缘。
+ */
+function domReadBossParkSpot(frameSel: string): { found: boolean; rect: DomRect4 } {
+  const frame = document.querySelector(frameSel)
+  if (!frame) return { found: false, rect: { x: 0, y: 0, w: 0, h: 0 } }
+  const fr = frame.getBoundingClientRect()
+  const top = Math.max(fr.top + 120, 0)
+  const bottom = Math.min(fr.bottom - 120, window.innerHeight - 20)
+  if (!(bottom - top >= 60) || !(fr.width >= 80)) return { found: false, rect: { x: 0, y: 0, w: 0, h: 0 } }
+  return { found: true, rect: { x: fr.left + 8, y: top, w: 40, h: bottom - top } }
+}
+
+/** 停靠落点是不是真的空白:顶层是 iframe 本身,iframe 内落点不在卡片、页头控件、筛选面板或任何可点元素上。 */
+function domBossParkGate(frameSel: string, x: number, y: number): { onTarget: boolean; found: string } {
+  const frame = document.querySelector(frameSel)
+  const doc = frame && 'contentDocument' in frame ? (frame as HTMLIFrameElement).contentDocument : null
+  if (!frame || !doc) return { onTarget: false, found: 'iframe 不在' }
+  const topAt = document.elementFromPoint(x, y)
+  if (topAt !== frame) return { onTarget: false, found: `顶层是 ${topAt ? topAt.tagName.toLowerCase() : '空'}` }
+  const fr = frame.getBoundingClientRect()
+  const inner = doc.elementFromPoint(x - fr.left - frame.clientLeft, y - fr.top - frame.clientTop)
+  if (!inner) return { onTarget: false, found: 'iframe 内落点空' }
+  const busy = inner.closest('li.card-item, .candidate-head, .filter-wrap, .filter-panel, button, a, input, [role="button"]')
+  if (busy) return { onTarget: false, found: `落在 ${busy.tagName.toLowerCase()}.${String(busy.className).trim().split(/\s+/u)[0] ?? ''} 上,不是空白处` }
+  return { onTarget: true, found: `空白 ${inner.tagName.toLowerCase()}` }
 }
 
 // ── 推荐页编排 helper ───────────────────────────────────────────────────────
@@ -5167,6 +5200,39 @@ async function ensureBossTabAt(
   }
 }
 
+/** 退让/停靠点:推荐页 iframe 左侧空白带;iframe 不在(沟通页)就没有,计划照旧不带退让。 */
+async function bossRetreatPlan(tabId: number): Promise<RetreatPlan | undefined> {
+  const spot = await runInPage(BOSS_DOM, tabId, domReadBossParkSpot, [RECOMMEND_FRAME])
+  if (!spot.found) return undefined
+  return { rect: spot.rect, hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domBossParkGate, [RECOMMEND_FRAME, x, y]) }
+}
+
+/**
+ * 命令收尾停靠:把光标停回 iframe 左侧空白带,下一条命令从安全位置出发,不再从页头附近起步穿过头像
+ * (2026-09-07 真机:「确定」→「筛选」入口那一程碰出头像 hover 弹层,盖住入口)。尽力而为,不影响结果。
+ */
+async function parkBossCursor(tabId: number, ctx: PrimitiveContext, why: string): Promise<void> {
+  try {
+    const retreat = await bossRetreatPlan(tabId)
+    if (!retreat || !retreat.hitTest) return
+    const gate = retreat.hitTest
+    await paceBeforeClick()
+    const probe = await runOsProbe(BOSS_INJECT, tabId, ctx, {
+      label: '停靠空白处',
+      rect: retreat.rect,
+      action: 'land',
+      hitTest: (x, y) => gate(x, y),
+      observe: async (): Promise<ClickObservation> => ({ trusted: null, onTarget: null, eventDriftPx: null, after: '停靠' }),
+    })
+    if (probe.outcome !== 'landed') {
+      reportHandLog('warn', 'cursorParkSkipped', `BOSS 停靠未完成(${why}):${probe.outcome} ${probe.detail ?? ''}`.slice(0, 400))
+    }
+  } catch (error) {
+    if (isStopExecution(error)) throw error
+    reportHandLog('warn', 'cursorParkSkipped', `BOSS 停靠异常(${why}):${describeError(error).slice(0, 200)}`)
+  }
+}
+
 /** 按 selector(+index)的点击计划:定位、文本核对、命中测试、点后观测全走 domLocateBySelector 一套(支持 `A >>> B`)。 */
 async function selectorClickPlan(
   tabId: number, selector: string, index: number, expectText: string | null, label: string, expectPrefix?: string,
@@ -5182,6 +5248,7 @@ async function selectorClickPlan(
   if (expectPrefix !== undefined && !located.text.startsWith(expectPrefix)) {
     throw new PlatformError('ELEMENT_UNRESOLVED', `${label}文本不符:页面「${located.text.slice(0, 16)}」,期望以「${expectPrefix}」开头`, 'afterRecovery')
   }
+  const retreat = await bossRetreatPlan(tabId)
   return {
     label: `${label}(${located.signature})`,
     rect: located.clip,
@@ -5191,6 +5258,7 @@ async function selectorClickPlan(
       return { trusted: null, onTarget: null, eventDriftPx: null,
         after: after.status === 'ok' ? `靶子仍在:${after.signature}` : `靶子已不在(${after.status})` }
     },
+    ...(retreat === undefined ? {} : { retreat }),
   }
 }
 
@@ -5209,6 +5277,7 @@ async function scrollBossRecommendDocument(
   if (located.status !== 'ok') {
     throw new PlatformError('ELEMENT_UNRESOLVED', `推荐列表滚动容器定位失败(${located.status}):${located.detail}`, 'afterRecovery')
   }
+  const retreat = await bossRetreatPlan(tabId)
   const target: ScrollTarget = {
     label: `推荐列表 ${located.signature}`,
     rect: located.clip,
@@ -5217,6 +5286,7 @@ async function scrollBossRecommendDocument(
       const m = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [selector, located.index])
       return m.found ? { scrollTop: m.scrollTop, scrollHeight: m.scrollHeight, clientHeight: m.clientHeight } : null
     },
+    ...(retreat === undefined ? {} : { retreat }),
   }
   const result = await runOsScroll(BOSS_INJECT, tabId, ctx, target, direction, distancePx)
   if (result.outcome === 'handServiceUnavailable') {
@@ -5240,6 +5310,7 @@ async function closeBossQuickChatBestEffort(tabId: number, ctx: PrimitiveContext
       return false
     }
     await paceBeforeClick()
+    const retreat = await bossRetreatPlan(tabId)
     await osClickOnce(tabId, ctx, {
       label: '快捷窗关闭键',
       rect: shell.closeRect,
@@ -5248,6 +5319,7 @@ async function closeBossQuickChatBestEffort(tabId: number, ctx: PrimitiveContext
         const after = await readShell()
         return { trusted: null, onTarget: null, eventDriftPx: null, after: `快捷窗 ${after.open ? '仍开着' : '已关闭'}` }
       },
+      ...(retreat === undefined ? {} : { retreat }),
     }, '关快捷窗')
     const gone = await pollUntil(ctx, readShell, (shell) => !shell.open, CLEAR_WAIT_MS)
     if (!gone.satisfied) {
@@ -5260,6 +5332,36 @@ async function closeBossQuickChatBestEffort(tabId: number, ctx: PrimitiveContext
     reportHandLog('warn', 'quickChatCloseFailed', `BOSS 快捷窗关闭异常(${why}):${describeError(error).slice(0, 200)}`)
     return false
   }
+}
+
+// ── nav.ensureSurface(沟通页) ──────────────────────────────────────────────────
+
+/**
+ * 把唯一的 BOSS 标签页带到沟通页并等列表页签渲染。脑侧巡检在 readList 报 pageAbsent 时走 surfaceRecovery
+ * 调它(2026-09-07 首趟真机:采集批次收口后标签页停在推荐页,巡检每两分钟失败一次)。没有 BOSS 标签页就新开一个。
+ * 登录态:身份核对过就是 in——BOSS 站点不感知掉登录(bossSite),永不报 out。
+ */
+async function ensureBossSurface(
+  args: NavEnsureSurfaceArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<NavEnsureSurfaceData> {
+  if (args.surface !== 'im') throw new PlatformError('TARGET_NOT_FOUND', '当前手不支持该页面 surface', 'no')
+  if (!fingerprint) throw new PlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'afterRecovery')
+  ctx.checkpoint()
+  let tab = await bossTab()
+  let createdTab = false
+  if (!tab || tab.id === undefined) {
+    tab = await chrome.tabs.create({ url: BOSS_CHAT_URL, active: false })
+    createdTab = true
+  }
+  if (tab.id === undefined) throw new PlatformError('CTX_NOT_READY', 'BOSS 标签页缺少 id', 'afterRecovery', 'pageBroken')
+  const isIm = (url: string | undefined): boolean => !!url && bossSite.pageKind(url) === 'im'
+  const ready = await ensureBossTabAt(tab, ctx, fingerprint, BOSS_CHAT_URL, isIm, '沟通页')
+  const tabId = ready.id!
+  const settled = await pollUntil(ctx, () => readListState(tabId), (state) => state.labelTabs.length > 0)
+  await dismissBossOverlaysBestEffort(ready, ctx)
+  await verifiedBossTab(fingerprint)
+  ctx.progress(settled.satisfied ? 'BOSS 沟通页已就绪' : 'BOSS 沟通页列表页签未就绪', 100)
+  return { createdTab, loginState: 'in', ready: settled.satisfied }
 }
 
 // ── job.readPublishedList ─────────────────────────────────────────────────────
@@ -5447,6 +5549,7 @@ async function applyBossSourcingFilters(
     throw new PlatformError('ELEMENT_UNRESOLVED', `确定后重开回读与目标不一致:${second.reason}`, 'afterRecovery')
   }
   await closePanel('回读后收起')
+  await parkBossCursor(tabId, ctx, '筛选收起后')
   const final = await assertBossSourcingPosition(tabId, ctx, args.positionRef, args.positionTitle, '收起后')
   const data: CandidateApplySourcingFiltersData = {
     positionRef: args.positionRef,
@@ -5809,6 +5912,7 @@ async function sendBossGreeting(
         const after = await readComposer()
         return { trusted: null, onTarget: null, eventDriftPx: null, after: `输入框内容长度=${after.text.length}` }
       },
+      ...(await bossRetreatPlan(tabId).then((retreat) => (retreat === undefined ? {} : { retreat }))),
     }
     ctx.checkpoint()
     await paceBeforeClick()
@@ -5840,6 +5944,7 @@ async function sendBossGreeting(
           if (hits >= 1) {
             trace.push('正文已可见')
             await closeBossQuickChatBestEffort(tabId, ctx, '发送后收窗')
+            await parkBossCursor(tabId, ctx, '发送后')
             await verifiedBossTab(fingerprint)
             ctx.progress('招呼已发出并在快捷窗确认', 100)
             console.info('[RecruitHelper] boss_send_greeting', trace.join(' | '))
@@ -5961,6 +6066,8 @@ export const bossTestHooks = Object.freeze({
   domReadBossJobList,
   domReadBossQuickChatShell,
   domBossQuickSendGate,
+  domReadBossParkSpot,
+  domBossParkGate,
   RECOMMEND_SEL,
   QUICK_CHAT_SEL,
 })
@@ -5998,6 +6105,7 @@ export const bossAdapter = {
   // 建档后的简历补采(2026-09-03 甲方选 B):摘要级、零点击,见 readBossResume。
   readResume: ({ args, ctx, fingerprint }) => readBossResume(args, ctx, fingerprint),
   // 第二刀的七条(2026-09-05 开工,出口 docs/boss/第二刀出口-采集与打招呼-2026-09-04.md):推荐页采集 + 打招呼。
+  ensureSurface: ({ args, ctx, fingerprint }) => ensureBossSurface(args, ctx, fingerprint),
   readPublishedJobs: ({ ctx, fingerprint }) => readBossPublishedJobs(ctx, fingerprint),
   selectSourcingPosition: ({ args, ctx, fingerprint }) => selectBossSourcingPosition(args, ctx, fingerprint),
   applySourcingFilters: ({ args, ctx, fingerprint }) => applyBossSourcingFilters(args, ctx, fingerprint),
