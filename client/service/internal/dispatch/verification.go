@@ -148,6 +148,14 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			recordMiss("验证读无法解析原始 guards: " + err.Error())
 			return
 		}
+		keys, err := d.st.SourceKeysForConversation(store.ConversationKey{
+			Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
+		})
+		if err != nil {
+			recordMiss("验证读无法读取账本已知消息身份: " + err.Error())
+			return
+		}
+		request.LedgerSourceKeys = keys
 	case protocol.PrimChatSendWechatInvite:
 		var args protocol.ChatSendWechatInviteArgs
 		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
@@ -250,6 +258,11 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 		return
 	}
 	fingerprintOK := observation.ContentHash == intent.SendFingerprint
+	if cmd.Name == protocol.PrimChatSendMessage && observation.Confirmed {
+		// 实发正文即事实(2026-09-07,《协议规格-v1》§9.4.1):文本发送的验证读按
+		// 窗口认行,命中行的 hash 不必等于计划指纹;正文与 hash 以该行为准落账。
+		fingerprintOK = true
+	}
 	if !fingerprintOK && cmd.Name == protocol.PrimChatSendInviteCard && request.InviteCardArgs != nil {
 		// 卡上不带邀面参数的平台(BOSS):观察到的是 §4.5 无参数常量投影,与派发 ok 结果校验
 		// (dispatch.go)、账本收编(store.cardContentHashMatchesIntent)同一把尺
@@ -278,10 +291,27 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 		if validLowerHex64(observation.SourceKey) {
 			sendSourceKey = observation.SourceKey
 		}
+		// 命中行的实发正文与 hash 落账(实发正文即事实);乐观判定路径没有页面数据,
+		// observation 的 hash 就是计划指纹、SentText 为空,自然回到计划正文。
+		sentText, sentHash := request.Args.Text, intent.SendFingerprint
+		if observation.SentText != "" && observation.ContentHash != "" {
+			sentText, sentHash = observation.SentText, observation.ContentHash
+		}
+		if sentHash != intent.SendFingerprint {
+			d.st.Audit("sent_text_differs", cmd.HandID, ref, fmt.Sprintf(
+				"primitive=%s via=verification plannedHash=%s sentHash=%s sentRunes=%d",
+				cmd.Name, intent.SendFingerprint, sentHash, len([]rune(syncledger.NormalizeText(sentText)))))
+		}
 		result := protocol.ResultBody{
 			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
 			Data: mustEncode(protocol.ChatSendMessageData{
-				ConversationRef: intent.TargetRef, ContentHash: intent.SendFingerprint,
+				ConversationRef: intent.TargetRef, ContentHash: sentHash,
+				SentText: func() string {
+					if sentHash != intent.SendFingerprint {
+						return sentText
+					}
+					return ""
+				}(),
 				SourceKey: sendSourceKey, ObservedAt: observation.ObservedAt,
 				TsApprox: observation.PlatformTsMs,
 			}),
@@ -297,9 +327,9 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			ConversationKey: store.ConversationKey{
 				Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
 			},
-			Text: request.Args.Text, ContentHash: intent.SendFingerprint, ObservedAtMs: observation.ObservedAt,
+			Text: sentText, ContentHash: sentHash, ObservedAtMs: observation.ObservedAt,
 			PlatformTsMs: observation.PlatformTsMs, SourceKey: sendSourceKey,
-			ResultBody: string(resultRaw), ResolutionReason: "verification fingerprint uniquely matched", At: time.Now(),
+			ResultBody: string(resultRaw), ResolutionReason: "verification window matched outbound text", At: time.Now(),
 		})
 	case protocol.PrimChatSendGreeting:
 		if request.GreetingArgs == nil {

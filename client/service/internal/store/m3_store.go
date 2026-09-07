@@ -1083,8 +1083,10 @@ func (s *Store) ResolveEffectVerified(req VerifiedEffectSuccess) (*Message, erro
 		if err := tx.First(&intent, "intent_id = ?", cmd.IntentID).Error; err != nil {
 			return err
 		}
+		// 验证读命中行的正文与 hash 以该行为准(实发正文即事实,2026-09-07):只核
+		// 二者自洽,不再要求等于意图的计划指纹。
 		if intent.Platform != req.ConversationKey.Platform || intent.AccountRef != req.ConversationKey.AccountRef ||
-			intent.TargetRef != req.ConversationKey.ConversationRef || intent.SendFingerprint != req.ContentHash {
+			intent.TargetRef != req.ConversationKey.ConversationRef || !sentContentHashAcceptable(&intent, req.Text, req.ContentHash) {
 			return ErrEffectIntentConflict
 		}
 		message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, req.PlatformTsMs, req.SourceKey, req.At)
@@ -1784,4 +1786,15 @@ func refreshConversationActiveTailTx(tx *gorm.DB, key ConversationKey, at time.T
 		updates["last_message_preview"] = preview
 	}
 	return tx.Model(&Conversation{}).Where(conversationWhere(key), conversationArgs(key)...).Updates(updates).Error
+}
+
+// sentContentHashAcceptable:文本发送族落账时消息行 hash 的合法来源只有两个——
+// 计划正文的指纹(意图 SendFingerprint,程序化写入与验证读乐观路径),或与手带回的
+// 实发正文自洽的规范哈希(实发正文即事实,2026-09-07)。两者都不是即 result 被篡改
+// 或链路错位,拒绝落账。
+func sentContentHashAcceptable(intent *EffectIntent, text, contentHash string) bool {
+	if contentHash == "" {
+		return false
+	}
+	return contentHash == intent.SendFingerprint || contentHash == textcanon.Hash(text)
 }

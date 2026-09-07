@@ -230,6 +230,14 @@ type TypeResult struct {
 	// 走字符串而不是结构化计数:它只进 detail 文本给人看,不参与任何判定
 	// (「诊断辅助默认不进契约」)。
 	Words string `json:"words,omitempty"`
+	// WordsDriven 为真表示本平台由我方上屏机制(Windows TIP)接管了这一轮的词;
+	// 此时 WordsPlanned/WordsCommitted 是 Settle 之后的结构化对账。插件据此在发送前
+	// 硬拒「上屏词数少于计划」——那是「当前输入法不是我们的 TIP」的直接探测
+	// (2026-09-07 实发正文即事实,AGENTS 防护成本预算第 9 条同名段)。不驱动上屏词的
+	// 平台(macOS)恒为 false、计数为零,与 Words 为空同义。
+	WordsDriven    bool `json:"wordsDriven"`
+	WordsPlanned   int  `json:"wordsPlanned"`
+	WordsCommitted int  `json:"wordsCommitted"`
 }
 
 // 等 TIP 连上来的上限,与等它回报送完的上限。
@@ -296,6 +304,8 @@ func (s *Service) Type(plan TypePlan) (TypeResult, error) {
 		// 回报是按键处理完之后才回来的,注入循环结束时还在路上。
 		// 等到齐或超时,别在回报还在路上时就下对账结论。
 		res.Words = session.Settle(tipSettleWait)
+		res.WordsDriven = true
+		res.WordsCommitted, res.WordsPlanned = session.Counts()
 	}
 	return res, nil
 }

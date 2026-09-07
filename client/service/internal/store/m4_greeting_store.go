@@ -379,8 +379,10 @@ func applyGreetingResultTx(
 		return nil, nil
 	}
 
+	// 招呼行的正文与 hash 以手带回的实发正文为准(实发正文即事实,2026-09-07),
+	// 这里只核二者自洽;意图的 SendFingerprint 仍是计划正文指纹,不参与。
 	if mutation.PlatformUserRef == "" || mutation.PositionRef == "" || mutation.Text == "" ||
-		mutation.ContentHash == "" || intent.SendFingerprint != mutation.ContentHash ||
+		mutation.ContentHash == "" || !sentContentHashAcceptable(intent, mutation.Text, mutation.ContentHash) ||
 		profile.PlatformUserRef != mutation.PlatformUserRef || profile.PositionRef != mutation.PositionRef {
 		return nil, ErrEffectIntentConflict
 	}
@@ -727,7 +729,7 @@ func (s *Store) ResolveGreetingVerified(req VerifiedGreetingSuccess) (*Message, 
 		if err := tx.First(&intent, "intent_id = ?", cmd.IntentID).Error; err != nil {
 			return err
 		}
-		if intent.TargetRef != req.ProfileID || intent.SendFingerprint != req.ContentHash ||
+		if intent.TargetRef != req.ProfileID || !sentContentHashAcceptable(&intent, req.Text, req.ContentHash) ||
 			intent.Primitive != primitiveChatSendGreeting {
 			return ErrEffectIntentConflict
 		}

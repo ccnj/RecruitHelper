@@ -18105,6 +18105,73 @@ test('散开靶子必须躲开工具栏,同时保住解 scale 的跨度——两
 })
 
 let failures = 0
+
+// ── 实发正文即事实(2026-09-07 甲方裁决):手侧三个纯判定点 ──────────────────────────────
+
+test('上屏地板:逐字相等与同音错字放行,半截、拼音残留、空白、错窗拒绝', () => {
+  const { typedTextFloor, TYPED_TEXT_FLOOR, describeTypedTextFloor } = bossTestHooks
+  const expected = '您好，看到您的简历很匹配我们的岗位，方便聊聊吗？期待您的回复。'
+  const exact = typedTextFloor(expected, '  您好，看到您的简历很匹配我们的岗位，方便聊聊吗？期待您的回复。 ')
+  assert.deepEqual([exact.ok, exact.exact, exact.distance], [true, true, 0], 'nbsp/空白只在规范化里抹平,仍算逐字相等')
+  const homophone = typedTextFloor(expected, '您好，看到您的简历很匹配我们的岗位，方便了了吗？期待您的回付。')
+  assert.equal(homophone.ok, true, '同音错字相似度高,按裁决照发')
+  assert.equal(homophone.exact, false)
+  assert.ok(homophone.similarity >= TYPED_TEXT_FLOOR.minSimilarity && homophone.distance === 3, describeTypedTextFloor(homophone))
+  const dropped = typedTextFloor(expected, '您好，看到您的简历很匹配我们的岗位，方便聊聊吗？期待您的回复')
+  assert.equal(dropped.ok, true, '掉一个字元在字数差之内')
+  const half = typedTextFloor(expected, '您好，看到您的简历很匹配我们的')
+  assert.deepEqual([half.ok, half.lengthDiff > TYPED_TEXT_FLOOR.maxLengthDiff], [false, true], '只打了一半:相似度不低但字数差挡住')
+  const residue = typedTextFloor(expected, expected + 'qidai')
+  assert.equal(residue.ok, false, '拼音字母残留没上屏:字数差挡住')
+  assert.equal(typedTextFloor(expected, '').ok, false, '一个字没打进去')
+  assert.equal(typedTextFloor(expected, '这是另一段完全不同的话，长度大致相同，用来模拟打到别的窗口去了').ok, false, '错窗/乱码:相似度接近零')
+  assert.doesNotMatch(describeTypedTextFloor(homophone), /您好/, '留痕只有数字,不带正文')
+})
+
+test('TIP 活动核对:只在驱动了上屏词且回报少于计划时拒绝', () => {
+  const { tipWordsShortfall } = bossTestHooks
+  assert.equal(tipWordsShortfall({}), null, 'macOS 没有 TIP,不适用')
+  assert.equal(tipWordsShortfall({ wordsDriven: false, wordsPlanned: 6, wordsCommitted: 0 }), null)
+  assert.equal(tipWordsShortfall({ wordsDriven: true, wordsPlanned: 6, wordsCommitted: 6, words: 'TIP 上屏 6/6 词,词表已用完' }), null)
+  assert.equal(tipWordsShortfall({ wordsDriven: true, wordsPlanned: 0, wordsCommitted: 0 }), null, '没有需要上屏的词(纯英文/标点)不算缺口')
+  const short = tipWordsShortfall({ wordsDriven: true, wordsPlanned: 6, wordsCommitted: 2, words: 'TIP 只上屏了 2/6 词' })
+  assert.match(short, /只上屏了 2\/6 词/, '键落到了别的输入法,发送前必须拒')
+})
+
+test('发后认行:基线之外、出站、文本、服务端确认、时间在窗内的行取最新,零匹配为 null', () => {
+  const { pickSentBossRow } = bossTestHooks
+  const dispatchedAt = 1_788_500_000_000
+  const row = (mid, over) => ({ mid, direction: 'out', type: 'text', bizType: 101, bodyType: 1, status: 1, time: dispatchedAt + 800, text: '实发的一句', interviewCondition: null, actionAid: null, templateId: 1, dialogOperated: null, dialogAids: [], ...over })
+  const baseline = new Set(['100'])
+  const rows = [
+    row('100', {}),                                          // 基线里的旧行
+    row('101', { direction: 'in', text: '候选人插话' }),     // 入站
+    row('102', { status: 0, text: '在途/乐观行' }),           // 未确认
+    row('103', { time: dispatchedAt - 60_000, text: '化石' }),// 派发窗口之前
+    row('104', { text: '同音错字版本' }),                     // 命中(较旧)
+    row('105', { status: 2, text: '最新的一条' }),            // 命中(最新)
+    row('106', { bizType: 21130009, bodyType: 14, text: '发送了面试邀请' }), // 卡片
+  ]
+  const hit = pickSentBossRow(rows, baseline, dispatchedAt)
+  assert.deepEqual([hit.row.mid, hit.text, hit.hashInput], ['105', '最新的一条', '最新的一条'], '多条取 mid 最大者,正文以该行为准')
+  assert.equal(pickSentBossRow(rows.slice(0, 4), baseline, dispatchedAt), null, '没有合格行即 null,交 possible 验证读')
+  const untimed = pickSentBossRow([row('107', { time: null })], baseline, dispatchedAt)
+  assert.equal(untimed.row.mid, '107', 'time 缺席不作窗口判定(与既有口径一致),仍可命中')
+})
+
+test('排版器清洗档:打不出的字元摘掉后照排,摘了什么随 dropped 带回;摘空即 ok:false', async () => {
+  const { planType: plan, bossTestHooks: hooks } = await import(unitBundleURL)
+  const withEmoji = await plan('你好😊世界', 7, { sanitize: true })
+  assert.equal(withEmoji.ok, true, `清洗后应能排出:${withEmoji.ok ? '' : withEmoji.reasons.join(';')}`)
+  assert.equal(withEmoji.text, '你好世界')
+  assert.deepEqual(withEmoji.dropped.map((d) => d.kind), ['other'])
+  assert.equal(hooks.summarizeDroppedKinds(withEmoji.dropped), 'other 1', '留痕只按 kind 计数,不带字元')
+  const onlyEmoji = await plan('😊', 7, { sanitize: true })
+  assert.deepEqual([onlyEmoji.ok, onlyEmoji.reasons], [false, ['清理之后没有内容可打']])
+  const strict = await plan('你好😊世界', 7)
+  assert.equal(strict.ok, false, '不传 sanitize 仍保持严格(debug.osType 要的正是这个)')
+})
+
 for (const { name, fn } of tests) {
   try {
     await fn()

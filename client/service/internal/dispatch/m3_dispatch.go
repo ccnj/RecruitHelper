@@ -706,11 +706,19 @@ type VerificationRequest struct {
 	// 只需回答"平台职位列表里有没有这个职位名"。
 	PublishDraftArgs *protocol.JobPrepareDraftArgs
 	TakeOfflineArgs  *protocol.JobTakeOfflineArgs
+	// LedgerSourceKeys 是该会话账本里(含已撤回行)已有稳定身份的全部 sourceKey。
+	// chat.sendMessage 的验证读按窗口认行(《协议规格-v1》§9.4.1,2026-09-07 实发
+	// 正文即事实)时用它排除账本已知的行:多气泡链上一条气泡的行也在派发窗口里,
+	// 没有这一层它会被认成本次。
+	LedgerSourceKeys []string
 }
 
 type VerificationObservation struct {
-	Confirmed       bool
-	ContentHash     string
+	Confirmed   bool
+	ContentHash string
+	// SentText 是验证读命中行的实发正文(实发正文即事实,2026-09-07),只对
+	// chat.sendMessage 的窗口认行路径有值;空即账本取计划正文。
+	SentText        string
 	SourceKey       string
 	Interview       *protocol.InterviewDetails
 	ConversationRef string

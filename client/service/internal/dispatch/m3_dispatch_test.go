@@ -504,3 +504,75 @@ func TestLatestEffectIntentSurvivesBrainRestart(t *testing.T) {
 		t.Fatalf("重启后 latest 意图丢失: latest=%+v err=%v", latest, err)
 	}
 }
+
+// 实发正文即事实(2026-09-07):ok result 带 sentText 时账本行按实发正文落账,
+// 意图的计划指纹不变,并留一条 sent_text_differs 审计(不含正文)。
+func TestSendMessageOkResultWithSentTextLandsActualTextInLedger(t *testing.T) {
+	d, st, m := newDisp(t)
+	key := seedSendTarget(t, st, m, "acct-send-sent", "conv-send-sent")
+	planned := "计划正文一句话"
+	actual := "计划正文一句花"
+	receipt, err := d.SendMessage(sendRequest("intent-sent-text", key, planned))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.OnAck("hand-send", protocol.AckBody{Ref: receipt.MsgID, Status: protocol.AckStatusAccepted})
+	data, _ := protocol.Encode(protocol.ChatSendMessageData{
+		ConversationRef: key.ConversationRef, ContentHash: syncledger.HashText(actual), SentText: actual,
+		ObservedAt: time.Now().UnixMilli(),
+	})
+	d.OnResult("hand-send", "result-sent-text", protocol.ResultBody{
+		Ref: receipt.MsgID, Status: protocol.ResultStatusOk, Data: data,
+		Evidence: []protocol.Evidence{{Type: string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)}},
+	})
+	cmd, _ := st.CmdByMsgID(receipt.MsgID)
+	if cmd == nil || cmd.Status != store.CmdOk {
+		t.Fatalf("带 sentText 的 ok result 未终结命令: %+v", cmd)
+	}
+	messages, _ := st.MessagesForConversation(key)
+	if len(messages) != 2 || messages[1].Text == nil || *messages[1].Text != actual ||
+		messages[1].ContentHash != syncledger.HashText(actual) || messages[1].Origin != "self" {
+		t.Fatalf("账本行未按实发正文落账: %+v", messages)
+	}
+	intent, _ := st.EffectIntentByID(receipt.IntentID)
+	if intent == nil || intent.SendFingerprint != syncledger.HashText(planned) {
+		t.Fatalf("意图的计划指纹不得被实发正文改写: %+v", intent)
+	}
+	if !hasAudit(t, st, "sent_text_differs", receipt.MsgID) {
+		t.Fatal("实发正文与计划不同必须留 sent_text_differs 审计")
+	}
+	// HTTP 幂等重试仍按计划正文复用同一意图。
+	retried, err := d.SendMessage(sendRequest("intent-sent-text", key, planned))
+	if err != nil || retried.Created || retried.MsgID != receipt.MsgID {
+		t.Fatalf("成功后同文重试必须复用原意图: receipt=%+v err=%v", retried, err)
+	}
+}
+
+// sentText 与 contentHash 不自洽的 result 不符合契约:按 possible 进验证,不落账。
+func TestSendMessageOkResultWithInconsistentSentTextGoesToVerification(t *testing.T) {
+	d, st, m := newDisp(t)
+	key := seedSendTarget(t, st, m, "acct-send-bad", "conv-send-bad")
+	receipt, err := d.SendMessage(sendRequest("intent-sent-bad", key, "计划正文"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.OnAck("hand-send", protocol.AckBody{Ref: receipt.MsgID, Status: protocol.AckStatusAccepted})
+	data, _ := protocol.Encode(protocol.ChatSendMessageData{
+		ConversationRef: key.ConversationRef, ContentHash: syncledger.HashText("计划正文"), SentText: "实发的另一句",
+		ObservedAt: time.Now().UnixMilli(),
+	})
+	d.OnResult("hand-send", "result-sent-bad", protocol.ResultBody{
+		Ref: receipt.MsgID, Status: protocol.ResultStatusOk, Data: data,
+		Evidence: []protocol.Evidence{{Type: string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)}},
+	})
+	cmd, _ := st.CmdByMsgID(receipt.MsgID)
+	// 不符合契约的 ok 被改写成 failed/possible:接了验证器进 verifying,测试脑没接线落 suspect;
+	// 两者都是"不落账、不当成功",绝不 ok。
+	if cmd == nil || cmd.Status == store.CmdOk || cmd.SideEffect != "possible" {
+		t.Fatalf("hash 与 sentText 不自洽的 result 必须按 possible 收场而不是落账: %+v", cmd)
+	}
+	messages, _ := st.MessagesForConversation(key)
+	if len(messages) != 1 {
+		t.Fatalf("不自洽的 result 不得追加账本行: %+v", messages)
+	}
+}

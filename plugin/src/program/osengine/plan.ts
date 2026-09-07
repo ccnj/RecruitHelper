@@ -177,6 +177,11 @@ export function planMove(input: MovePlanInput): MovePlan {
  *
  * 与 `planMove` 不同,这里没有坐标——打字不需要标定。
  */
-export async function planType(text: string, seed: number): Promise<ComposeResult> {
-  return await compose(text, { seed })
+export async function planType(
+  text: string, seed: number, options: { readonly sanitize?: boolean } = {},
+): Promise<ComposeResult> {
+  // sanitize 是上游自带的清洗档:先摘掉打不出的字元再排,摘了什么随 dropped 带回。
+  // 生产发送路径自 2026-09-07「实发正文即事实」起开着它(打不出的字元不再停整条,
+  // 实发正文回脑落账);debug.osType 仍不传——它要的正是「打不出就如实说打不出」。
+  return await compose(text, { seed, ...(options.sanitize ? { sanitize: true } : {}) })
 }

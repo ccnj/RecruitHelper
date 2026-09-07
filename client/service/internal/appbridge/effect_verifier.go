@@ -267,7 +267,11 @@ func (v EffectVerifier) verifySendMessage(ctx context.Context, req dispatch.Veri
 	if rejected := deliveryRejectedObservation(window, dispatchedAtMs); rejected != nil {
 		return *rejected, nil
 	}
-	return classifyVerifiedSend(window.Messages, req.Intent.SendFingerprint, dispatchedAtMs)
+	known := make(map[string]struct{}, len(req.LedgerSourceKeys))
+	for _, key := range req.LedgerSourceKeys {
+		known[key] = struct{}{}
+	}
+	return classifyVerifiedSend(window.Messages, req.Intent.SendFingerprint, known, dispatchedAtMs)
 }
 
 // readRecentWindow 浅读一页最近消息。不携带 anchorTail、不开 deep、不消费
@@ -440,9 +444,14 @@ func withinDispatchWindow(message protocol.ThreadMessage, dispatchedAtMs int64) 
 		*message.TsApprox >= dispatchedAtMs-verificationClockToleranceMs
 }
 
+// classifyVerifiedSend 按窗口认行(《协议规格-v1》§9.4.1,2026-09-07 实发正文即事实):
+// 派发窗口内、方向 out、kind text、带稳定 sourceKey 且不属于账本既有行(known)的
+// 消息即本次,多条取最新;正文与 hash 以该行为准。没有 sourceKey 的行没有身份可与
+// 账本比对,只在 hash 等于计划指纹时才认(旧口径兜底);失效方向仍是少认→suspect。
 func classifyVerifiedSend(
 	messages []protocol.ThreadMessage,
 	targetHash string,
+	known map[string]struct{},
 	dispatchedAtMs int64,
 ) (dispatch.VerificationObservation, error) {
 	if targetHash == "" || dispatchedAtMs <= 0 {
@@ -451,23 +460,36 @@ func classifyVerifiedSend(
 	var matched *protocol.ThreadMessage
 	for i := range messages {
 		message := messages[i]
-		if message.Direction == protocol.MessageDirectionOut &&
-			message.Kind == protocol.MessageKindText &&
-			message.ContentHash == targetHash &&
-			withinDispatchWindow(message, dispatchedAtMs) {
+		if message.Direction != protocol.MessageDirectionOut ||
+			message.Kind != protocol.MessageKindText ||
+			!withinDispatchWindow(message, dispatchedAtMs) {
+			continue
+		}
+		if message.SourceKey != "" {
+			if _, seen := known[message.SourceKey]; seen {
+				continue
+			}
+		} else if message.ContentHash != targetHash {
+			continue
+		}
+		if matched == nil || *message.TsApprox >= *matched.TsApprox {
 			matched = &messages[i]
 		}
 	}
 	if matched == nil {
 		return dispatch.VerificationObservation{
-			Reason: "最近窗口未见时间容差内的目标 out/text 指纹",
+			Reason: "最近窗口未见时间容差内、账本之外的我方 out/text 行",
 		}, nil
 	}
+	sentText := ""
+	if matched.Text != nil {
+		sentText = *matched.Text
+	}
 	return dispatch.VerificationObservation{
-		Confirmed: true, ContentHash: matched.ContentHash, SourceKey: matched.SourceKey,
+		Confirmed: true, ContentHash: matched.ContentHash, SentText: sentText, SourceKey: matched.SourceKey,
 		ObservedAt:   observedAt(*matched),
 		PlatformTsMs: platformTs(*matched),
-		Reason:       "最近窗口命中目标 out/text 指纹(同文取最新)",
+		Reason:       "最近窗口命中账本之外的我方 out/text 行(多条取最新)",
 	}, nil
 }
 

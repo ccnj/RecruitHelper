@@ -108,6 +108,10 @@ type WordSession interface {
 	// Settle 等这一轮的回报送完,返回一句对账结论(上屏了几个词)。
 	// 超时就照实说,**不假装**——不可信的结论比没有结论更糟。
 	Settle(timeout time.Duration) string
+	// Counts 是 Settle 之后的结构化对账:上屏机制回报了几个词、计划里有几个词。
+	// 它是插件侧「当前输入法是不是我们的 TIP」硬闸的数据源(2026-09-07 实发正文
+	// 即事实):TIP 连着却没在上屏时,键落到了系统输入法,回报数必然少于计划数。
+	Counts() (committed, planned int)
 	// Close 收尾,让上屏机制回到透传。
 	//
 	// **调用方必须 defer 它。** 留在受驱动状态的输入法会把我方的词表用在
