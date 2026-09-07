@@ -403,6 +403,11 @@ func (d *tipSession) Settle(timeout time.Duration) string {
 	}
 }
 
+// Counts 见 WordSession:Settle 之后读,读的是同一轮的计数。
+func (d *tipSession) Counts() (committed, planned int) {
+	return int(d.s.commits.Load()), d.want
+}
+
 // Close 只让 TIP 回到透传,**不关监听器**——它是进程级的,关了下一条命令就建不回来
 // (go-winio 用 FILE_CREATE,同名管道有实例就建不出;而 TIP 连上就一直连着)。
 //

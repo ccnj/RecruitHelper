@@ -16,6 +16,7 @@ type drivingInjector struct {
 	driveErr  error
 	closed    int
 	settled   string
+	committed int // Counts 回报的上屏词数;零值即"一个都没上屏"
 	closedAt  int // Close 被调用时已经发出去多少次按键
 	settleGot time.Duration
 }
@@ -35,6 +36,9 @@ type fakeSession struct{ owner *drivingInjector }
 func (f *fakeSession) Settle(t time.Duration) string {
 	f.owner.settleGot = t
 	return f.owner.settled
+}
+func (f *fakeSession) Counts() (committed, planned int) {
+	return f.owner.committed, len(f.owner.gotWords)
 }
 func (f *fakeSession) Close() {
 	f.owner.closed++
@@ -191,5 +195,25 @@ func TestTypeTwiceInARowBothWork(t *testing.T) {
 		if d.closed != i {
 			t.Errorf("第 %d 条之后 Close 调了 %d 次,应为 %d —— 每条命令都要收尾", i, d.closed, i)
 		}
+	}
+}
+
+// 结构化对账随回执带回(2026-09-07):驱动了上屏词的平台标 WordsDriven 并给出计划/回报
+// 两个数;不驱动的平台三者都是零值。插件的「TIP 不活动即不发」硬闸只看这三个字段。
+func TestTypeReportsStructuredWordReconciliation(t *testing.T) {
+	d := &drivingInjector{settled: "TIP 只上屏了 1/2 词", committed: 1}
+	res, err := NewService(d).Type(twoWordPlan())
+	if err != nil {
+		t.Fatalf("不该失败:%v", err)
+	}
+	if !res.WordsDriven || res.WordsPlanned != 2 || res.WordsCommitted != 1 {
+		t.Errorf("结构化对账不对:driven=%v planned=%d committed=%d", res.WordsDriven, res.WordsPlanned, res.WordsCommitted)
+	}
+	plain, err := NewService(&fakeInjector{}).Type(twoWordPlan())
+	if err != nil {
+		t.Fatalf("不该失败:%v", err)
+	}
+	if plain.WordsDriven || plain.WordsPlanned != 0 || plain.WordsCommitted != 0 {
+		t.Errorf("不驱动上屏词的平台三个字段都该是零值:%+v", plain)
 	}
 }
