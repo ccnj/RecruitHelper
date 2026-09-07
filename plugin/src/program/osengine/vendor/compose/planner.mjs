@@ -19,7 +19,7 @@
 
 import { segment, granularity, UntypableError } from './segment.mjs'
 import { sanitize } from './sanitize.mjs'
-import { makeRng, sampleMix, moments, removeOutliers } from './timing.mjs'
+import { makeRng, sampleMix, sampleMixAbove, moments, removeOutliers } from './timing.mjs'
 import { buildView, dominantShare, evaluate } from './criteria.mjs'
 import { withParams } from './params.mjs'
 import { InputTracker } from '../capture/tracker.mjs'
@@ -40,93 +40,102 @@ export function composeOnce(text, params, rng, startTime) {
   const P = params
   const segs = segment(text, rng)
   const dwell = () => Math.max(P.limits.minDwellMs, Math.round(sampleMix(rng, P.dwell.mix)))
-  const clampGap = (v) => Math.min(P.limits.maxGapMs, Math.max(1, Math.round(v)))
 
   let t = startTime
   let first = true
   const words = []
-  // 上一个键若带 Shift，下一个键的 down 必须晚到能让 Shift 先松手，
-  // 否则那个字母会变大写（见 params.limits 里的说明）。
+  /** 上一个 Shift 松手 + shiftGuardMs：下一个事件不得早于它（见 params.limits 里 Xin子 的教训） */
   let minNextDown = -Infinity
-  /**
-   * @param {number} gap 距上一个 keydown 的间隔
-   * @param {number} earliestOffset 本次要排的**最早事件**相对 t 的偏移。
-   *        带 Shift 的字元是 -lead（Shift 先于目标键按下）——只约束目标键是不够的：
-   *        下一个字元若也带 Shift，它的 Shift.down 会比目标键早 lead，
-   *        于是压在上一个 Shift 的 up 之前，两个 Shift 重叠、前一个的 up
-   *        会把后一个需要的 Shift 一起松掉。
-   */
   /** code → 该键上一次松手的时刻。同键复现的间隔约束用它。 */
   const lastUp = new Map()
-  const clearsSameKey = (code, down) => {
-    const up = lastUp.get(code)
-    return up == null || down - up >= P.limits.sameKeyGuardMs
-  }
+  /** 上一个非 Shift 键的松手时刻。ShiftLeft 不得在它之前按下（真人不会在上一个键还按着时去压 Shift）。 */
+  let lastKeyUp = -Infinity
 
   /**
-   * @param {number} gap 距上一个 keydown 的间隔
-   * @param {number} earliestOffset 见下方 Shift 说明
-   * @param {string} [code] 本次要排的键位。给了它就顺带满足同键复现的间隔约束。
-   * @param {function} [resample] 重新采一个 gap —— 违反同键约束时用它拉长间隔。
+   * 排下一个键：从 mix 采「距上一个 keydown 的间隔」，**条件是它清掉本次全部物理下限**。
    *
-   * 同键约束靠**重采间隔**而不是钳制：真人满足它就是靠拉长间隔（实测同键隔
-   * 1/2/3 个键的 down→down 最小值 139/170/254ms，而全部相邻按键的最小值只有
-   * 19ms），而钳制会在 guard 下限上堆出一批精确重复值 —— Shift 那条约束已经
-   * 吃过这个亏（见 segGap 的注释）。重采若干次仍不成就交给 localCheck 拒绝整份。
+   * 物理下限有四条，全都能写成「本次最早事件不得早于某时刻」，也就是对 gap 的一个下限：
+   *   同键复现  目标键 down ≥ 该键上次 up + sameKeyGuardMs（你按不下一个正按着的键）
+   *   Shift 退出 最早事件 ≥ 上一个 Shift 的 up + shiftGuardMs（否则下一个字母被带成大写）
+   *   Shift 进入 ShiftLeft.down ≥ 上一个键的 up + entryMarginMs（真人先松键再压 Shift）
+   *   Shift 同键 ShiftLeft.down ≥ 上一个 ShiftLeft 的 up + sameKeyGuardMs
+   * 取最大者，按条件分布 gap | gap ≥ lower 采一次 —— 条件采样与拒绝重采同分布（真人满足
+   * 这些约束就是靠拉长间隔，见 params.limits.sameKeyGuardMs），但没有次数上限、不会漏。
+   *
+   * **为什么不能是「重采几次不成就交给 localCheck 拒绝整篇」（一稿的做法）。** 这些约束
+   * 是局部的：只牵涉相邻两三个键。一篇 600 键的文案里同键相邻的位置有几十处，每处都独立地
+   * 有一个小概率超出重采次数、漏出去；整篇通过要求全部不漏，概率随长度指数衰减 ——
+   * 实测 285 字单次通过率 4.5%，40 次重采 0/10 篇收敛。局部约束用整篇拒绝兜底，
+   * 粒度就错了；而且漏与不漏并不改变被接受样本的分布（都是同一个条件分布），
+   * 次数上限唯一的作用就是把「采得慢」变成「整篇扔掉」。
+   *
+   * 也不能是钳制：钳制会在下限上堆出一批精确重复值，Shift 那条约束吃过这个亏。
+   *
+   * @param {Array} mix    这一步间隔的分布（段内 intraKey / 段间 segMix / 上屏前 commitKey）
+   * @param {string} code  要排的键位
+   * @param {number} [lead] 带 Shift 的字元：ShiftLeft 比目标键早按下的量。此时本次最早事件是
+   *        ShiftLeft.down = base + gap，目标键在 base + gap + lead。只约束目标键是不够的：
+   *        下一个字元若也带 Shift，它的 ShiftLeft 会压在上一个 Shift 的 up 之前，
+   *        两个 Shift 重叠、前一个的 up 会把后一个需要的 Shift 一起松掉。
    */
-  const advance = (gap, earliestOffset = 0, code = null, resample = null) => {
+  const advance = (mix, code, lead = 0) => {
+    // 首键落在 startTime 上，没有「距上一个键」可言
+    if (first) { first = false; return }
     const base = t
-    const wasFirst = first
-    const apply = (g) => {
-      t = base + (wasFirst ? 0 : clampGap(g))
-      if (t + earliestOffset < minNextDown) t = minNextDown - earliestOffset
+    const guard = P.limits.sameKeyGuardMs
+    let lower = minNextDown - base
+    const up = lastUp.get(code)
+    if (up != null) lower = Math.max(lower, up + guard - lead - base)
+    if (lead) {
+      lower = Math.max(lower, lastKeyUp + P.shift.entryMarginMs - base)
+      const shiftUp = lastUp.get('ShiftLeft')
+      if (shiftUp != null) lower = Math.max(lower, shiftUp + guard - base)
     }
-    apply(gap)
-    if (code && resample && !wasFirst) {
-      for (let i = 0; i < 16 && !clearsSameKey(code, t); i++) apply(resample())
-    }
-    first = false
+    let g = Math.max(1, Math.round(sampleMixAbove(rng, mix, lower)))
+    // maxGapMs 是防 debounce 的余量，只在不与物理下限冲突时生效 —— 下限赢了就让 localCheck
+    // 用 debounce 那条拒绝整篇（那是全局约束，本就该在那一层），不能在这里排出物理不可能的键
+    g = Math.min(g, Math.max(P.limits.maxGapMs, Math.ceil(lower)))
+    t = base + g + lead
   }
 
   /**
-   * 段间间隔。**统一加在段的开头**，不加在段的末尾。
+   * 段间间隔的分布。**统一加在段的开头**，不加在段的末尾。
    *
    * 一稿把它加在 ime 段末尾、direct 段末尾却没加，于是「标点 → 汉字」只剩段内的
    * intraKey（中位 105ms）—— 真人在标点后是有句读停顿的，而且这让带 Shift 的标点
    * 每次都撞上 guard 下限（实测四次余量全是 40ms，靠钳制而非分布拉开）。
    */
-  const segGap = (prev, cur) => {
+  const segMix = (prev, cur) => {
     // 带 Shift 的标点之后按段间取 —— 打完它是句读位置，真人要松 Shift、切手型，
     // 停顿本就更像段间而非段内。用较小的 directGap 会让它频繁撞上 guard 下限，
     // 变成「靠钳制拉开」而不是「靠分布拉开」。
-    if (prev.kind === 'direct' && prev.shift) return sampleMix(rng, P.interSeg.mix)
-    return prev.kind === 'direct' || cur.kind === 'direct'
-      ? sampleMix(rng, P.directGap.mix)
-      : sampleMix(rng, P.interSeg.mix)
+    if (prev.kind === 'direct' && prev.shift) return P.interSeg.mix
+    return prev.kind === 'direct' || cur.kind === 'direct' ? P.directGap.mix : P.interSeg.mix
   }
 
   let prevSeg = null
   for (const s of segs) {
-    const gap = prevSeg ? segGap(prevSeg, s) : 0
+    // 首段之前没有段间间隔（advance 对首键不采），这里给的 mix 不会被用到
+    const mix = prevSeg ? segMix(prevSeg, s) : P.interSeg.mix
 
     if (s.kind === 'direct' && s.shift) {
       // ── 带 Shift 的字元 ──
       // Shift 是一个会被完整统计的普通键，lead 与 dwell 各自独立采样（见 params.shift）。
       // 这两个量一变大，重叠风险就跟着变大，所以三条约束必须同时成立：
-      //   A  gap > lead + entryMargin           → Shift 不早于上一个键按下
-      //   B  shiftDwell ≥ lead + kDwell + cover → Shift 盖过被修饰键的整个按下过程
-      //   C  下一个键 ≥ Shift.up + guard        → 下一个字母不被带成大写（Xin子 的教训）
+      //   A  ShiftLeft.down ≥ 上一个键.up + entryMargin → 先松上一个键再压 Shift
+      //   B  shiftDwell ≥ lead + kDwell + cover          → Shift 盖过被修饰键的整个按下过程
+      //   C  下一个键 ≥ Shift.up + guard                 → 下一个字母不被带成大写（Xin子 的教训）
       const lead = Math.max(1, Math.round(sampleMix(rng, P.shift.lead.mix)))
       const kDwell = Math.min(dwell(), P.limits.shiftMaxDwellMs)
       const shiftDwell = Math.max(
         Math.round(sampleMix(rng, P.shift.dwell.mix)),
         lead + kDwell + P.shift.coverMs // B
       )
-      // 段间间隔要由**本段最早的事件**（ShiftLeft，早目标键 lead）去承接。
-      // 只写 max(gap, …) 是错的：那样 gap 会被 lead 吃掉，上一个键到 ShiftLeft 的
-      // 实得间隔只剩 gap−lead，中位从 327ms 塌到 176ms，21% 恰好钳到 entryMargin
-      // 字面值 30ms，且 33% 的 ShiftLeft 落在上一个键（IME 上屏键）的按住区间内。
-      advance(Math.max(gap + lead, lead + P.shift.entryMarginMs), -lead) // A，且 earliestOffset 顾及 C
+      // 段间间隔由**本段最早的事件**（ShiftLeft，早目标键 lead）去承接：advance 采的 gap
+      // 是 base → ShiftLeft.down，目标键再晚 lead。把 lead 从 gap 里扣是错的：那样上一个键
+      // 到 ShiftLeft 的实得间隔只剩 gap−lead，中位从 327ms 塌到 176ms，且 33% 的 ShiftLeft
+      // 落在上一个键（IME 上屏键）的按住区间内。A 与 C 都是 advance 里 gap 的下限。
+      advance(mix, s.code, lead)
       const kDown = t
       const shiftDown = kDown - lead
       const shiftUp = shiftDown + shiftDwell
@@ -140,14 +149,16 @@ export function composeOnce(text, params, rng, startTime) {
       minNextDown = shiftUp + P.limits.shiftGuardMs // C
       lastUp.set('ShiftLeft', shiftUp)
       lastUp.set(s.code, kDown + kDwell)
+      lastKeyUp = kDown + kDwell
     } else if (s.kind === 'direct') {
-      advance(gap, 0, s.code, () => segGap(prevSeg, s))
+      advance(mix, s.code)
       const d = dwell()
       words.push({
         text: s.text, direct: true, passthrough: !!s.passthrough,
         keys: [{ code: s.code, down: t, up: t + d }],
       })
       lastUp.set(s.code, t + d)
+      lastKeyUp = t + d
       minNextDown = -Infinity
     } else {
       const keys = []
@@ -155,20 +166,21 @@ export function composeOnce(text, params, rng, startTime) {
       for (const ch of s.pinyin) {
         // 键位要先算出来 —— advance 需要它才能满足同键复现的间隔约束
         const code = /[a-z]/i.test(ch) ? 'Key' + ch.toUpperCase() : 'Key' + ch
-        const sampleGap = firstLetter ? () => segGap(prevSeg, s) : () => sampleMix(rng, P.intraKey.mix)
-        advance(firstLetter ? gap : sampleMix(rng, P.intraKey.mix), 0, code, sampleGap)
+        advance(firstLetter ? mix : P.intraKey.mix, code)
         firstLetter = false
         minNextDown = -Infinity
         const d = dwell()
         keys.push({ code, letter: ch, down: t, up: t + d })
         lastUp.set(code, t + d)
+        lastKeyUp = t + d
       }
       // 上屏键同样先选定，才能参与同键约束（Space 高频，很容易撞上上一段的 Space）
       const commitCode = pickWeighted(rng, P.commitKeys).code
-      advance(sampleMix(rng, P.commitKey.mix), 0, commitCode, () => sampleMix(rng, P.commitKey.mix))
+      advance(P.commitKey.mix, commitCode)
       const cd = dwell()
       const commit = { code: commitCode, letter: '', down: t, up: t + cd }
       lastUp.set(commitCode, t + cd)
+      lastKeyUp = t + cd
       // 音节边界（相对拼音串起点的偏移），供 TIP 在组字区显示分隔撇号。
       // 只是显示：不多按任何键，不改变任何被判定的字段。见 tip/src/compose.rs。
       const splits = []
@@ -217,6 +229,11 @@ export function localCheck(plan, params, platform) {
   const maxGap = Math.max(0, ...v.seq.inputRhythm)
 
   const reasons = []
+  // ── 物理/注入可行性。**这几条由 composeOnce 的 advance 按构造保证**（全部写成了间隔的
+  // 下限、按条件分布采样），这里是对账而不是筛选：正常情况下一条都不该命中。命中了说明
+  // composeOnce 有 bug（或 params 被改出了矛盾），不是这一篇运气差 —— 别拿重采次数去盖它。
+  // 仍然保留为拒绝理由而不是抛错，是因为它拦的是「真机上按不按得出来」，宁可多拒一篇。
+  //
   // Shift 窗口：带 Shift 的键松手后必须留够 shiftGuardMs，下一个键才能按下。
   // 少了这道，注入层无论怎么排都会让下一个字母变大写。
   const flat = []
