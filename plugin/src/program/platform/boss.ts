@@ -2934,6 +2934,17 @@ function paceBeforeClick(): Promise<void> {
   return sleep(1_000 + Math.floor(Math.random() * 401))
 }
 
+/**
+ * 快捷窗打开后先「看一眼」再打字的停顿区间(毫秒)。真人不会窗一弹出就敲键(2026-09-07 甲方:
+ * 「几乎瞬间就开始打字,太假了」);有界随机,不是常数——常数会是机器签名。
+ */
+export const QUICK_CHAT_READ_PAUSE_MS = Object.freeze({ min: 3_000, max: 6_000 })
+
+export function sampleQuickChatReadPause(random: () => number = Math.random): number {
+  const span = QUICK_CHAT_READ_PAUSE_MS.max - QUICK_CHAT_READ_PAUSE_MS.min
+  return QUICK_CHAT_READ_PAUSE_MS.min + Math.min(span, Math.floor(random() * (span + 1)))
+}
+
 async function readBossExchangeTooltip(tabId: number) {
   return runInPage(BOSS_DOM, tabId, domReadBossExchangeTooltip,
     [EXCHANGE_TOOLTIP_SELECTOR, EXCHANGE_CONFIRM_SELECTOR, EXCHANGE_CANCEL_SELECTOR, WECHAT_MODAL_SELECTOR])
@@ -5972,6 +5983,12 @@ async function sendBossGreeting(
     }
     const baselineMids = new Set(chat.rows.map((row) => row.mid))
     trace.push(`快捷窗已绑定目标,基线 ${chat.rows.length} 行`)
+    // 真人不会窗一弹出就敲键:先停 3~6 秒(有界随机)再去点输入框。停顿两侧各一个 checkpoint,停止信号照常生效。
+    ctx.checkpoint()
+    const readPause = sampleQuickChatReadPause()
+    await sleep(readPause)
+    ctx.checkpoint()
+    trace.push(`看了 ${(readPause / 1000).toFixed(1)} 秒`)
     // 打字:与 sendBossMessage 同一条路(焦点 → 前台闸 → 清空 → 排版 → 播放 → 回读逐字相等)。
     const composerId = QUICK_CHAT_SEL.composerId
     const readComposer = (): Promise<ReturnType<typeof mainReadComposer>> => runInPage(BOSS_DOM, tabId, mainReadComposer, [composerId])
@@ -6194,6 +6211,8 @@ export const bossTestHooks = Object.freeze({
   // 第二刀(2026-09-05):推荐页采集 + 打招呼。
   // 实发正文即事实(2026-09-07):地板、TIP 核对、认行三个纯判定点。
   typedTextFloor,
+  sampleQuickChatReadPause,
+  QUICK_CHAT_READ_PAUSE_MS,
   levenshteinChars,
   describeTypedTextFloor,
   tipWordsShortfall,

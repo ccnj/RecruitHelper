@@ -18172,6 +18172,19 @@ test('排版器清洗档:打不出的字元摘掉后照排,摘了什么随 dropp
   assert.equal(strict.ok, false, '不传 sanitize 仍保持严格(debug.osType 要的正是这个)')
 })
 
+test('快捷窗打开后先看一眼再打字:停顿落在 3~6 秒的有界区间,端点可达', () => {
+  const { sampleQuickChatReadPause, QUICK_CHAT_READ_PAUSE_MS } = bossTestHooks
+  assert.equal(sampleQuickChatReadPause(() => 0), QUICK_CHAT_READ_PAUSE_MS.min)
+  assert.equal(sampleQuickChatReadPause(() => 0.999999), QUICK_CHAT_READ_PAUSE_MS.max)
+  const seen = new Set()
+  for (let i = 0; i < 500; i += 1) {
+    const ms = sampleQuickChatReadPause()
+    assert.ok(ms >= QUICK_CHAT_READ_PAUSE_MS.min && ms <= QUICK_CHAT_READ_PAUSE_MS.max, `越界 ${ms}`)
+    seen.add(ms)
+  }
+  assert.ok(seen.size > 50, '必须是随机值,不是常数')
+})
+
 for (const { name, fn } of tests) {
   try {
     await fn()
