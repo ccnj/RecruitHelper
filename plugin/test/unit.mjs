@@ -4445,6 +4445,34 @@ test('candidate.readSourcingWindow MAIN 从常驻 DOM 中只返回当前视口�
   }
 })
 
+test('candidate.readSourcingWindow MAIN 列表短到无处可滚时 next/reset 如实报 moved=false 而非失败', async () => {
+  // 2026-09-05~07 俞炳冬01 真机:推荐流只剩 1~3 人,列表不溢出、document root 也不可滚,
+  // 此前 next 报 scroll_unavailable → 脑记 windowReadFailed → 整日计划终止。
+  const fixture = installM6SourcingWindowFixture({
+    startAt: 'first', staticDom: true, staticDomCount: 2, virtualTime: true,
+  })
+  try {
+    assert.equal(fixture.scroller.scrollHeight, fixture.scroller.clientHeight, '夹具:列表不溢出')
+    const current = await zhilianTestHooks.mainReadSourcingWindow('current')
+    assert.equal(current.status, 'ready')
+    assert.deepEqual(current.data.platformUserRefs, fixture.refs.all)
+    assert.equal(current.data.moved, false)
+
+    const next = await zhilianTestHooks.mainReadSourcingWindow('next')
+    assert.equal(next.status, 'ready', 'next 无处可滚不是故障')
+    assert.deepEqual(next.data.platformUserRefs, fixture.refs.all)
+    assert.equal(next.data.moved, false)
+    assert.equal(Object.hasOwn(next.data, 'exhausted'), false, 'moved 不承载耗尽语义')
+
+    const reset = await zhilianTestHooks.mainReadSourcingWindow('reset')
+    assert.equal(reset.status, 'ready')
+    assert.deepEqual(reset.data.platformUserRefs, fixture.refs.all)
+    assert.equal(reset.data.moved, false)
+  } finally {
+    fixture.restore()
+  }
+})
+
 test('candidate.readSourcingWindow MAIN 可遍历 document root 上超过 32 张常驻卡片并在尾部停止', async () => {
   const fixture = installM6SourcingWindowFixture({
     startAt: 'first', staticDom: true, staticDomCount: 34, documentRoot: true,
