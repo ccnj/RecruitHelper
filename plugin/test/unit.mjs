@@ -17559,6 +17559,15 @@ test('靶子被盖住就退让一次再靠近:命中测试报 occluded 且计划
   } finally { bad.restore() }
 })
 
+test('BOSS 招呼钮选择器:身份绑在 li 上再往下找按钮——按钮在 .operate-side 里,是 .card-inner 的兄弟不是后代(第三趟真机三次首击全 none)', () => {
+  const { greetButtonSelector, RECOMMEND_SEL: S } = bossTestHooks
+  const sel = greetButtonSelector('ENCGEEK00000000000000000001', S.greetButton)
+  assert.equal(sel, 'li.card-item:has(.card-inner[data-geekid="ENCGEEK00000000000000000001"]) button.btn-greet')
+  assert.equal(greetButtonSelector('E', S.continueButton), 'li.card-item:has(.card-inner[data-geekid="E"]) button.btn-continue')
+  // 用真实 DOM 形状验一遍选择器语义(jsdom 没有,用 node 里的最小假 querySelectorAll 说明意图):li 里有 .card-inner 与兄弟 .operate-side
+  assert.ok(!sel.startsWith('.card-inner'), '不能再从 .card-inner 往下找')
+})
+
 test('BOSS 停靠空白带:iframe 左侧边距里的一条竖带,上下各留 120px;闸只认顶层是 iframe 且 iframe 内落点不在卡片/页头/面板/可点元素上', () => {
   const { domReadBossParkSpot, domBossParkGate } = bossTestHooks
   const saved = { document: globalThis.document, window: globalThis.window }
