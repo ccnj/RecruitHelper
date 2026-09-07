@@ -2135,8 +2135,16 @@ func sameMaterializedCommunicationAction(left, right CommunicationAction) bool {
 		sameOptionalString(left.InterviewMethod, right.InterviewMethod)
 }
 
+// messageBoundToIntent:账本行是否就是该意图追加的那一行(outbound_intent_id 相等)。
+// 实发正文即事实(2026-09-07)之后,行的 hash 可与动作的计划 hash 不同——归属以身份为准,
+// 计划 hash 相等仍作为既有路径(无身份的同文匹配)保留。
+func messageBoundToIntent(message Message, intentID *string) bool {
+	return intentID != nil && *intentID != "" && message.OutboundIntentID != nil && *message.OutboundIntentID == *intentID
+}
+
 func communicationActionMatchesMessage(action CommunicationAction, message Message) bool {
-	if message.Direction != "out" || message.ContentHash != action.ContentHash {
+	if message.Direction != "out" ||
+		(message.ContentHash != action.ContentHash && !messageBoundToIntent(message, action.EffectIntentID)) {
 		return false
 	}
 	switch action.Kind {
@@ -2860,11 +2868,13 @@ func validateCommunicationV4EventActionDependencyTx(
 	).Error; err != nil {
 		return err
 	}
+	// 父正证行按 outbound_intent_id 取得,归属已由身份保证;hash 与父动作计划值不同是
+	// 实发正文即事实(2026-09-07)的正常形态,不再作冲突判据。
 	if message.RetractedAt != nil ||
 		message.Seq != *parentIntent.ResultMessageSeq ||
 		message.Direction != "out" ||
 		message.Kind != "text" ||
-		message.ContentHash != parent.contentHash ||
+		(message.ContentHash != parent.contentHash && !messageBoundToIntent(message, &parentIntent.IntentID)) ||
 		aggregate.ProjectedThroughSeq != message.Seq ||
 		aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
 		return ErrDialogueTurnBinding
@@ -3235,7 +3245,7 @@ func validateM5DependentActionCurrentTx(
 	if message.RetractedAt != nil ||
 		message.Direction != "out" ||
 		message.Kind != "text" ||
-		message.ContentHash != parent.ContentHash {
+		(message.ContentHash != parent.ContentHash && !messageBoundToIntent(message, &intent.IntentID)) {
 		return out, ErrCommunicationActionConflict
 	}
 	var profile CandidateProfile
@@ -4075,7 +4085,7 @@ func communicationV4EventActionMatchesMessage(
 	message Message,
 ) bool {
 	if message.Direction != "out" ||
-		message.ContentHash != action.ContentHash {
+		(message.ContentHash != action.ContentHash && !messageBoundToIntent(message, action.EffectIntentID)) {
 		return false
 	}
 	switch action.EffectKind {

@@ -374,3 +374,63 @@ func TestCommunicationV4PersistedPlanRejectsMissingPhraseBody(t *testing.T) {
 		t.Fatal("旧单气泡兼容不得扩成多气泡正文来源")
 	}
 }
+
+// 实发正文即事实(2026-09-07):首气泡的账本行以实发正文落账(hash 与计划不同),动作仍按意图
+// 身份收敛 sent、动作行保留计划 hash;第二个气泡照常物化,其 WAL 构造不被父链闸的 hash 比对卡住。
+// 立案:09-07 Mac 真机第一条回复 45→44 字入账报「沟通动作事实冲突」,三轮验证读同样撞墙转 suspect,
+// 后续气泡全部没发。
+func TestCommunicationV4MultiBubbleAcceptsActualSentTextOnParent(t *testing.T) {
+	s := openTest(t)
+	phrases := []string{"fixture replaces first", "第二个气泡"}
+	fixture := seedCommunicationV4MultiBubblePlans(t, s, "multi-bubble-sent-text", phrases, false)
+	actions, err := s.CommunicationActionsByTurn(fixture.Turn.TurnID)
+	if err != nil || len(actions) != 1 {
+		t.Fatalf("首气泡前只应物化一项: actions=%+v err=%v", actions, err)
+	}
+	first := actions[0]
+	fixture.Action = first
+	fixture.Now = fixture.Now.Add(time.Duration(fixture.Turn.InboundThroughSeq) * time.Second)
+	req := communicationV4AutomaticEffectRequest(t, s, fixture, "multi-bubble-sent-text-first")
+	req.ExpectedTailSeq = fixture.Turn.InboundThroughSeq
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("首气泡 WAL 构造失败: result=%+v err=%v", created, err)
+	}
+	actual := first.Text + "花"
+	resultAt := fixture.Now.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		created.Command.MsgID, "result-multi-bubble-sent-text-first", "result", fixture.HandID,
+		func(cmd *CmdRecord) (ResultCommandMutation, error) {
+			cmd.Status = CmdOk
+			cmd.TerminalAt = &resultAt
+			return ResultCommandMutation{Save: true, Effect: &EffectResultMutation{
+				IntentStatus: EffectIntentOk, Append: true,
+				Text: actual, ContentHash: textcanon.Hash(actual), ObservedAtMs: resultAt.UnixMilli(),
+			}}, nil
+		},
+	); err != nil {
+		t.Fatalf("首气泡以实发正文落账被拒: %v", err)
+	}
+	actions, err = s.CommunicationActionsByTurn(fixture.Turn.TurnID)
+	if err != nil || len(actions) != 2 || actions[0].Status != CommunicationActionSent ||
+		actions[0].ContentHash != first.ContentHash || actions[0].EffectIntentID == nil {
+		t.Fatalf("首气泡应按意图身份收敛 sent 且动作行保留计划 hash: actions=%+v err=%v", actions, err)
+	}
+	var message Message
+	if err := s.db.First(&message, "outbound_intent_id = ?", req.Intent.IntentID).Error; err != nil ||
+		message.Text == nil || *message.Text != actual || message.ContentHash != textcanon.Hash(actual) {
+		t.Fatalf("账本行应是实发正文: message=%+v err=%v", message, err)
+	}
+	second := actions[1]
+	if second.DependsOnActionID == nil || *second.DependsOnActionID != first.ActionID {
+		t.Fatalf("第二气泡未钉住首气泡: %+v", second)
+	}
+	fixture.Action = second
+	fixture.Now = fixture.Now.Add(time.Second)
+	req = communicationV4AutomaticEffectRequest(t, s, fixture, "multi-bubble-sent-text-second")
+	req.ExpectedTailSeq = fixture.Turn.InboundThroughSeq + 1
+	created, err = s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("父气泡实发正文与计划不同时,第二气泡 WAL 不得被父链闸卡住: result=%+v err=%v", created, err)
+	}
+}
