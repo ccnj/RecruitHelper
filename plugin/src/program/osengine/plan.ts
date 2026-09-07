@@ -24,7 +24,7 @@ import type { ComposeResult } from './vendor/compose/planner.mjs'
  */
 export const OSENGINE_SOURCE = {
   repo: 'hiBoss',
-  commit: '95607a3',
+  commit: '948afb5',
   files: 'lab/engine/mouse/{route,engines}.mjs + lab/probe/baseline/{route,press}.bjh.mjs'
     + ' + lab/engine/{compose,capture}/*.mjs',
   pooledAt: '2026-08-27',
