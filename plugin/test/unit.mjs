@@ -18105,20 +18105,6 @@ test('散开靶子必须躲开工具栏,同时保住解 scale 的跨度——两
 })
 
 let failures = 0
-for (const { name, fn } of tests) {
-  try {
-    await fn()
-    console.log('PASS', name)
-  } catch (error) {
-    failures++
-    console.error('FAIL', name)
-    console.error(error)
-  }
-}
-
-if (failures > 0) process.exit(1)
-console.log(`ALL PASS (${tests.length})`)
-process.exit(0)
 
 // ── 实发正文即事实(2026-09-07 甲方裁决):手侧三个纯判定点 ──────────────────────────────
 
@@ -18185,3 +18171,18 @@ test('排版器清洗档:打不出的字元摘掉后照排,摘了什么随 dropp
   const strict = await plan('你好😊世界', 7)
   assert.equal(strict.ok, false, '不传 sanitize 仍保持严格(debug.osType 要的正是这个)')
 })
+
+for (const { name, fn } of tests) {
+  try {
+    await fn()
+    console.log('PASS', name)
+  } catch (error) {
+    failures++
+    console.error('FAIL', name)
+    console.error(error)
+  }
+}
+
+if (failures > 0) process.exit(1)
+console.log(`ALL PASS (${tests.length})`)
+process.exit(0)
