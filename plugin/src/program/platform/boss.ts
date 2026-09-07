@@ -5710,9 +5710,13 @@ async function afterFirstClick<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-/** 目标卡的「打招呼」/「继续沟通」按钮:selector 直接绑 encryptGeekId,列表重排也不会点错人。 */
-function greetButtonSelector(encryptGeekId: string, buttonSel: string): string {
-  return `${RECOMMEND_SEL.cardInner}[data-geekid="${encryptGeekId}"] ${buttonSel}`
+/**
+ * 目标卡的「打招呼」/「继续沟通」按钮:selector 直接绑 encryptGeekId,列表重排也不会点错人。
+ * 按钮在 `.operate-side` 里,与 `.card-inner` 是同一张 `li.card-item` 下的兄弟、不是它的后代(2026-09-07 第三趟真机:
+ * 三次首击都在定位这一步报「选择器没有命中任何元素」,候选人零触碰)——所以从 li 往下找,用 `:has()` 把身份绑在 li 上。
+ */
+export function greetButtonSelector(encryptGeekId: string, buttonSel: string): string {
+  return `${RECOMMEND_SEL.cardItem}:has(${RECOMMEND_SEL.cardInner}[data-geekid="${encryptGeekId}"]) ${buttonSel}`
 }
 
 /**
@@ -6068,6 +6072,7 @@ export const bossTestHooks = Object.freeze({
   domBossQuickSendGate,
   domReadBossParkSpot,
   domBossParkGate,
+  greetButtonSelector,
   RECOMMEND_SEL,
   QUICK_CHAT_SEL,
 })
