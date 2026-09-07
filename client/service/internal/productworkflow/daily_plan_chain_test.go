@@ -3,6 +3,7 @@ package productworkflow
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -387,18 +388,83 @@ func TestDailyPlanSkipsFiltersApplyFailedEntryAndChains(t *testing.T) {
 	}
 }
 
-// 非跳过类失败终止整个计划,并终局化残留 blocked 批次——防止次日被当成存量
-// 批次收养后按配置全额跑掉(超发方向,必须堵死)。
-func TestDailyPlanAbortsOnNonSkipFailureAndTerminalizesBatch(t *testing.T) {
+// 采集中途的批次失败(2026-09-07 甲方裁决:任何职位级原因)同样只跳过该职位并
+// 接续下一条目,不得终止整份计划;未终局的 blocked 批次必须收尾,且原因与判定
+// 现场不丢。立案:俞炳冬01 09-05~07 连续三天因 windowReadFailed 终止整日计划。
+func TestDailyPlanSkipsMidCollectionBlockedEntryAndChains(t *testing.T) {
+	db, key, manager, _, clock, _, revB := dailyPlanChainFixture(t)
+	runA, err := manager.StartFullDailyPlan(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := finalizeActivePlanBothOnline(t, db, key, clock.now)
+	// failSourcingBatch 的落账形态:采集中途 blocked(windowReadFailed)带手报原话。
+	detail := "ELEMENT_UNRESOLVED: 当前推荐列表滚动窗口无法唯一确定"
+	if _, err := db.BlockSourcingBatch(store.BlockSourcingBatchRequest{
+		BatchID: *runA.SourcingBatchID, Reason: "windowReadFailed",
+		Detail: detail, BlockedAt: clock.now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
+		RunID: runA.RunID,
+		From:  workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusRunning},
+		To:    workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusFailed},
+		At:    clock.now, Stage: store.ProductWorkflowStageFailed,
+		Failure: "产品工作流批次推进状态无效: windowReadFailed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
+		t.Fatalf("收口扫描: %v", err)
+	}
+	var closed store.DailyJobPlan
+	if err := dbPlanByID(db, plan.PlanID, &closed); err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status == store.DailyJobPlanAborted {
+		t.Fatalf("单个职位的批次失败不得终止整份计划: %+v", closed)
+	}
+	_, entries, err := db.ActiveDailyJobPlan(key)
+	if err != nil || entries[0].Status != store.DailyJobPlanEntrySkipped ||
+		entries[0].SkipReason != "batch:windowReadFailed|"+detail {
+		t.Fatalf("条目一未带现场留痕跳过: %+v err=%v", entries, err)
+	}
+	active, err := db.ActiveProductWorkflowRun()
+	if err != nil || active == nil || active.Mode != workflow.ModeFull ||
+		active.SourcingBatchID == nil || *active.SourcingBatchID == *runA.SourcingBatchID {
+		t.Fatalf("未接续条目二: %+v err=%v", active, err)
+	}
+	batch, err := db.SourcingBatchByID(*active.SourcingBatchID)
+	if err != nil || batch.ContextRevisionHash != revB.RevisionHash {
+		t.Fatalf("接续批次错误: %+v err=%v", batch, err)
+	}
+	stale, err := db.SourcingBatchByID(*runA.SourcingBatchID)
+	if err != nil || stale == nil || stale.EndedAt == nil ||
+		stale.Status != store.SourcingBatchStopped {
+		t.Fatalf("跳过后不得残留未终局批次: %+v err=%v", stale, err)
+	}
+	if stale.Reason != planBatchStopReasonSkipped ||
+		!strings.Contains(stale.ReasonDetail, "windowReadFailed") ||
+		!strings.Contains(stale.ReasonDetail, detail) {
+		t.Fatalf("收尾批次丢了原因或判定现场: reason=%q detail=%q", stale.Reason, stale.ReasonDetail)
+	}
+}
+
+// 计划级故障(计划定稿失败)仍终止整个计划,并终局化残留 blocked 批次——防止次日
+// 被当成存量批次收养后按配置全额跑掉(超发方向,必须堵死)。
+func TestDailyPlanAbortsOnPlanLevelFailureAndTerminalizesBatch(t *testing.T) {
 	db, key, manager, _, clock, _, _ := dailyPlanChainFixture(t)
 	runA, err := manager.StartFullDailyPlan(key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan := finalizeActivePlanBothOnline(t, db, key, clock.now)
-	// blocked(非终局)+ 非跳过类原因。
+	// blocked(非终局)+ 计划级原因。
 	if _, err := db.BlockSourcingBatch(store.BlockSourcingBatchRequest{
-		BatchID: *runA.SourcingBatchID, Reason: "windowNoProgress", BlockedAt: clock.now,
+		BatchID: *runA.SourcingBatchID, Reason: store.SourcingBatchGateReasonPlanFinalize,
+		BlockedAt: clock.now,
 	}); err != nil {
 		t.Fatal(err)
 	}

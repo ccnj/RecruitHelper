@@ -50,6 +50,16 @@ function planSkipCodeText(code: string): string {
   if (code === 'batch:positionSelectFailed') return '推荐页职位列表里找不到该职位或无法唯一确定'
   if (code === 'batch:recommendPageNotReady') return '推荐页加载超时（已重试 5 次）'
   if (code === 'batch:filtersApplyFailed') return '筛选条件未能设置成功（已重试）'
+  // 2026-09-07 甲方裁决:采集中途的任何批次原因同样只跳过该职位,不再终止整日计划。
+  if (code === 'batch:windowReadFailed') return '推荐列表窗口读取失败'
+  if (code === 'batch:targetReadFailed') return '候选人简历读取失败'
+  if (code === 'batch:targetResultMismatch') return '简历读取结果与目标候选人不一致'
+  if (code === 'batch:targetCommitFailed') return '采集结果落库失败'
+  if (code === 'batch:positionBindFailed') return '推荐页职位绑定失败'
+  if (code === 'batch:positionChanged') return '采集中途推荐页职位发生变化'
+  if (code === 'batch:memberReadFailed') return '批次成员读取失败'
+  if (code === 'batch:windowNoProgress') return '推荐列表连续无新候选人且本批零采集'
+  if (code === 'batch:invalidBatchState') return '批次状态异常'
   return code
 }
 

@@ -1,7 +1,8 @@
 // 当日职位计划的运行编排(AGENTS.md「当日职位计划与招呼配额分摊」,2026-09-01
 // 甲方裁决):建计划开跑、批间自动接续、无活跃运行时的收口扫描。接续复用
-// 「再采一批」的 PendingAction 机器与巡检边界;一切失效方向朝少发——跳过类
-// 失败只跳过该职位,其余一律终止当日计划,次日重来,不自动重试。
+// 「再采一批」的 PendingAction 机器与巡检边界;一切失效方向朝少发——单个职位的
+// 批次失败只跳过该职位(2026-09-07 甲方裁决),只有计划级故障才终止当日计划,
+// 次日重来,不自动重试。
 package productworkflow
 
 import (
@@ -21,31 +22,34 @@ const (
 	planEndReasonRunFailed        = "runFailed"
 
 	planBatchStopReasonAborted = "dailyPlanAborted"
+	// planBatchStopReasonSkipped:条目被跳过时收尾其未终局批次的停止原因;原批次
+	// 原因与判定现场随 detail 保留,不被覆盖丢失(「错误收敛必须留痕」)。
+	planBatchStopReasonSkipped = "dailyPlanEntrySkipped"
 )
 
 var ErrDailyPlanQuotaExhausted = errors.New("当日职位计划没有可执行条目")
 
-// planSkipClassBatchReason:批前闸口径由 store 统一导出,只有这几类允许
-// "跳过该条目、接续下一条目"(AGENTS.md「当日职位计划与招呼配额分摊」跳过类
-// 枚举);其余原因可能是账号级故障(掉登录、手离线),逐条目盲试只会连环空转,
-// 一律终止计划(dailyPlanFinalizeFailed 同理,是计划级故障)。
+// planSkipClassBatchReason:批次原因是否属于"跳过该条目、接续下一条目"类。
+// 2026-09-07 甲方裁决:单个职位的批次因任何职位级原因未能正常终局,一律跳过,
+// 不得终止整个计划——此前只认五种批前闸(不在线/状态读取失败/重名歧义/推荐页
+// 未就绪/筛选设置失败),采集中途的 windowReadFailed、targetReadFailed 等一律终止
+// 计划。立案:俞炳冬01 09-05~07 连续三天在计划序第 8 个职位上因推荐流只剩 1~3 人、
+// 翻页找不到滚动容器报 windowReadFailed,整日计划终止、末两职位每天约 30 个名额
+// 未发。甲方知情接受账号级故障(掉登录、手离线)时逐职位盲试约十分钟才收场(09-04
+// 为筛选失败接受过同款代价,现扩到全部原因)。跳过时该批已采未招呼的人随批次作废
+// (少发方向);运行只在采集段判失败,评分与招呼阶段不判失败,不会出现招呼未终局
+// 就切职位。
 //
-// filtersApplyFailed 于 2026-09-04 甲方裁决自"其余原因"移入:它是页面交互脆断,
-// 不是账号级故障——换个职位重来大概率就成(近 20 次真机 18 成 2 败)。09-03 与
-// 09-04 各触发一次,后者把当日剩余 3 个职位共 53 个名额一起废掉。手侧补点与
-// patrol 的同轮重试都失败之后才会走到这里,此时跳过该职位是"重试→仍不行→跳过"
-// 的最后一档。用户暂停、每日边界与 ctx 取消不经此路:preservesSourcingBatch
-// 让它们原样保留批次、根本不写 blocked 原因。
+// 只有计划级故障不在此列:dailyPlanFinalizeFailed 是计划定稿失败,由收口扫描终止
+// 整个计划;运行失败时根本没有批次(脑重启落在空档)由调用方另行判为终止。用户
+// 暂停、每日边界与 ctx 取消不经此路:preservesSourcingBatch 让它们原样保留批次、
+// 根本不写 blocked 原因。
 func planSkipClassBatchReason(reason string) bool {
-	switch reason {
-	case store.SourcingBatchGateReasonJobNotOnline,
-		store.SourcingBatchGateReasonStatusRead,
-		store.SourcingBatchGateReasonPositionSelect,
-		store.SourcingBatchGateReasonRecommendPageNotReady,
-		store.SourcingBatchGateReasonFiltersApply:
-		return true
+	switch strings.TrimSpace(reason) {
+	case "", store.SourcingBatchGateReasonPlanFinalize:
+		return false
 	}
-	return false
+	return true
 }
 
 // StartFullDailyPlan 是完整流程的产品入口(2026-09-01 起唯一入口):活跃运行
@@ -255,7 +259,7 @@ func (m *Manager) reconcileOneDailyPlanLocked(bundle store.DailyJobPlanWithEntri
 	planHadRun := false
 
 	abort := func(reason string) error {
-		if err := m.terminalizeDailyPlanBatchLocked(key, entries, now); err != nil {
+		if err := m.terminalizeDailyPlanBatchLocked(key, entries, planBatchStopReasonAborted, "", now); err != nil {
 			return err
 		}
 		if err := m.store.AbortDailyJobPlan(plan.PlanID, reason, now); err != nil {
@@ -303,7 +307,8 @@ func (m *Manager) reconcileOneDailyPlanLocked(bundle store.DailyJobPlanWithEntri
 		// 定稿钩子会先把该条目标成 skipped、随后同一次闸读取才把批次拦停
 		// (jobNotOnline)——这是生产上最常见的入场时序,条目此刻已不是
 		// pending;SkipDailyJobPlanEntry 对已跳过条目幂等,接续照常。只有
-		// done 条目的失败(不可达)与非跳过类原因才终止计划。
+		// done 条目的失败(不可达)、没有批次的失败(脑重启落在空档)与计划级
+		// 原因(定稿失败)才终止计划(2026-09-07 甲方裁决)。
 		if entry != nil && entry.Status != store.DailyJobPlanEntryDone {
 			skipReason, skippable, batchErr := m.dailyPlanSkipReasonLocked(latest)
 			if batchErr != nil {
@@ -403,9 +408,13 @@ func (m *Manager) skipEntryAndChainLocked(
 	}
 	slog.Warn("当日职位计划条目已跳过",
 		"planId", plan.PlanID, "seq", entry.Seq, "job", entry.JobName, "reason", skipReason)
-	// 被闸拦下的批次多数已终局(stopped);positionSelectFailed 族是 blocked
-	// 未终局,必须收尾,否则会被下一次开始当存量批次收养、按配置全额跑掉。
-	if err := m.terminalizeDailyPlanBatchLocked(key, nil, now); err != nil {
+	// 批前闸拦下的批次多数已终局(stopped);positionSelectFailed 族与采集中途
+	// blocked 的(windowReadFailed、targetReadFailed 等)未终局,必须收尾,否则会被
+	// 下一次开始当存量批次收养、按配置全额跑掉。停止原因记 dailyPlanEntrySkipped,
+	// 原批次原因与判定现场随 detail 带过去,批次行不丢证据。
+	if err := m.terminalizeDailyPlanBatchLocked(
+		key, nil, planBatchStopReasonSkipped, skipReason, now,
+	); err != nil {
 		return err
 	}
 	_, entries, err := m.store.ActiveDailyJobPlan(key)
@@ -441,6 +450,8 @@ func (m *Manager) skipEntryAndChainLocked(
 func (m *Manager) terminalizeDailyPlanBatchLocked(
 	key store.AccountKey,
 	entries []store.DailyJobPlanEntry,
+	reason string,
+	detail string,
 	now time.Time,
 ) error {
 	batch, err := m.store.ActiveSourcingBatch(key)
@@ -451,7 +462,7 @@ func (m *Manager) terminalizeDailyPlanBatchLocked(
 		return nil
 	}
 	if _, err := m.store.StopSourcingBatch(store.StopSourcingBatchRequest{
-		BatchID: batch.BatchID, Reason: planBatchStopReasonAborted, StoppedAt: now,
+		BatchID: batch.BatchID, Reason: reason, Detail: detail, StoppedAt: now,
 	}); err != nil && !errors.Is(err, store.ErrSourcingBatchStateConflict) {
 		return err
 	}
