@@ -47,6 +47,15 @@ const {
     filters.detail,
     'CTX_NOT_READY/pageBroken: 智联筛选面或推荐列表尚未稳定（option_click_exhausted；age/自定义=选中）',
   )
+  // 2026-09-07 甲方裁决:采集中途的任何批次原因同样只跳过该职位,文案同批补齐;
+  // 未知码原样显示,不吞证据。
+  const windowRead = planSkipReasonParts(
+    'batch:windowReadFailed|ELEMENT_UNRESOLVED: 当前推荐列表滚动窗口无法唯一确定',
+  )
+  assert.equal(windowRead.label, '推荐列表窗口读取失败')
+  assert.equal(windowRead.detail, 'ELEMENT_UNRESOLVED: 当前推荐列表滚动窗口无法唯一确定')
+  assert.equal(planSkipReasonParts('batch:targetReadFailed').label, '候选人简历读取失败')
+  assert.deepEqual(planSkipReasonParts('batch:someFutureCode|x'), { label: 'batch:someFutureCode', detail: 'x' })
 }
 
 const customer = {
