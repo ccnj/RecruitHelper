@@ -5151,7 +5151,20 @@ async function ensureBossTabAt(
     throw new PlatformError('CTX_NOT_READY',
       `导航到${what}后 ${RECOMMEND_NAV_WAIT_MS / 1000} 秒内未加载完(status=${latest.status ?? '?'})`, 'afterRecovery', 'pageBroken')
   }
-  return verifiedBossTab(fingerprint)
+  // 标签页报 complete 时页面的 Vue 应用未必挂好,`user$` 这一刻常读不到(2026-09-07 首趟真机:导航到职位管理页后
+  // 第一次读身份 identityUnverified,当日计划把第一个职位整个跳过;3 秒后第二条命令同一页就读到了)。
+  // 身份读不到不是账号不对,是还没就绪:按条件等待封顶 20 秒重读;别的失败(账号不一致等)原样抛。
+  const identityDeadline = Date.now() + READY_WAIT_MS
+  for (;;) {
+    try {
+      return await verifiedBossTab(fingerprint)
+    } catch (error) {
+      const notReady = error instanceof PlatformError && error.code === 'CTX_NOT_READY' && error.reason === 'identityUnverified'
+      if (!notReady || Date.now() >= identityDeadline) throw error
+      ctx.checkpoint()
+      await sleep(500)
+    }
+  }
 }
 
 /** 按 selector(+index)的点击计划:定位、文本核对、命中测试、点后观测全走 domLocateBySelector 一套(支持 `A >>> B`)。 */
