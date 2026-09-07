@@ -18115,6 +18115,13 @@ test('上屏地板:逐字相等与同音错字放行,半截、拼音残留、空
   assert.deepEqual([exact.ok, exact.exact, exact.distance], [true, true, 0], 'nbsp/空白只在规范化里抹平,仍算逐字相等')
   const homophone = typedTextFloor(expected, '您好，看到您的简历很匹配我们的岗位，方便了了吗？期待您的回付。')
   assert.equal(homophone.ok, true, '同音错字相似度高,按裁决照发')
+  assert.equal(TYPED_TEXT_FLOOR.minSimilarity, 0.6, '09-07 甲方裁定:Mac 短文案样本 0.68~0.81,门槛放到 0.6')
+  // 36 字里错 11 处(相似度 0.69):09-07 真机被 0.7 拦在门外的那种,0.6 下放行
+  const mac36 = typedTextFloor('今天下午三点方便电话沟通吗？我们这边可以详细介绍岗位情况和薪资待遇。', '今天下午三点方便电话购通吗？我们这边可以祥细介绍岗位情况和新资待遇。')
+  assert.ok(mac36.ok && mac36.similarity >= 0.6 && mac36.similarity < 0.95, `36 字级同音错字应放行: ${describeTypedTextFloor(mac36)}`)
+  // 相似度 0.5 以下仍是灾难性错乱:一半的字都不对
+  const garbage = typedTextFloor('今天下午三点方便电话沟通吗？我们这边可以详细介绍岗位情况和薪资待遇。', '今天下午三点方便电话沟通吗？一二三四五六七八九十甲乙丙丁戊己庚辛壬癸。')
+  assert.equal(garbage.ok, false, `一半字不对仍拒: ${describeTypedTextFloor(garbage)}`)
   assert.equal(homophone.exact, false)
   assert.ok(homophone.similarity >= TYPED_TEXT_FLOOR.minSimilarity && homophone.distance === 3, describeTypedTextFloor(homophone))
   const dropped = typedTextFloor(expected, '您好，看到您的简历很匹配我们的岗位，方便聊聊吗？期待您的回复')

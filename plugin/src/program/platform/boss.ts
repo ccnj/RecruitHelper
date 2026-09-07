@@ -836,8 +836,12 @@ async function sha256Hex(value: string): Promise<string> {
 // 上屏地板(字数差 + 编辑距离相似度)、点击时编辑器等于刚被接受的回读文本;发后按派发窗口
 // 认行,实发正文随 data.sentText 回脑。下面几个纯函数是这条规则在手侧的全部判定点,单测钉住。
 
-/** 上屏地板的两个数。起步值,Windows / Mac 各跑出数据再标定;它只挡灾难性错乱,挡不了同音错字。 */
-export const TYPED_TEXT_FLOOR = Object.freeze({ maxLengthDiff: 2, minSimilarity: 0.7 })
+/**
+ * 上屏地板的两个数。它只挡灾难性错乱,挡不了同音错字。
+ * 相似度 0.7 是起步值;2026-09-07 Mac 系统拼音六个短文案样本落在 0.68~0.81(越短越吃亏,36 字两次 0.69/0.68
+ * 被拦在门外),甲方裁定放到 0.6——空白、错窗、乱码仍在 0.5 以下。Windows TIP 按词上屏应接近 1,再有数据再调。
+ */
+export const TYPED_TEXT_FLOOR = Object.freeze({ maxLengthDiff: 2, minSimilarity: 0.6 })
 
 export interface TypedTextFloorResult {
   ok: boolean
