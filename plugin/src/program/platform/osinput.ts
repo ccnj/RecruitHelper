@@ -1098,6 +1098,14 @@ export interface TypePlayResult {
    * 输入法挑、我方不可控;Windows 上 TIP 说了算,这里就会有一句。
    */
   words?: string
+  /**
+   * 结构化对账(2026-09-07 实发正文即事实):驱动了上屏词的平台(Windows TIP)标 wordsDriven,
+   * 并给出计划词数与 TIP 回报的上屏词数。回报少于计划即键落到了别的输入法——这是
+   * 「当前输入法不是我们的 TIP」的直接探测,发送前硬拒;不驱动的平台(macOS)三者缺席。
+   */
+  wordsDriven?: boolean
+  wordsPlanned?: number
+  wordsCommitted?: number
 }
 
 /**

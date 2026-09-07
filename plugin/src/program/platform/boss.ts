@@ -20,7 +20,7 @@ import { composeClearKeys, isHandServiceDown, osClickContractData, osProbeContra
 import { planType } from '../osengine/plan'
 import { osScrollContractData, runOsScroll } from './osscroll'
 import type { OsScrollResult, ScrollTarget } from './osscroll'
-import type { ClickObservation, ClickPlan, RetreatPlan } from './osinput'
+import type { ClickObservation, ClickPlan, RetreatPlan, TypePlayResult } from './osinput'
 import { PlatformError } from './types'
 import { BOSS_CHAT_URL, BOSS_MATCH, BOSS_ORIGIN, BOSS_PLATFORM, bossSite } from './bossSite'
 import type { InjectOptions } from './inject'
@@ -827,6 +827,112 @@ function jsonBytes(value: unknown): number {
 async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+
+// ── 实发正文即事实(2026-09-07 甲方裁决,AGENTS 防护成本预算第 9 条同名段) ──────────────
+//
+// 发送前「回读逐字等于文案」的拒绝解除,换成三道确定性判据:TIP 活动核对(Windows)、
+// 上屏地板(字数差 + 编辑距离相似度)、点击时编辑器等于刚被接受的回读文本;发后按派发窗口
+// 认行,实发正文随 data.sentText 回脑。下面几个纯函数是这条规则在手侧的全部判定点,单测钉住。
+
+/** 上屏地板的两个数。起步值,Windows / Mac 各跑出数据再标定;它只挡灾难性错乱,挡不了同音错字。 */
+export const TYPED_TEXT_FLOOR = Object.freeze({ maxLengthDiff: 2, minSimilarity: 0.7 })
+
+export interface TypedTextFloorResult {
+  ok: boolean
+  exact: boolean
+  expectedLength: number
+  actualLength: number
+  lengthDiff: number
+  distance: number
+  similarity: number
+}
+
+/** 字元级编辑距离(按 code point,不按 UTF-16 单元)。文案至多几百字,O(n·m) 足够。 */
+export function levenshteinChars(a: readonly string[], b: readonly string[]): number {
+  if (a.length === 0) return b.length
+  if (b.length === 0) return a.length
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i)
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i]
+    for (let j = 1; j <= b.length; j += 1) {
+      current.push(Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1)))
+    }
+    previous = current
+  }
+  return previous[b.length]!
+}
+
+/**
+ * 上屏地板:回读与目标文案(清洗后)规范化后比,字数差 ≤ maxLengthDiff 且相似度 ≥ minSimilarity 才放行。
+ * 字数差挡「只打了一半」与拼音字母残留(它们的相似度可能还不低);相似度挡空白、错窗、乱码。
+ * 同音错字天生相似度高(09-03 真机一例 0.90),按裁决照发。
+ */
+export function typedTextFloor(expected: string, actual: string): TypedTextFloorResult {
+  const target = Array.from(normalizeBossMessageText(expected))
+  const got = Array.from(normalizeBossMessageText(actual))
+  const exact = target.length === got.length && target.every((ch, i) => ch === got[i])
+  const distance = exact ? 0 : levenshteinChars(target, got)
+  const similarity = 1 - distance / Math.max(target.length, got.length, 1)
+  const lengthDiff = Math.abs(target.length - got.length)
+  return {
+    ok: exact || (got.length > 0 && lengthDiff <= TYPED_TEXT_FLOOR.maxLengthDiff && similarity >= TYPED_TEXT_FLOOR.minSimilarity),
+    exact, expectedLength: target.length, actualLength: got.length, lengthDiff, distance, similarity,
+  }
+}
+
+/** 地板判定的留痕文本:只有数字,不带正文(候选人称呼可能在文案里)。 */
+export function describeTypedTextFloor(result: TypedTextFloorResult): string {
+  return `期望 ${result.expectedLength} 字,实得 ${result.actualLength} 字,字数差 ${result.lengthDiff},编辑距离 ${result.distance},相似度 ${result.similarity.toFixed(2)}`
+}
+
+/**
+ * TIP 活动核对(Windows):手服务驱动了上屏词却回报少于计划,说明键落到了系统输入法——
+ * 屏上是微软拼音的首选词,与「TIP 装了但选错」在现场长得一样,发送前必须拒。
+ * 不驱动上屏词的平台(macOS)没有这道核对,返回 null。
+ */
+export function tipWordsShortfall(
+  played: Pick<TypePlayResult, 'wordsDriven' | 'wordsPlanned' | 'wordsCommitted' | 'words'>,
+): string | null {
+  if (!played.wordsDriven) return null
+  const planned = played.wordsPlanned ?? 0
+  const committed = played.wordsCommitted ?? 0
+  if (planned <= 0 || committed >= planned) return null
+  return `TIP 只上屏了 ${committed}/${planned} 词,当前输入法可能不是我们的 TIP${played.words ? `(${played.words})` : ''}`
+}
+
+/** 清洗摘除的字元只按 kind 计数留痕,不记字元本身(可能是称呼里的生僻字)。 */
+export function summarizeDroppedKinds(dropped: readonly { kind: string }[]): string {
+  const counts = new Map<string, number>()
+  for (const item of dropped) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1)
+  return Array.from(counts, ([kind, n]) => `${kind} ${n}`).join(',')
+}
+
+export interface SentBossRow {
+  row: BossRawMessage
+  /** 实发正文(已规范化,与 hashInput 同源)。 */
+  text: string
+  hashInput: string
+}
+
+/**
+ * 发后认行(《协议规格-v1》§9.4.1 同款口径的手侧即时版):基线之外、方向 out、投影为文本、
+ * 服务端已确认(status 1 已送达 / 2 已读;乐观本地行与在途行不算)、时间不早于派发减容差的行里
+ * 取 mid 最大者即本次;正文与 hash 以该行为准。零匹配返回 null,由调用方按 possible 交验证读。
+ */
+export function pickSentBossRow(
+  rows: readonly BossRawMessage[], baselineMids: ReadonlySet<string>, dispatchedAt: number,
+): SentBossRow | null {
+  let best: SentBossRow | null = null
+  for (const row of rows) {
+    if (baselineMids.has(row.mid) || row.direction !== 'out' || !(row.status === 1 || row.status === 2)) continue
+    if (row.time !== null && row.time < dispatchedAt - SEND_CLOCK_TOLERANCE_MS) continue
+    const projected = projectBossMessage(row)
+    if (projected.kind !== 'text' || !projected.text) continue
+    if (!best || Number(row.mid) > Number(best.row.mid)) best = { row, text: projected.text, hashInput: projected.hashInput }
+  }
+  return best
 }
 
 /** 与智联、与协议 §4.5 同一套规范化:NFC、nbsp、空白串折叠、trim。 */
@@ -2475,12 +2581,19 @@ async function sendBossMessage(
   ctx.checkpoint()
   let composed
   try {
-    composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0))
+    composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0), { sanitize: true })
   } catch (error) {
     throw new PlatformError('ELEMENT_UNRESOLVED', `排版器自身异常:${describeError(error).slice(0, 300)}`, 'afterRecovery')
   }
   if (!composed.ok) {
     throw new PlatformError('GUARD_FAILED', `文案排不出合格键序(${composed.tries} 次):${composed.reasons.join(';').slice(0, 300)}`, 'afterRecovery')
+  }
+  // 实发正文即事实(2026-09-07):打不出的字元由清洗档摘掉后照打,目标文案从此是清洗后的。
+  const targetText = composed.text
+  if (composed.dropped.length > 0) {
+    const note = `清洗摘掉 ${composed.dropped.length} 个打不出的字元(${summarizeDroppedKinds(composed.dropped)})`
+    trace.push(note)
+    reportHandLog('warn', 'typedTextSanitized', `chat.sendMessage ${note}`)
   }
   // 从这里起输入框会被写入。任何失败都留着草稿,所以都是 manualOnly:人来清。
   let played
@@ -2491,16 +2604,25 @@ async function sendBossMessage(
     throw new PlatformError('ELEMENT_UNRESOLVED', `打字半途失败,输入框可能残留草稿:${describeError(error).slice(0, 300)}`, 'afterRecovery')
   }
   trace.push(`发了 ${played.keys} 次按键${played.words ? ` | ${played.words}` : ''}`)
+  // TIP 活动核对(Windows 硬闸):上屏词数少于计划即键落到了别的输入法,不发。
+  const shortfall = tipWordsShortfall(played)
+  if (shortfall) throw new PlatformError('GUARD_FAILED', `${shortfall};已停在草稿,不发`, 'afterRecovery')
   const typed = await runInPage(BOSS_DOM, tabId, mainReadComposer, [COMPOSER_ID])
-  // 两边都过规范化再比:contenteditable 会把连续/尾部空格渲染成 nbsp,逐字比较会把
-  // 这类假阴性判成"上屏不同"、留草稿转人工(出口审查 O3)。
-  if (normalizeBossMessageText(typed.text) !== normalizeBossMessageText(typedText)) {
-    // 上屏的不是这句话,不发:候选人看到的必须是脑写的那句。草稿留给人清。
-    throw new PlatformError('GUARD_FAILED',
-      `上屏文本与文案不同,已停在草稿:期望 ${typedText.length} 字,实得「${typed.text.slice(0, 200)}」`, 'afterRecovery')
+  // 上屏地板(实发正文即事实,2026-09-07):不再要求逐字相等,只挡灾难性错乱;差异在地板之内照发,
+  // 只留数字不留正文。两边都过规范化再比:contenteditable 会把连续/尾部空格渲染成 nbsp(出口审查 O3)。
+  const floor = typedTextFloor(targetText, typed.text)
+  if (!floor.ok) {
+    throw new PlatformError('GUARD_FAILED', `上屏文本与文案差得太远,已停在草稿:${describeTypedTextFloor(floor)}`, 'afterRecovery')
   }
+  if (!floor.exact) {
+    const note = `上屏与文案有差,地板之内照发:${describeTypedTextFloor(floor)}`
+    trace.push(note)
+    reportHandLog('warn', 'typedTextDrift', `chat.sendMessage ${note}`)
+  }
+  // 点击时编辑器必须仍逐字等于刚被接受的回读文本——防的是回读到点击之间有人改过。
+  const acceptedText = typed.text
   // 最后一道闸之后立即唯一一次点击发送。
-  const plan = await sendButtonClickPlan(tabId, args.conversationRef, typedText)
+  const plan = await sendButtonClickPlan(tabId, args.conversationRef, acceptedText)
   ctx.checkpoint()
   await verifiedBossChatTab(fingerprint)
   if (Date.now() > ctx.irreversibleNotAfterMs) {
@@ -2527,29 +2649,26 @@ async function sendBossMessage(
       if (after.status === 'ready') {
         // status 1=已送达未读 / 2=已读(平台事实 §二,真机已见)才是服务端确认;乐观渲染行与
         // 在途行不算——§4.5 明文"乐观渲染或只有平台本地临时 ID 的缓存记录都不算"。
-        const fresh = after.rows.filter((row) => !baselineMids.has(row.mid) && row.direction === 'out' &&
-          (row.status === 1 || row.status === 2))
-        const hits: Array<{ mid: string; time: number | null }> = []
-        for (const row of fresh) {
-          const projected = projectBossMessage(row)
-          if (projected.kind !== 'text') continue
-          if (await sha256Hex(projected.hashInput) !== contentHash) continue
-          if (row.time !== null && row.time < dispatchedAt - SEND_CLOCK_TOLERANCE_MS) continue
-          hits.push({ mid: row.mid, time: row.time })
-        }
-        lastSeen = `新行 ${fresh.length},命中 ${hits.length}`
-        if (hits.length >= 1) {
-          // 同文多条取最新一条即本次(2026-07-29 裁决口径)。
-          const hit = hits.reduce((best, next) => (Number(next.mid) > Number(best.mid) ? next : best))
+        // 按窗口认行(实发正文即事实):基线之外最新一条服务端确认的我方文本行即本次,正文与 hash 以它为准。
+        const hit = pickSentBossRow(after.rows, baselineMids, dispatchedAt)
+        lastSeen = `基线外新行 ${after.rows.filter((row) => !baselineMids.has(row.mid)).length},命中 ${hit ? 1 : 0}`
+        if (hit) {
+          const sentHash = await sha256Hex(hit.hashInput)
+          if (sentHash !== contentHash) {
+            const note = `实发正文与计划不同:计划 ${Array.from(normalizedText).length} 字,实发 ${Array.from(hit.text).length} 字`
+            trace.push(note)
+            reportHandLog('warn', 'sentTextDiffers', `chat.sendMessage ${note}`)
+          }
           await verifiedBossChatTab(fingerprint)
           ctx.progress('已从当前消息列表确认新已发文本', 100)
           console.info('[RecruitHelper] boss_send_message', trace.join(' | '))
           return {
             conversationRef: args.conversationRef,
-            contentHash,
-            sourceKey: await sha256Hex(`source-v1|${hit.mid}`),
+            contentHash: sentHash,
+            sentText: hit.text,
+            sourceKey: await sha256Hex(`source-v1|${hit.row.mid}`),
             observedAt: Date.now(),
-            ...(hit.time !== null && hit.time > 0 ? { tsApprox: hit.time } : {}),
+            ...(hit.row.time !== null && hit.row.time > 0 ? { tsApprox: hit.row.time } : {}),
           }
         }
       } else {
@@ -5889,11 +6008,17 @@ async function sendBossGreeting(
     ctx.checkpoint()
     let composed
     try {
-      composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0))
+      composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0), { sanitize: true })
     } catch (error) {
       throw greetingAfterFirstClick(`排版器自身异常:${describeError(error).slice(0, 200)}`)
     }
     if (!composed.ok) throw greetingAfterFirstClick(`文案排不出合格键序(${composed.tries} 次):${composed.reasons.join(';').slice(0, 200)}`)
+    const targetText = composed.text
+    if (composed.dropped.length > 0) {
+      const note = `清洗摘掉 ${composed.dropped.length} 个打不出的字元(${summarizeDroppedKinds(composed.dropped)})`
+      trace.push(note)
+      reportHandLog('warn', 'typedTextSanitized', `chat.sendGreeting ${note}`)
+    }
     let played
     try {
       played = await playTypePlan(composed.plan)
@@ -5901,10 +6026,17 @@ async function sendBossGreeting(
       throw greetingAfterFirstClick(isHandServiceDown(error) ? '手服务不可用,打字未开始' : `打字半途失败,输入框可能残留草稿:${describeError(error).slice(0, 200)}`)
     }
     trace.push(`发了 ${played.keys} 次按键${played.words ? ` | ${played.words}` : ''}`)
+    const shortfall = tipWordsShortfall(played)
+    if (shortfall) throw greetingAfterFirstClick(`${shortfall};已停在草稿,不发`)
     const typed = await readComposer()
-    if (normalizeBossMessageText(typed.text) !== normalizeBossMessageText(typedText)) {
-      throw greetingAfterFirstClick(`上屏文本与文案不同,已停在草稿:期望 ${typedText.length} 字,实得「${typed.text.slice(0, 200)}」`)
+    const floor = typedTextFloor(targetText, typed.text)
+    if (!floor.ok) throw greetingAfterFirstClick(`上屏文本与文案差得太远,已停在草稿:${describeTypedTextFloor(floor)}`)
+    if (!floor.exact) {
+      const note = `上屏与文案有差,地板之内照发:${describeTypedTextFloor(floor)}`
+      trace.push(note)
+      reportHandLog('warn', 'typedTextDrift', `chat.sendGreeting ${note}`)
     }
+    const acceptedText = typed.text
     ctx.progress('招呼正文已上屏,准备发送', 70)
     // 最后一道闸之后唯一一次点击发送:快捷窗仍绑定目标(MAIN)+ 落点在唯一发送钮上且编辑器文本等于文案(isolated)。
     const button = await runInPage(BOSS_DOM, tabId, domReadBossSendButton, [QUICK_CHAT_SEL.sendButton])
@@ -5918,7 +6050,7 @@ async function sendBossGreeting(
         if (!(bound.status === 'ready' && bound.uid === geekId && bound.friendSource === geekSource)) {
           return { onTarget: false, found: `快捷窗不再绑定目标(${bound.status})` }
         }
-        return runInPage(BOSS_DOM, tabId, domBossQuickSendGate, [QUICK_CHAT_SEL.sendButton, x, y, composerId, typedText])
+        return runInPage(BOSS_DOM, tabId, domBossQuickSendGate, [QUICK_CHAT_SEL.sendButton, x, y, composerId, acceptedText])
       },
       observe: async (): Promise<ClickObservation> => {
         const after = await readComposer()
@@ -5943,17 +6075,15 @@ async function sendBossGreeting(
       try {
         const after = await readBossQuickChat(tabId)
         if (after.status === 'ready' && after.uid === geekId && after.friendSource === geekSource) {
-          const fresh = after.rows.filter((row) => !baselineMids.has(row.mid) && row.direction === 'out' && (row.status === 1 || row.status === 2))
-          let hits = 0
-          for (const row of fresh) {
-            const projected = projectBossMessage(row)
-            if (projected.kind !== 'text') continue
-            if (await sha256Hex(projected.hashInput) !== contentHash) continue
-            if (row.time !== null && row.time < dispatchedAt - SEND_CLOCK_TOLERANCE_MS) continue
-            hits += 1
-          }
-          lastSeen = `新行 ${after.rows.filter((row) => !baselineMids.has(row.mid)).length},命中 ${hits}`
-          if (hits >= 1) {
+          const hit = pickSentBossRow(after.rows, baselineMids, dispatchedAt)
+          lastSeen = `基线外新行 ${after.rows.filter((row) => !baselineMids.has(row.mid)).length},命中 ${hit ? 1 : 0}`
+          if (hit) {
+            const sentHash = await sha256Hex(hit.hashInput)
+            if (sentHash !== contentHash) {
+              const note = `实发正文与计划不同:计划 ${Array.from(normalizedText).length} 字,实发 ${Array.from(hit.text).length} 字`
+              trace.push(note)
+              reportHandLog('warn', 'sentTextDiffers', `chat.sendGreeting ${note}`)
+            }
             trace.push('正文已可见')
             await closeBossQuickChatBestEffort(tabId, ctx, '发送后收窗')
             await parkBossCursor(tabId, ctx, '发送后')
@@ -5964,7 +6094,8 @@ async function sendBossGreeting(
               platformUserRef: args.platformUserRef,
               positionRef: args.positionRef,
               conversationRef,
-              contentHash,
+              contentHash: sentHash,
+              sentText: hit.text,
               observedAt: Date.now(),
             }
           }
@@ -6061,6 +6192,14 @@ export const bossTestHooks = Object.freeze({
   mainReadBossCurrentConversation,
   mainReadBossThread,
   // 第二刀(2026-09-05):推荐页采集 + 打招呼。
+  // 实发正文即事实(2026-09-07):地板、TIP 核对、认行三个纯判定点。
+  typedTextFloor,
+  levenshteinChars,
+  describeTypedTextFloor,
+  tipWordsShortfall,
+  summarizeDroppedKinds,
+  pickSentBossRow,
+  TYPED_TEXT_FLOOR,
   parseBossGeekId,
   bossFilterGroupName,
   bossJobItemName,
