@@ -5695,8 +5695,13 @@ async function readBossSourcingTargetResume(
 
 // ── chat.sendGreeting(方案一:首击 → 继续沟通 → 快捷窗打字 → 发送 → 正证 → 关窗) ──
 
-/** 首击已确认之后的一切失败:关系已建立、正文未发出,如实报 possible 交脑验证读(出口 §二 部分失败形态)。 */
+/**
+ * 首击已确认之后的一切失败:关系已建立、正文未发出,如实报 possible 交脑验证读(出口 §二 部分失败形态)。
+ * 原因同时走手侧日志:脑收到 possible 后由验证读补记 ok,result 里的原文随之被覆盖,账本只剩「result.sideEffect=possible」
+ * (2026-09-07 第四趟真机:两条招呼正文没发,原因得靠离线重放排版器才找回来——排版器拒了「」)。留痕不能只靠 result。
+ */
 function greetingAfterFirstClick(message: string): PlatformError {
+  reportHandLog('warn', 'greetingTextNotSent', `BOSS 招呼:关系已建立,正文未发出——${message}`.slice(0, 600))
   return new PlatformError('POSTCONDITION_UNCONFIRMED', `关系已建立,正文未发出:${message}`, 'manualOnly', undefined, 'possible')
 }
 
