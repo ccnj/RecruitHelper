@@ -727,7 +727,10 @@ func (s *Store) ApplyResumeBusinessClassification(turnID string, classifiedAt ti
 			if !errors.Is(err, ErrDialogueTurnBinding) {
 				return err
 			}
-			return markDialogueTurnManualTx(tx, &out, "inputBoundaryChanged", classifiedAt)
+			// 简历业务事件轮什么都还没发:边界失配按 2026-08-02 裁决作废旧轮,
+			// 不冻结候选人(2026-09-08 补齐,此前这里直接标 inputBoundaryChanged
+			// 并冻结,是漏改的角落)。
+			return settleDialogueTurnBoundaryMismatchTx(tx, &out, classifiedAt)
 		}
 		var profile CandidateProfile
 		if err := tx.First(&profile, "profile_id = ?", out.ProfileID).Error; err != nil {
@@ -1534,7 +1537,10 @@ func (s *Store) RecoverInterruptedAIInvocations(at time.Time) (int, error) {
 				return bindingErr
 			}
 			if bindingErr != nil {
-				if err := markDialogueTurnManualTx(tx, &turn, "inputBoundaryChanged", at); err != nil {
+				// 崩溃前只预留了意向调用、什么都没发的轮:边界失配按 2026-08-02
+				// 裁决作废,不冻结候选人(2026-09-08 补齐,此前直接标
+				// inputBoundaryChanged 并冻结)。
+				if err := settleDialogueTurnBoundaryMismatchTx(tx, &turn, at); err != nil {
 					return err
 				}
 				continue
