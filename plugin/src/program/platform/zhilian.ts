@@ -4521,14 +4521,17 @@ export async function ensureZhilianIM(
 ): Promise<{ ready: boolean; loginState: 'in' | 'out' | 'unknown'; createdTab: boolean }> {
   ctx.checkpoint()
   await ctx.progress('选择智联 canonical 标签页', 5)
-  const sourcingTabs = await activeSourcingTabs()
-  if (sourcingTabs.length > 1) {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联推荐页标签无法唯一确定', 'manualOnly')
-  }
-  // 推荐→IM 是同一产品工作页的阶段交接。即使浏览器里还留有健康 IM 页，
-  // 也应优先把本轮唯一推荐页导航到 IM；只有没有推荐页时才走 canonical
-  // 兜底复用其他智联页面。
-  let tab = sourcingTabs[0] ?? await canonicalZhilianTab()
+  // 选标签(2026-09-08 甲方裁决:无论如何不转人工,优先工作标签,实在不行把真人的切走):
+  // 1. 已有健康的沟通页标签就直接用它。回复巡检轮每轮起手都派本原语,稳态下这一步
+  //    必须是空操作,不得因为真人另开了一张推荐页就去劫持它;
+  // 2. 没有,才拿推荐页标签导航过去——采集批次收口后的工作页就停在这里。多于一张时
+  //    挑最近在用的那张,不再因歧义转人工:选错时被切走的是真人开的页,甲方明示可接受;
+  // 3. 再没有,拿任意智联标签导航,或新开一张。
+  // 此前的写法反过来:只要有推荐页就优先导航它、两张推荐页直接 manualOnly。
+  const canonical = await canonicalZhilianTab()
+  const canonicalIsHealthyIM = canonical !== null && canonical.id !== undefined &&
+    pageKindFromURL(canonical.url) === 'im' && await contentScriptHealthy(canonical.id)
+  let tab = canonicalIsHealthyIM ? canonical : (pickSourcingTab(await activeSourcingTabs()) ?? canonical)
   let createdTab = false
   if (!tab) {
     tab = await chrome.tabs.create({ url: ZHILIAN_IM_URL, active: false })
@@ -4564,6 +4567,22 @@ export async function ensureZhilianIM(
     loginState: probe.loginState,
     createdTab,
   }
+}
+
+// pickSourcingTab 在多张推荐页里挑一张交接到沟通页:正在前台的优先,其次最近访问的,
+// 最后按 id 定序。只挑不拒——歧义时宁可切走真人的一张,也不让巡检因此停摆。
+function pickSourcingTab(tabs: readonly chrome.tabs.Tab[]): chrome.tabs.Tab | null {
+  if (tabs.length === 0) return null
+  const sorted = [...tabs].sort((a, b) => {
+    const aActive = a.active ? 1 : 0
+    const bActive = b.active ? 1 : 0
+    if (aActive !== bActive) return bActive - aActive
+    const aSeen = a.lastAccessed ?? 0
+    const bSeen = b.lastAccessed ?? 0
+    if (aSeen !== bSeen) return bSeen - aSeen
+    return (a.id ?? 0) - (b.id ?? 0)
+  })
+  return sorted[0] ?? null
 }
 
 // 只使用当前真机已经确认的公开控件：职位触发器的可见标题与标准 checkbox.checked。
