@@ -8,6 +8,9 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -176,6 +179,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/dev/report/settings", h(a.devReportSettings))
 	mux.HandleFunc("POST /admin/dev/report/settings", h(a.setDevReportSettings))
 	mux.HandleFunc("GET /admin/dev/log-report/settings", h(a.devLogReportSettings))
+	mux.HandleFunc("GET /admin/statusbar/settings", h(a.statusBarSettings))
+	mux.HandleFunc("POST /admin/statusbar/settings", h(a.setStatusBarSettings))
 	mux.HandleFunc("POST /admin/dev/chat-report/run", h(a.devChatReportRun))
 	mux.HandleFunc("GET /admin/job-config/source", h(a.jobConfigSourceConfig))
 	mux.HandleFunc("GET /admin/job-config/backend-jobs", h(a.backendJobs))
@@ -417,8 +422,15 @@ func (a *API) postCmd(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"msgId": msgID})
 }
 
-func (a *API) ledger(w http.ResponseWriter, _ *http.Request) {
-	recs, err := a.st.RecentCmds(50)
+// ledger 回最近的命令记录。
+//
+// `limit`(1～50,默认 50)与 `brief=1` 是给屏幕顶层状态栏用的(2026-09-08):
+// 它每三秒轮询一次,而整条响应默认带 50 条的完整 args/guards/resultBody,
+// readList 一条结果体就几百 KB。brief 只拿掉这三个大字段,其余扫读字段
+// (原语名、目标、状态、时刻)原样;诊断台账本页不传参,行为不变。
+func (a *API) ledger(w http.ResponseWriter, r *http.Request) {
+	limit, brief := ledgerQuery(r.URL.Query())
+	recs, err := a.st.RecentCmds(limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -453,7 +465,7 @@ func (a *API) ledger(w http.ResponseWriter, _ *http.Request) {
 	out := make([]view, 0, len(recs))
 	for _, r := range recs {
 		facts := argsFacts(r.Args)
-		out = append(out, view{
+		row := view{
 			MsgID: r.MsgID, Name: r.Name, Class: r.Class, Status: string(r.Status),
 			Attempt: r.Attempt, ErrorCode: r.ErrorCode,
 
@@ -463,10 +475,31 @@ func (a *API) ledger(w http.ResponseWriter, _ *http.Request) {
 			HandID: r.HandID, IdemKey: r.IdemKey, IntentID: r.IntentID,
 			Platform: r.Platform, AccountRef: r.AccountRef,
 			SideEffect: r.SideEffect, SuspectReason: r.SuspectReason, DeadlineMs: r.DeadlineMs,
-			Args: r.Args, Guards: r.Guards, ResultBody: r.ResultBody,
-		})
+		}
+		if !brief {
+			row.Args, row.Guards, row.ResultBody = r.Args, r.Guards, r.ResultBody
+		}
+		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ledger": out})
+}
+
+const ledgerMaxLimit = 50
+
+// ledgerQuery 解析 limit 与 brief。非法或缺省一律回落默认(50 条、完整字段):
+// 这是诊断读取,不值得为一个坏参数报错。
+func ledgerQuery(q url.Values) (limit int, brief bool) {
+	limit = ledgerMaxLimit
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 1 && n <= ledgerMaxLimit {
+			limit = n
+		}
+	}
+	switch strings.TrimSpace(q.Get("brief")) {
+	case "1", "true":
+		brief = true
+	}
+	return limit, brief
 }
 
 // writeError:诊断台错误响应统一收口——固定人话进 error,底层原因进 detail
