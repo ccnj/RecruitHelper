@@ -33,6 +33,25 @@ const {
   telemetryReadAll,
   telemetryClear,
   telemetryParseLedger,
+  shouldRecord,
+  siteOfHost,
+  hostOf,
+  stripHeaders,
+  sensitiveHeader,
+  describeBody,
+  captureActive,
+  CaptureSession,
+  CAPTURE_DURATION_MS,
+  STRIPPED_VALUE,
+  BODY_KEEP_CHARS,
+  HEADER_VALUE_KEEP_CHARS,
+  TELEMETRY_KIND_REQUEST,
+  TELEMETRY_MAX_REQUEST_CHUNKS,
+  netCaptureSites,
+  tabHost,
+  noteTabUrl,
+  forgetTabHost,
+  resetTabHostsForTest,
   BOSS_INPUT_COUNTERS,
   BOSS_REPORT_EVERY,
   classifyBossEntry,
@@ -18303,6 +18322,196 @@ test('智联邀面参数展开:命令只带开始与方式,线上由手加 30 �
   assert.deepEqual(zhilianInterviewDetails({ startsAt, method: 'onsite' }),
     { startsAt, method: 'onsite' },
     '现场:平台无时长控件,结束缺席、不合成')
+})
+
+
+// ---- 请求录制 ----
+
+test('请求录制上限:只记平台站点发出的请求,别的网站任何形态都不记(2026-09-08 甲方要求)', () => {
+  assert.deepEqual(netCaptureSites.map((s) => s.id), ['boss', 'zhilian'], '上限就是这两家,扩要在表里明写')
+  const rec = (facts, tabHost) => shouldRecord(facts, tabHost, netCaptureSites)
+
+  // 判据一:发起方是平台,目的地不限。
+  assert.equal(rec({ url: 'https://apm-fe.zhipin.com/wapi/zpApm/actionLog/x', type: 'xmlhttprequest', initiator: 'https://www.zhipin.com', tabId: 5 }, 'www.zhipin.com'), true)
+  assert.equal(rec({ url: 'ws://127.0.0.1:9222/', type: 'websocket', initiator: 'https://www.zhipin.com', tabId: 5 }, 'www.zhipin.com'), true, '平台页向本机端口的探测正是要看的')
+  assert.equal(rec({ url: 'https://hm.baidu.com/hm.js', type: 'script', initiator: 'https://login.zhipin.com', tabId: -1 }, null), true, '子域也是平台;service worker 没有标签页也记')
+  assert.equal(rec({ url: 'https://rd6.zhaopin.com/api/x', type: 'xmlhttprequest', initiator: 'https://rd6.zhaopin.com', tabId: 3 }, 'rd6.zhaopin.com'), true)
+
+  // 判据二:主文档导航只看目的地,所在标签页不作数。
+  assert.equal(rec({ url: 'https://www.zhipin.com/web/chat/index', type: 'main_frame', tabId: 5 }, 'www.google.com'), true)
+  assert.equal(rec({ url: 'https://www.google.com/', type: 'main_frame', tabId: 5 }, 'www.zhipin.com'), false, '平台标签页地址栏敲别的网址,那一跳不记')
+
+  // 判据三:平台标签页里第三方 iframe 发的。
+  assert.equal(rec({ url: 'https://turing.captcha.qcloud.com/cap', type: 'xmlhttprequest', initiator: 'https://turing.captcha.qcloud.com', tabId: 5 }, 'www.zhipin.com'), true)
+
+  // 一律不记。
+  assert.equal(rec({ url: 'https://www.zhipin.com/favicon.ico', type: 'image', initiator: 'https://www.google.com', tabId: 8 }, 'www.google.com'), false, '别的网站访问平台资源不记:目的地不是判据')
+  assert.equal(rec({ url: 'ws://127.0.0.1:17872/', type: 'websocket', initiator: 'chrome-extension://abcdefghijklmnop', tabId: -1 }, null), false, '插件自己连脑不记')
+  assert.equal(rec({ url: 'https://api.example.com/', type: 'xmlhttprequest', initiator: 'null', tabId: 9 }, 'www.example.com'), false, '不透明源不记')
+  assert.equal(rec({ url: 'https://api.example.com/', type: 'xmlhttprequest', tabId: 9 }, null), false, '什么都没有不记')
+  assert.equal(rec({ url: 'https://evilzhipin.com/x', type: 'script', initiator: 'https://evilzhipin.com', tabId: 9 }, 'evilzhipin.com'), false, '后缀以点分界,同尾不同域不算')
+  assert.equal(rec({ url: 'https://x.zhipin.com.evil.com/', type: 'script', initiator: 'https://x.zhipin.com.evil.com', tabId: 9 }, 'x.zhipin.com.evil.com'), false)
+
+  assert.equal(siteOfHost('www.zhipin.com', netCaptureSites)?.id, 'boss')
+  assert.equal(siteOfHost('zhaopin.com', netCaptureSites)?.id, 'zhilian')
+  assert.equal(siteOfHost(null, netCaptureSites), null)
+  assert.equal(hostOf('https://WWW.Zhipin.com/a?b'), 'www.zhipin.com')
+  assert.equal(hostOf('null'), null)
+  assert.equal(hostOf('about:blank'), null)
+  assert.equal(hostOf(undefined), null)
+})
+
+test('请求录制:凭据头剥值留名,长值截断,二进制值不带,没有头不造空数组', () => {
+  for (const n of ['Cookie', 'set-cookie', 'Authorization', 'Proxy-Authorization', 'X-Zp-Token', 'x-csrf-token', 'X-Session-Id', 'zp_auth']) {
+    assert.equal(sensitiveHeader(n), true, `${n} 应当算凭据`)
+  }
+  for (const n of ['Accept', 'Content-Type', 'User-Agent', 'Referer', 'traceparent', 'x-requested-with']) {
+    assert.equal(sensitiveHeader(n), false, `${n} 不该被剥`)
+  }
+  const long = 'v'.repeat(HEADER_VALUE_KEEP_CHARS + 10)
+  assert.deepEqual(stripHeaders([
+    { name: 'Cookie', value: 'a=b' },
+    { name: 'Accept', value: '*/*' },
+    { name: 'Link', value: long },
+    { name: 'X-Bin', binaryValue: new ArrayBuffer(2) },
+    { name: 'X-Empty' },
+  ]), [
+    { name: 'Cookie', value: STRIPPED_VALUE },
+    { name: 'Accept', value: '*/*' },
+    { name: 'Link', value: 'v'.repeat(HEADER_VALUE_KEEP_CHARS) },
+    { name: 'X-Bin', value: '[二进制]' },
+    { name: 'X-Empty', value: '' },
+  ])
+  assert.equal(stripHeaders(undefined), undefined)
+})
+
+test('请求录制:请求体摘要——表单原样、raw 解 utf-8 记总字节、超长截断、文件只记名、空即缺席', () => {
+  const enc = new TextEncoder()
+  const json = '{"a":"中文"}'
+  assert.deepEqual(describeBody({ raw: [{ bytes: enc.encode(json).buffer }] }), { bytes: enc.encode(json).byteLength, text: json })
+  assert.deepEqual(describeBody({ formData: { content: ['{"k":1}'], x: ['1', '2'] } }), { form: { content: ['{"k":1}'], x: ['1', '2'] } })
+  assert.deepEqual(describeBody({ raw: [{ file: '/tmp/a.png' }] }), { files: ['/tmp/a.png'] })
+  const long = 'x'.repeat(BODY_KEEP_CHARS + 5)
+  const cut = describeBody({ raw: [{ bytes: enc.encode(long).buffer }] })
+  assert.equal(cut.text.length, BODY_KEEP_CHARS)
+  assert.equal(cut.truncated, true)
+  assert.equal(cut.bytes, BODY_KEEP_CHARS + 5)
+  // 多段 raw 拼起来解,别按段截断。
+  const two = describeBody({ raw: [{ bytes: enc.encode('ab').buffer }, { bytes: enc.encode('cd').buffer }] })
+  assert.deepEqual(two, { bytes: 4, text: 'abcd' })
+  assert.deepEqual(describeBody({ error: 'Unknown error.' }), { error: 'Unknown error.' })
+  assert.equal(describeBody(null), undefined)
+  assert.equal(describeBody(undefined), undefined)
+  assert.equal(describeBody({}), undefined)
+  assert.equal(describeBody({ raw: [] }), undefined)
+})
+
+test('请求录制:四事件合成一条,重定向同 id 记跳,错误记码,未知 id 忽略,结束时在途按 unfinished 落盘', async () => {
+  const store = memoryWitnessStorage()
+  const timers = []
+  const s = new CaptureSession({ store, flushAtCount: 100, flushAfterMs: 1000, schedule: (fn) => timers.push(fn) })
+
+  s.begin({ requestId: '1', url: 'https://www.zhipin.com/wapi/a', method: 'POST', type: 'xmlhttprequest', initiator: 'https://www.zhipin.com', tabId: 5, frameId: 0, timeStamp: 1000, requestBody: { formData: { content: ['{}'] } } }, 'www.zhipin.com')
+  s.sendHeaders({ requestId: '1', timeStamp: 1001, requestHeaders: [{ name: 'Cookie', value: 'a=b' }, { name: 'Accept', value: '*/*' }] })
+  s.headersReceived({ requestId: '1', timeStamp: 1050, statusCode: 200, statusLine: 'HTTP/1.1 200 OK', responseHeaders: [{ name: 'Set-Cookie', value: 'x' }, { name: 'Content-Type', value: 'application/json' }] })
+  s.completed({ requestId: '1', timeStamp: 1060, statusCode: 200, fromCache: false, ip: '1.2.3.4' })
+
+  s.begin({ requestId: '2', url: 'https://www.zhipin.com/old', method: 'GET', type: 'main_frame', tabId: 5, frameId: 0, timeStamp: 2000 }, null)
+  s.headersReceived({ requestId: '2', timeStamp: 2010, statusCode: 302 })
+  s.begin({ requestId: '2', url: 'https://www.zhipin.com/new', method: 'GET', type: 'main_frame', tabId: 5, frameId: 0, timeStamp: 2020 }, null)
+  s.headersReceived({ requestId: '2', timeStamp: 2090, statusCode: 200 })
+  s.completed({ requestId: '2', timeStamp: 2100, statusCode: 200 })
+
+  s.begin({ requestId: '3', url: 'https://rd6.zhaopin.com/api/security/environment', method: 'POST', type: 'xmlhttprequest', initiator: 'https://rd6.zhaopin.com', tabId: 7, frameId: 0, timeStamp: 3000 }, 'rd6.zhaopin.com')
+  s.errored({ requestId: '3', timeStamp: 3001, error: 'net::ERR_BLOCKED_BY_CLIENT' })
+
+  s.completed({ requestId: '9', timeStamp: 4000 })
+  s.sendHeaders({ requestId: '9', timeStamp: 4000 })
+
+  s.begin({ requestId: '4', url: 'wss://ws.zhipin.com/', method: 'GET', type: 'websocket', initiator: 'https://www.zhipin.com', tabId: 5, frameId: 0, timeStamp: 5000 }, 'www.zhipin.com')
+  assert.equal(s.pendingCount(), 1)
+
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_REQUEST), [], '未到阈值也未到时,还在缓冲')
+  assert.equal(timers.length, 1, '缓冲非空只挂一个定时器')
+  timers[0]()
+  await s.flush()
+
+  const rows = await telemetryReadAll(store, TELEMETRY_KIND_REQUEST)
+  assert.equal(rows.length, 3)
+  const [r1, r2, r3] = rows
+  assert.equal(r1.requestHeaders.find((h) => h.name === 'Cookie').value, STRIPPED_VALUE)
+  assert.equal(r1.requestHeaders.find((h) => h.name === 'Accept').value, '*/*')
+  assert.equal(r1.responseHeaders.find((h) => h.name === 'Set-Cookie').value, STRIPPED_VALUE)
+  assert.equal(r1.statusCode, 200)
+  assert.equal(r1.statusLine, 'HTTP/1.1 200 OK')
+  assert.equal(r1.ip, '1.2.3.4')
+  assert.equal(r1.fromCache, false)
+  assert.deepEqual([r1.at, r1.sentAt, r1.headersAt, r1.endedAt], [1000, 1001, 1050, 1060])
+  assert.deepEqual(r1.body, { form: { content: ['{}'] } })
+  assert.equal(r1.tabHost, 'www.zhipin.com')
+  assert.equal(r1.initiator, 'https://www.zhipin.com')
+  assert.deepEqual(r2.hops, ['https://www.zhipin.com/old'])
+  assert.equal(r2.url, 'https://www.zhipin.com/new')
+  assert.equal(r2.at, 2020)
+  assert.equal(r2.statusCode, 200)
+  assert.equal(r2.tabHost, undefined)
+  assert.equal(r3.error, 'net::ERR_BLOCKED_BY_CLIENT')
+  assert.equal(r3.endedAt, 3001)
+  assert.equal(s.writtenCount(), 3)
+
+  await s.end()
+  const after = await telemetryReadAll(store, TELEMETRY_KIND_REQUEST)
+  assert.equal(after.length, 4)
+  assert.equal(after[3].requestId, '4')
+  assert.equal(after[3].unfinished, true)
+  assert.equal(s.pendingCount(), 0)
+  assert.equal(s.writtenCount(), 4)
+  assert.ok(Object.keys(store.state).every((k) => k.startsWith('telemetry:')), '键都带 telemetry: 前缀')
+})
+
+test('请求录制:缓冲攒够条数立刻落盘,写是串行的,reset 清掉在途与缓冲', async () => {
+  const store = memoryWitnessStorage()
+  const s = new CaptureSession({ store, flushAtCount: 3, flushAfterMs: 1000, schedule: () => {} })
+  for (let i = 0; i < 7; i += 1) {
+    s.begin({ requestId: String(i), url: `https://www.zhipin.com/${i}`, method: 'GET', type: 'image', tabId: 1, frameId: 0, timeStamp: i }, 'www.zhipin.com')
+    s.completed({ requestId: String(i), timeStamp: i + 1 })
+  }
+  await s.settled()
+  assert.equal((await telemetryReadAll(store, TELEMETRY_KIND_REQUEST)).length, 6, '两次阈值落盘 6 条,余 1 条在缓冲等定时器')
+  assert.equal(TELEMETRY_MAX_REQUEST_CHUNKS, 25)
+  await s.end()
+  assert.equal((await telemetryReadAll(store, TELEMETRY_KIND_REQUEST)).length, 7)
+  assert.equal(s.writtenCount(), 7)
+
+  s.begin({ requestId: 'x', url: 'https://www.zhipin.com/x', method: 'GET', type: 'image', tabId: 1, frameId: 0, timeStamp: 10 }, null)
+  s.reset()
+  assert.equal(s.pendingCount(), 0)
+  assert.equal(s.writtenCount(), 0)
+  s.completed({ requestId: 'x', timeStamp: 11 })
+  await s.end()
+  assert.equal((await telemetryReadAll(store, TELEMETRY_KIND_REQUEST)).length, 7, 'reset 后旧 id 的收尾不再落盘')
+})
+
+test('请求录制:窗口判定与标签页主机表', () => {
+  assert.equal(CAPTURE_DURATION_MS, 10 * 60_000)
+  assert.equal(captureActive(null, 1), false)
+  assert.equal(captureActive(undefined, 1), false)
+  assert.equal(captureActive({ startedAt: 0, until: 100 }, 99), true)
+  assert.equal(captureActive({ startedAt: 0, until: 100 }, 100), false, '到点即止')
+  assert.equal(captureActive({ startedAt: 0, until: 100, endedAt: 50 }, 60), false, '人工停止后不再记')
+
+  resetTabHostsForTest()
+  noteTabUrl(1, 'https://www.zhipin.com/web/chat/index')
+  assert.equal(tabHost(1), 'www.zhipin.com')
+  noteTabUrl(1, 'about:blank')
+  assert.equal(tabHost(1), null, '解不出主机就当没有')
+  noteTabUrl(2, undefined)
+  assert.equal(tabHost(2), null)
+  noteTabUrl(3, 'https://rd6.zhaopin.com/')
+  assert.equal(tabHost(3), 'rd6.zhaopin.com')
+  forgetTabHost(3)
+  assert.equal(tabHost(3), null)
+  resetTabHostsForTest()
 })
 
 for (const { name, fn } of tests) {

@@ -128,6 +128,13 @@ export { bodyText, deepFind, recordUpload } from '../src/base/telemetry/capture'
 export { bossTelemetrySite, telemetrySites } from '../src/program/platform/telemetrySites'
 export { classifyBossEntry, bossCodeLabel, bossCodeMeaning, bossKnownCodes, bossSevereHits } from '../src/program/platform/telemetrySites'
 export { parseLedger as telemetryParseLedger } from '../src/base/telemetry/counters'
+export {
+  shouldRecord, siteOfHost, hostOf, stripHeaders, sensitiveHeader, describeBody, captureActive, CaptureSession,
+  CAPTURE_DURATION_MS, STRIPPED_VALUE, BODY_KEEP_CHARS, HEADER_VALUE_KEEP_CHARS,
+} from '../src/base/telemetry/netCapture'
+export { KIND_REQUEST as TELEMETRY_KIND_REQUEST, MAX_REQUEST_CHUNKS as TELEMETRY_MAX_REQUEST_CHUNKS } from '../src/base/telemetry/store'
+export { netCaptureSites } from '../src/program/platform/netCaptureSites'
+export { tabHost, noteTabUrl, forgetTabHost, resetTabHostsForTest } from '../src/base/telemetry/tabHosts'
 export { BOSS_INPUT_COUNTERS, REPORT_EVERY as BOSS_REPORT_EVERY } from '../src/program/platform/bossInputCounters'
 export { stripNewlines, bossTestHooks, identityCacheUsable, resetBossIdentityCacheForTest, BOSS_DISMISS_WHITELIST } from '../src/program/platform/boss'
 export {

@@ -35,8 +35,17 @@ export const MAX_UPLOAD_CHUNKS = 15
 /** 鼠标窗口:25 片 x 200 = 5000 条。上游实测单条均 2.2KB,约 11MB。 */
 export const MAX_CLICK_CHUNKS = 25
 
+/**
+ * 请求录制环:25 片 x 200 = 5000 条。一轮十分钟,平台页面几百到几千条,单条约 1~3KB。
+ * 超出丢最旧整片——面板的条数会对不上开始时的计数,人看得出来。
+ */
+export const MAX_REQUEST_CHUNKS = 25
+
 /** 明细环。 */
 export const KIND_UPLOAD = 'u'
+
+/** 请求录制环。每轮开始前整环清空,一轮一份记录。 */
+export const KIND_REQUEST = 'r'
 
 /** 轨迹环。单独一个环,免得被页面加载噪声挤掉(见 capture.ts)。 */
 export const KIND_CLICK = 'c'
