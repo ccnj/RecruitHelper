@@ -176,6 +176,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/dev/report/settings", h(a.devReportSettings))
 	mux.HandleFunc("POST /admin/dev/report/settings", h(a.setDevReportSettings))
 	mux.HandleFunc("GET /admin/dev/log-report/settings", h(a.devLogReportSettings))
+	mux.HandleFunc("GET /admin/statusbar/settings", h(a.statusBarSettings))
+	mux.HandleFunc("POST /admin/statusbar/settings", h(a.setStatusBarSettings))
 	mux.HandleFunc("POST /admin/dev/chat-report/run", h(a.devChatReportRun))
 	mux.HandleFunc("GET /admin/job-config/source", h(a.jobConfigSourceConfig))
 	mux.HandleFunc("GET /admin/job-config/backend-jobs", h(a.backendJobs))
