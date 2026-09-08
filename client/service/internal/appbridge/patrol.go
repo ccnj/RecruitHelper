@@ -447,12 +447,17 @@ func resultData(leaf store.CmdRecord) (json.RawMessage, error) {
 	return nil, runErrorFromLeaf(leaf, &result)
 }
 
-// HandAvailability deliberately exposes only the active hand generation.
-// Actor policy cannot reach tabs, selectors or other hand internals; unread
-// awareness now flows through the chat.readUnreadTotal command path
-// (2026-08-10), not this sensor projection.
+// HandAvailability exposes the active hand generation plus the hand's own
+// per-account page readiness hint from its latest ping. Actor policy still
+// cannot reach tabs, selectors or other hand internals; unread awareness flows
+// through the chat.readUnreadTotal command path (2026-08-10), not this sensor
+// projection. The readiness hint is the one deliberate exception: it only lets
+// a patrol round put nav.ensureSurface before its first read instead of after
+// the read has failed, and a stale hint costs at most one idempotent command
+// or falls back to that same failure-driven recovery.
 type handAvailabilityHub interface {
 	HandSession(string) (string, string, bool)
+	HandContexts(string) []protocol.PingContext
 }
 
 type HandAvailability struct {
@@ -464,5 +469,8 @@ func (h HandAvailability) State(_ context.Context, handID string) (patrol.HandSt
 		return patrol.HandState{}, errors.New("hub 不能为空")
 	}
 	sessionID, bootID, online := h.Hub.HandSession(handID)
-	return patrol.HandState{Online: online, Session: sessionID, BootID: bootID}, nil
+	return patrol.HandState{
+		Online: online, Session: sessionID, BootID: bootID,
+		Contexts: h.Hub.HandContexts(handID),
+	}, nil
 }
