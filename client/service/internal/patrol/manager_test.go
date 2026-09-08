@@ -134,15 +134,17 @@ func (r *fakeRunner) names() []string {
 	return out
 }
 
-// businessNames 滤掉两类例行边界读:未读角标现场读(轮首与每个会话边界例行
-// 出现)与临走看一眼的当前会话识别(每次切换到脏会话前例行出现),数量都随
-// 边界数波动。主题无关的命令序列断言用它,免得每个用例都背着这层噪音;未读
-// 判定与临走检查本身的用例仍用 names() 或自记序列显式断言时机。
+// businessNames 滤掉三类例行边界读:未读角标现场读(轮首与每个会话边界例行
+// 出现)、临走看一眼的当前会话识别(每次切换到脏会话前例行出现),以及列表轮
+// 起手保证沟通台面的 nav.ensureSurface(2026-09-08 起每轮一条),数量都随边界数
+// 波动。主题无关的命令序列断言用它,免得每个用例都背着这层噪音;未读判定、
+// 临走检查与台面保证本身的用例仍用 names()/count() 或自记序列显式断言时机。
 func (r *fakeRunner) businessNames() []string {
 	out := make([]string, 0)
 	for _, name := range r.names() {
 		if name == protocol.PrimChatReadUnreadTotal ||
-			name == protocol.PrimChatIdentifyCurrentConversation {
+			name == protocol.PrimChatIdentifyCurrentConversation ||
+			name == protocol.PrimNavEnsureSurface {
 			continue
 		}
 		out = append(out, name)
@@ -2196,8 +2198,10 @@ func TestEnsureOncePerRoundAndRepeatedRecoveryNeverPauses(t *testing.T) {
 			h.manager = manager
 		}
 	}
-	if got := h.runner.count(protocol.PrimNavEnsureSurface); got != 4 {
-		t.Fatalf("ensure count = %d, want one per round", got)
+	// 每轮两条 ensureSurface:起手一条(2026-09-08 起列表轮无条件先保证台面)+ 救场一条。
+	// 救场仍是每轮一次:第二次 readList 失败后不再有第三条 ensure。
+	if got := h.runner.count(protocol.PrimNavEnsureSurface); got != 8 {
+		t.Fatalf("ensure count = %d, want prepare+recovery per round", got)
 	}
 	if got := h.runner.count(protocol.PrimChatReadList); got != 8 {
 		t.Fatalf("readList count = %d, want original+single retry per round", got)

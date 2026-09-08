@@ -1441,13 +1441,14 @@ func TestUnreadClassificationCorrectionStopsInPlace(t *testing.T) {
 	if err != nil || account.StoppedAt == nil || account.PausedReason != PauseUserRequested {
 		t.Fatalf("成功修正后必须 userPaused 等待人工继续: account=%+v err=%v", account, err)
 	}
-	if names := h.runner.names(); len(names) != 6 ||
-		names[0] != protocol.PrimChatReadUnreadTotal ||
-		names[1] != protocol.PrimChatReadList ||
-		names[2] != protocol.PrimChatIdentifyCurrentConversation ||
-		names[3] != protocol.PrimChatOpenConversation ||
-		names[4] != protocol.PrimChatIdentifyCurrentConversation ||
-		names[5] != protocol.PrimChatReadThread {
+	if names := h.runner.names(); len(names) != 7 ||
+		names[0] != protocol.PrimNavEnsureSurface ||
+		names[1] != protocol.PrimChatReadUnreadTotal ||
+		names[2] != protocol.PrimChatReadList ||
+		names[3] != protocol.PrimChatIdentifyCurrentConversation ||
+		names[4] != protocol.PrimChatOpenConversation ||
+		names[5] != protocol.PrimChatIdentifyCurrentConversation ||
+		names[6] != protocol.PrimChatReadThread {
 		t.Fatalf("修正后不得继续派发其他原语(尤其收口全量读): %v", names)
 	}
 	if got := unreadListFilters(t, h); countListFilter(got, protocol.ListFilterAll) != 0 {
