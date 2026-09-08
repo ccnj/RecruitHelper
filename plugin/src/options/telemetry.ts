@@ -7,7 +7,9 @@
 // 读侧与写侧共用 `base/telemetry/store` 的同一份分片实现——上游的教训是
 // 两边各抄一份,谁都测不到,而**存储 bug 是会丢数据的**。
 
-import { KIND_CLICK, KIND_UPLOAD, TelemetryStorage, clear, readAll } from '../base/telemetry/store'
+import { KIND_CLICK, KIND_REQUEST, KIND_UPLOAD, TelemetryStorage, clear, readAll } from '../base/telemetry/store'
+import { RequestRecord, hostOf } from '../base/telemetry/netCapture'
+import type { CaptureStatus } from '../base/telemetry/netCaptureRegister'
 import { TelemetryEntry } from '../base/telemetry/capture'
 import { BossSevereHit, bossCodeMeaning, bossSevereHits, classifyBossEntry } from '../program/platform/telemetrySites'
 import { BOSS_INPUT_COUNTERS, REPORT_EVERY } from '../program/platform/bossInputCounters'
@@ -359,19 +361,22 @@ async function render(): Promise<void> {
   el('raw').innerHTML = renderRaw(injected, [...probes].sort(), routine)
 }
 
+function saveJSON(filename: string, data: unknown): void {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function download(): void {
   void (async () => {
-    const data = {
+    saveJSON(`telemetry-${Date.now()}.json`, {
       exportedAt: new Date().toISOString(),
       uploads: await readAll(storage, KIND_UPLOAD),
       clicks: await readAll(storage, KIND_CLICK),
-    }
-    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `telemetry-${Date.now()}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+    })
   })()
 }
 
@@ -464,4 +469,120 @@ el('cntClearBase').addEventListener('click', () => {
   })()
 })
 
+// ---- 请求录制 ----
+//
+// 状态住在 SW(录制跨着弹窗的开关,弹窗只是个看板);记录住在分片环,弹窗直接读。
+// 录制中每秒问一次 SW;不在录制时不轮询——这是看板的刷新,不是手的业务定时器。
+
+function clock(ms: number): string {
+  return new Date(ms).toLocaleTimeString('zh-CN')
+}
+
+function renderCaptureStatus(s: CaptureStatus): string {
+  if (s.unavailable !== undefined) return `<b>不可用</b>:${escapeHTML(s.unavailable)}`
+  if (s.state === null) return '还没录过。'
+  const st = s.state
+  if (s.active) {
+    const left = Math.max(0, Math.ceil((st.until - s.now) / 1000))
+    const mm = String(Math.floor(left / 60)).padStart(2, '0')
+    const ss = String(left % 60).padStart(2, '0')
+    return `<b>录制中</b>,剩 ${mm}:${ss} · 已落盘 <b>${s.recorded}</b> 条,在途 ${s.pending} 条 · 开始于 ${clock(st.startedAt)}`
+  }
+  return `已结束:${clock(st.startedAt)} — ${clock(st.endedAt ?? st.until)} · 共 <b>${s.recorded}</b> 条`
+}
+
+function tallyOf(values: readonly string[], limit: number): string {
+  const lines = tally(values).slice(0, limit)
+  return list(lines)
+}
+
+/** 只回答"这十分钟平台页面往哪发了什么":按主机、类型、状态归并,明细看导出。 */
+function renderCaptureSummary(records: readonly RequestRecord[]): string {
+  if (!records.length) return '<span class="muted">无记录。</span>'
+
+  const hosts: string[] = []
+  const types: string[] = []
+  const statuses: string[] = []
+  const errors: string[] = []
+  let unfinished = 0
+  let localProbes = 0
+  let withBody = 0
+  for (const r of records) {
+    hosts.push(hostOf(r.url) ?? '(解不出主机)')
+    types.push(r.type)
+    if (r.error !== undefined) errors.push(r.error)
+    else if (r.statusCode !== undefined) statuses.push(`${Math.floor(r.statusCode / 100)}xx`)
+    if (r.unfinished) unfinished += 1
+    const host = hostOf(r.url)
+    if (host === '127.0.0.1' || host === 'localhost' || host === '[::1]') localProbes += 1
+    if (r.body !== undefined) withBody += 1
+  }
+  const first = records[0].at
+  const last = records[records.length - 1].at
+
+  return `<p class="muted"><b>${records.length}</b> 条 · ${escapeHTML(clock(first))} — ${escapeHTML(clock(last))}`
+    + ` · 带请求体 ${withBody} 条 · 出错 ${errors.length} 条 · 未收尾 ${unfinished} 条`
+    + (localProbes ? ` · <b class="bad-row">打到本机端口 ${localProbes} 条</b>` : '') + '</p>'
+    + `<details open><summary>目的主机 ${new Set(hosts).size} 个</summary>${tallyOf(hosts, 20)}</details>`
+    + `<details><summary>资源类型 ${new Set(types).size} 种</summary>${tallyOf(types, 20)}</details>`
+    + `<details><summary>状态 ${new Set(statuses).size} 档</summary>${tallyOf(statuses, 10)}</details>`
+    + (errors.length ? `<details><summary>错误 ${new Set(errors).size} 种</summary>${tallyOf(errors, 10)}</details>` : '')
+}
+
+let capturePoll: ReturnType<typeof setTimeout> | null = null
+
+async function refreshCapture(): Promise<void> {
+  if (capturePoll !== null) {
+    clearTimeout(capturePoll)
+    capturePoll = null
+  }
+  const s = await ask<CaptureStatus>({ type: 'netCapture:status' })
+  el('capStatus').innerHTML = renderCaptureStatus(s)
+  if (s.active) {
+    el('capSummary').innerHTML = '<span class="muted">录制中,结束后显示汇总。</span>'
+    capturePoll = setTimeout(() => { void refreshCapture() }, 1000)
+    return
+  }
+  const records = await readAll(storage, KIND_REQUEST) as RequestRecord[]
+  el('capSummary').innerHTML = renderCaptureSummary(records)
+}
+
+el('capStart').addEventListener('click', () => {
+  void (async () => {
+    await ask<CaptureStatus>({ type: 'netCapture:start' })
+    el('status').textContent = '录制已开始'
+    await refreshCapture()
+  })()
+})
+el('capStop').addEventListener('click', () => {
+  void (async () => {
+    await ask<CaptureStatus>({ type: 'netCapture:stop' })
+    el('status').textContent = '录制已停止'
+    await refreshCapture()
+  })()
+})
+el('capExport').addEventListener('click', () => {
+  void (async () => {
+    const s = await ask<CaptureStatus>({ type: 'netCapture:status' })
+    saveJSON(`requests-${Date.now()}.json`, {
+      exportedAt: new Date().toISOString(),
+      capture: s.state,
+      requests: await readAll(storage, KIND_REQUEST),
+    })
+  })()
+})
+el('capClear').addEventListener('click', () => {
+  void (async () => {
+    const s = await ask<CaptureStatus>({ type: 'netCapture:status' })
+    if (s.active) {
+      el('status').textContent = '录制中不能清空,先停止'
+      return
+    }
+    await clear(storage, KIND_REQUEST)
+    el('status').textContent = '请求记录已清空'
+    await refreshCapture()
+  })()
+})
+
 void render()
+void refreshCapture()

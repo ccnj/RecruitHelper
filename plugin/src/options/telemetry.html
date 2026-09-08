@@ -92,7 +92,24 @@
     </div>
     <div id="cnt">-</div>
 
-    <!-- ⑥ 原始证据:整块折叠。 -->
+    <!-- ⑥ 请求录制:十分钟窗口内平台页面发出的全部请求。 -->
+    <h2>请求录制</h2>
+    <p class="muted">
+      把平台页面在十分钟窗口内发出的<b>全部</b>请求抄一份存本机:URL、方法、类型、发起方、
+      请求头、响应头、状态、请求体。只记 BOSS 与智联页面发出的,别的网站一律不记;
+      Cookie、Authorization 一类凭据头落盘前剥掉;响应正文与 WebSocket 帧看不到。
+      通道与上面的埋点观测同一条,不改页面、不改请求。开始后关掉本面板也照录,到点自动停。
+    </p>
+    <div class="row">
+      <button id="capStart">开始录制十分钟(会清掉上一轮)</button>
+      <button id="capStop">停止</button>
+      <button id="capExport">导出请求记录</button>
+      <button id="capClear">清空</button>
+    </div>
+    <p id="capStatus" class="muted">-</p>
+    <div id="capSummary">-</div>
+
+    <!-- ⑦ 原始证据:整块折叠。 -->
     <h2>原始证据</h2>
     <div id="raw">-</div>
 
