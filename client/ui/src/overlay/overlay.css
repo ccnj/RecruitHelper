@@ -11,6 +11,7 @@ body {
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   font-size: 13px;
   color: #f1efe8;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
   cursor: default;
   -webkit-user-select: none;
   user-select: none;
@@ -21,7 +22,9 @@ body {
   top: 0;
   left: 0;
   right: 0;
-  background: rgba(24, 26, 32, 0.82);
+  /* 0.6:甲方 09-08 Mac 上看过 0.82 后要更透,底下的页面要能看见;
+     再低浅色网页上白字就糊了,想再调只改这一个数。 */
+  background: rgba(24, 26, 32, 0.6);
   border-radius: 0 0 10px 10px;
 }
 
