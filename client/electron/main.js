@@ -15,7 +15,9 @@ const {
 const { TRAY_ICON_PNG_BASE64, APP_ICON_PNG_BASE64 } = require('./icons')
 const { RotatingLog } = require('./logRotate')
 const { resolveWindowSize } = require('./windowSize')
-const { createOverlayWindow } = require('./overlay')
+const {
+  createOverlayWindow, applyOverlayPosition, normalizeOverlayPosition, DEFAULT_OVERLAY_POSITION,
+} = require('./overlay')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
 const ADMIN_BASE = `http://127.0.0.1:${PORT}`
@@ -125,7 +127,7 @@ async function boot() {
 
   createWindow(adminToken, layout.uiEntry)
   createTray()
-  createOverlay(adminToken, layout.overlayEntry)
+  await createOverlay(adminToken, layout.overlayEntry)
 }
 
 /** 两个渲染器共用的本地管理连接参数:只在进程参数里,不落盘、不进 URL。 */
@@ -138,9 +140,11 @@ function rendererArguments(adminToken) {
 
 /**
  * 屏幕顶层状态栏(2026-09-08 甲方裁决)。它是 UI 便利层,建不起来只记日志,
- * 主窗与脑照常——但建起来之后**不再碰它**,理由见 overlay.js 开头。
+ * 主窗与脑照常——建起来之后唯一会碰它的是"人在诊断台改了位置档位"那一下
+ * (经 IPC 挪窗,不动焦点),理由见 overlay.js 开头。
  */
-function createOverlay(adminToken, overlayEntry) {
+async function createOverlay(adminToken, overlayEntry) {
+  const position = await readOverlayPosition(adminToken)
   try {
     overlay = createOverlayWindow({
       BrowserWindow,
@@ -149,6 +153,7 @@ function createOverlay(adminToken, overlayEntry) {
       rendererArguments: rendererArguments(adminToken),
       entry: overlayEntry,
       devUrl: app.isPackaged ? '' : process.env.UI_URL,
+      position,
     })
     overlay.on('closed', () => {
       overlay = null
@@ -156,6 +161,38 @@ function createOverlay(adminToken, overlayEntry) {
   } catch (error) {
     overlay = null
     writeLog(`[main] 状态栏窗创建失败,继续无状态栏运行:${String(error?.message || error)}`)
+  }
+  // 只认状态栏自己的渲染器:主窗那页没有理由挪它。
+  ipcMain.handle('recruit-helper:overlay-position', (event, requested) => {
+    if (!overlay || overlay.isDestroyed() || event.sender !== overlay.webContents) {
+      return { ok: false, error: '只有状态栏页面可以调整位置' }
+    }
+    const next = normalizeOverlayPosition(requested)
+    const moved = applyOverlayPosition(overlay, screen.getPrimaryDisplay().workArea, next)
+    if (moved) writeLog(`[main] 状态栏已挪到档位 ${next}`)
+    return { ok: true }
+  })
+}
+
+/**
+ * 建窗前问脑一次位置档位,免得先在顶部闪一下再跳到人设的位置。读不到就顶部居中,
+ * 页面加载后会再按脑里的值纠正一次。
+ */
+async function readOverlayPosition(adminToken) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 1500)
+  try {
+    const response = await fetch(`${ADMIN_BASE}/admin/statusbar/settings`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+      signal: controller.signal,
+    })
+    if (!response.ok) return DEFAULT_OVERLAY_POSITION
+    const body = await response.json().catch(() => ({}))
+    return normalizeOverlayPosition(body.position)
+  } catch {
+    return DEFAULT_OVERLAY_POSITION
+  } finally {
+    clearTimeout(timer)
   }
 }
 

@@ -46,8 +46,11 @@ func TestStatusBarSettingsDefaultOffAndPersistAcrossRestart(t *testing.T) {
 	mux := http.NewServeMux()
 	api.Routes(mux)
 
-	if got := statusBarRequest(t, mux, http.MethodGet, ""); got.DetailEnabled {
-		t.Fatalf("新库应是客户版: %+v", got)
+	if got := statusBarRequest(t, mux, http.MethodGet, ""); got.DetailEnabled || got.Position != "top" {
+		t.Fatalf("新库应是客户版、顶部: %+v", got)
+	}
+	if got := statusBarRequest(t, mux, http.MethodPost, `{"position":"bottomRight"}`); got.Position != "bottomRight" || got.DetailEnabled {
+		t.Fatalf("只改位置不应动开关: %+v", got)
 	}
 	if got := statusBarRequest(t, mux, http.MethodPost, `{"detailEnabled":true}`); !got.DetailEnabled {
 		t.Fatalf("开启后应回开: %+v", got)
@@ -62,8 +65,8 @@ func TestStatusBarSettingsDefaultOffAndPersistAcrossRestart(t *testing.T) {
 	api2 := New(reopened, newFakeAdminHub(), nil, nil, nil, "")
 	mux2 := http.NewServeMux()
 	api2.Routes(mux2)
-	if got := statusBarRequest(t, mux2, http.MethodGet, ""); !got.DetailEnabled {
-		t.Fatalf("重开库后开关应仍为开: %+v", got)
+	if got := statusBarRequest(t, mux2, http.MethodGet, ""); !got.DetailEnabled || got.Position != "bottomRight" {
+		t.Fatalf("重开库后开关与位置应都还在: %+v", got)
 	}
 	if got := statusBarRequest(t, mux2, http.MethodPost, `{"detailEnabled":false}`); got.DetailEnabled {
 		t.Fatalf("关闭后应回关: %+v", got)
@@ -79,12 +82,14 @@ func TestStatusBarSettingsRejectsBodyWithoutFlag(t *testing.T) {
 	api := New(st, newFakeAdminHub(), nil, nil, nil, "")
 	mux := http.NewServeMux()
 	api.Routes(mux)
-	req := httptest.NewRequest(http.MethodPost, "/admin/statusbar/settings", bytes.NewBufferString(`{}`))
-	req.Header.Set("Origin", "http://127.0.0.1:5273")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("缺字段应 400,得到 %d: %s", w.Code, w.Body.String())
+	for _, body := range []string{`{}`, `{"position":"middle"}`} {
+		req := httptest.NewRequest(http.MethodPost, "/admin/statusbar/settings", bytes.NewBufferString(body))
+		req.Header.Set("Origin", "http://127.0.0.1:5273")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s 应 400,得到 %d: %s", body, w.Code, w.Body.String())
+		}
 	}
 }

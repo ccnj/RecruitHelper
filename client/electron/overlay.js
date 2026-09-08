@@ -14,17 +14,61 @@
 const OVERLAY_WIDTH = 640
 const OVERLAY_HEIGHT = 220
 
+// 位置档位,与脑侧 store.StatusBarPositions 同一份枚举。档位存在脑里(诊断台改、
+// 重启不丢),这里只按名字算几何;认不出的名字一律按顶部居中,不猜最近的。
+const OVERLAY_POSITIONS = ['top', 'bottom', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight']
+const DEFAULT_OVERLAY_POSITION = 'top'
+
+function normalizeOverlayPosition(position) {
+  return OVERLAY_POSITIONS.includes(position) ? position : DEFAULT_OVERLAY_POSITION
+}
+
 /**
- * 小窗在主屏工作区里的位置:顶部居中,比工作区还宽时贴左并截到工作区宽。
+ * 小窗在主屏工作区里的位置。工作区已去掉菜单栏/任务栏,所以"底部"天然在任务栏
+ * 之上;比工作区还宽时截到工作区宽并贴左。
  *
  * @param {{x:number,y:number,width:number,height:number}} workArea
+ * @param {string} [position]
  * @param {{width:number,height:number}} [size]
  */
-function overlayBounds(workArea, size = { width: OVERLAY_WIDTH, height: OVERLAY_HEIGHT }) {
+function overlayBounds(
+  workArea,
+  position = DEFAULT_OVERLAY_POSITION,
+  size = { width: OVERLAY_WIDTH, height: OVERLAY_HEIGHT },
+) {
   const width = Math.max(1, Math.min(size.width, workArea.width))
   const height = Math.max(1, Math.min(size.height, workArea.height))
-  const x = Math.round(workArea.x + (workArea.width - width) / 2)
-  return { x, y: workArea.y, width, height }
+  const anchor = normalizeOverlayPosition(position)
+  const left = workArea.x
+  const center = Math.round(workArea.x + (workArea.width - width) / 2)
+  const right = workArea.x + workArea.width - width
+  const top = workArea.y
+  const bottom = workArea.y + workArea.height - height
+  switch (anchor) {
+    case 'bottom': return { x: center, y: bottom, width, height }
+    case 'topLeft': return { x: left, y: top, width, height }
+    case 'topRight': return { x: right, y: top, width, height }
+    case 'bottomLeft': return { x: left, y: bottom, width, height }
+    case 'bottomRight': return { x: right, y: bottom, width, height }
+    default: return { x: center, y: top, width, height }
+  }
+}
+
+/**
+ * 运行期挪窗:只在几何真的变了才调 setBounds。这是建窗之后唯一允许的窗口级
+ * 调用——由人在诊断台改档位触发,而窗不可聚焦,挪动不会把焦点从 Chrome 抢走。
+ *
+ * @returns {boolean} 是否真的挪了
+ */
+function applyOverlayPosition(win, workArea, position) {
+  const next = overlayBounds(workArea, position)
+  const current = win.getBounds()
+  if (
+    current && current.x === next.x && current.y === next.y
+    && current.width === next.width && current.height === next.height
+  ) return false
+  win.setBounds(next, false)
+  return true
 }
 
 /**
@@ -82,14 +126,16 @@ function overlayDevUrl(devUrl) {
  *   entry: string,
  *   devUrl?: string,
  *   platform?: string,
+ *   position?: string,
  * }} opts
  */
 function createOverlayWindow({
-  BrowserWindow, screen, preload, rendererArguments, entry, devUrl = '', platform = process.platform,
+  BrowserWindow, screen, preload, rendererArguments, entry, devUrl = '',
+  platform = process.platform, position = DEFAULT_OVERLAY_POSITION,
 }) {
   const { workArea } = screen.getPrimaryDisplay()
   const win = new BrowserWindow(overlayWindowOptions({
-    bounds: overlayBounds(workArea), preload, rendererArguments, platform,
+    bounds: overlayBounds(workArea, position), preload, rendererArguments, platform,
   }))
   // 穿透是硬要求:真人与 OS 注入的点击都得从它身上过去。不带 forward:
   // 我们不需要它转发悬停事件,只需要它在命中测试里不存在。
@@ -112,7 +158,11 @@ function createOverlayWindow({
 module.exports = {
   OVERLAY_WIDTH,
   OVERLAY_HEIGHT,
+  OVERLAY_POSITIONS,
+  DEFAULT_OVERLAY_POSITION,
+  normalizeOverlayPosition,
   overlayBounds,
+  applyOverlayPosition,
   overlayWindowOptions,
   overlayDevUrl,
   createOverlayWindow,

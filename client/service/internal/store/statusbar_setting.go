@@ -19,8 +19,48 @@ import (
 type StatusBarSetting struct {
 	ID            uint `gorm:"primaryKey"`
 	DetailEnabled bool
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// Position 是小窗贴在主屏工作区的哪个角(封闭枚举,见 StatusBarPositions)。
+	// 空串按顶部居中——旧库加列后拿到的就是空串,与首版行为一致。
+	Position  string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// 位置档位。名字直接是 Electron 侧几何函数的锚点名,两边不做翻译。
+const (
+	StatusBarPositionTop         = "top"
+	StatusBarPositionBottom      = "bottom"
+	StatusBarPositionTopLeft     = "topLeft"
+	StatusBarPositionTopRight    = "topRight"
+	StatusBarPositionBottomLeft  = "bottomLeft"
+	StatusBarPositionBottomRight = "bottomRight"
+)
+
+// StatusBarPositions 是允许写入的全集;顺序即诊断台的展示顺序。
+var StatusBarPositions = []string{
+	StatusBarPositionTop, StatusBarPositionBottom,
+	StatusBarPositionTopLeft, StatusBarPositionTopRight,
+	StatusBarPositionBottomLeft, StatusBarPositionBottomRight,
+}
+
+// ErrStatusBarPositionInvalid:不在枚举里的位置一律拒绝,不猜最近的。
+var ErrStatusBarPositionInvalid = errors.New("状态栏位置不在允许的档位里")
+
+func validStatusBarPosition(position string) bool {
+	for _, allowed := range StatusBarPositions {
+		if allowed == position {
+			return true
+		}
+	}
+	return false
+}
+
+// EffectivePosition 把空串归一到顶部居中,读方不必各自判空。
+func (s StatusBarSetting) EffectivePosition() string {
+	if s.Position == "" {
+		return StatusBarPositionTop
+	}
+	return s.Position
 }
 
 const statusBarSettingID = 1
@@ -39,25 +79,33 @@ func (s *Store) StatusBarSetting() (StatusBarSetting, error) {
 }
 
 // SetStatusBarDetail 落开关。只应由诊断台的人工点击调用。
-//
-// 只写这一列而不整行 Save:与其余单行设置表同一纪律,免得将来加列后被陈旧读回
-// 盖掉别的字段。
 func (s *Store) SetStatusBarDetail(enabled bool) error {
+	return s.updateStatusBarColumns(map[string]any{"detail_enabled": enabled})
+}
+
+// SetStatusBarPosition 落位置档位。不在枚举里直接拒绝。
+func (s *Store) SetStatusBarPosition(position string) error {
+	if !validStatusBarPosition(position) {
+		return ErrStatusBarPositionInvalid
+	}
+	return s.updateStatusBarColumns(map[string]any{"position": position})
+}
+
+// updateStatusBarColumns 只写指定列而不整行 Save:与其余单行设置表同一纪律,
+// 两个开关各写各的列,谁也不会用陈旧读回盖掉对方刚落的值。
+func (s *Store) updateStatusBarColumns(values map[string]any) error {
 	res := s.db.Model(&StatusBarSetting{}).
-		Where("id = ?", statusBarSettingID).
-		Update("detail_enabled", enabled)
+		Where("id = ?", statusBarSettingID).Updates(values)
 	if res.Error != nil {
 		return res.Error
 	}
 	if res.RowsAffected > 0 {
 		return nil
 	}
-	row := StatusBarSetting{ID: statusBarSettingID, DetailEnabled: enabled}
+	row := StatusBarSetting{ID: statusBarSettingID}
 	if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
 		return err
 	}
-	// 并发下另一方可能刚建了行且值不同;再更新一次确保本次意图落地。
 	return s.db.Model(&StatusBarSetting{}).
-		Where("id = ?", statusBarSettingID).
-		Update("detail_enabled", enabled).Error
+		Where("id = ?", statusBarSettingID).Updates(values).Error
 }

@@ -15,4 +15,6 @@ contextBridge.exposeInMainWorld('recruitHelper', Object.freeze({
   // 安装新版必须在主进程做:renderer 起不了进程,也不该能起。它只发一个意图,
   // 由主进程去问脑"现在能不能装",拿到已经重新校验过的路径后才动手。
   installUpdate: () => ipcRenderer.invoke('recruit-helper:install-update'),
+  // 状态栏挪位置:窗口几何只有主进程能动;主进程只认状态栏自己的渲染器。
+  setOverlayPosition: (position) => ipcRenderer.invoke('recruit-helper:overlay-position', String(position)),
 }))

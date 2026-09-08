@@ -13,6 +13,8 @@ declare global {
       adminToken?: string
       // 安装新版必须在主进程做:renderer 起不了进程。这里只发意图,拿回结果。
       installUpdate?: () => Promise<{ ok: boolean; error?: string }>
+      // 状态栏小窗挪位置:窗口几何只有主进程能动。只有状态栏页面自己会调。
+      setOverlayPosition?: (position: string) => Promise<{ ok: boolean; error?: string }>
     }
   }
 }
@@ -345,7 +347,25 @@ export interface ChatReportRunResult {
 // 把最近命令(带候选人姓名)常驻在屏幕最上层。持久化在脑,重启不丢。
 export interface StatusBarSettings {
   detailEnabled: boolean
+  position: StatusBarPosition
   error?: string
+}
+
+// 位置档位:与脑侧 store.StatusBarPositions 同一份枚举,顺序即展示顺序。
+export type StatusBarPosition =
+  | 'top' | 'bottom' | 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight'
+
+export const STATUS_BAR_POSITIONS: ReadonlyArray<{ value: StatusBarPosition; label: string }> = [
+  { value: 'top', label: '顶部居中' },
+  { value: 'bottom', label: '底部居中' },
+  { value: 'topLeft', label: '左上' },
+  { value: 'topRight', label: '右上' },
+  { value: 'bottomLeft', label: '左下' },
+  { value: 'bottomRight', label: '右下' },
+]
+
+export function isStatusBarPosition(value: unknown): value is StatusBarPosition {
+  return STATUS_BAR_POSITIONS.some((item) => item.value === value)
 }
 
 export interface LogReportSettings {
@@ -948,6 +968,8 @@ export const api = {
   statusBarSettings: () => get<StatusBarSettings>('/admin/statusbar/settings'),
   setStatusBarDetail: (detailEnabled: boolean) =>
     post<StatusBarSettings>('/admin/statusbar/settings', { detailEnabled }),
+  setStatusBarPosition: (position: StatusBarPosition) =>
+    post<StatusBarSettings>('/admin/statusbar/settings', { position }),
   // 状态栏用的精简账本:只要扫读字段,不带 args/guards/resultBody(那三样在
   // readList 上动辄几百 KB,三秒一轮扛不住)。
   ledgerBrief: (limit: number) =>
