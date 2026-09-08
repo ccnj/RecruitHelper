@@ -185,9 +185,11 @@ func (a *roundActor) processCommunicationV4Target(
 			// 2026-08-27 停机点第二步(审查修复 B2):中游重验删除后,在途轮
 			// 的边界失效改在巡检层判定——轮边界之后长出候选人新输入或真人
 			// 出站(交换结果卡按重建口径豁免,它是本轮接受动作的平台产物)
-			// 即失效:pre-effect 作废后当轮按最新账本重开;带未收束案底则由
-			// settle 回落既有保守隔离。这条腿同时救活"等前置正证"的
-			// WaitingPrerequisite 轮:前置死亡后候选人再开口,轮不再不朽。
+			// 即失效:没有在途 intent 的轮作废后当轮按最新账本重开(2026-09-08
+			// 甲方裁决:已发前缀不再是承重墙,轮收 completed 同样当轮重开);
+			// 带在途案底则由 settle 回落既有保守隔离。这条腿同时救活"等前置
+			// 正证"的 WaitingPrerequisite 轮:前置死亡后候选人再开口,轮不再
+			// 不朽。
 			if communicationV4TurnBoundaryMoved(messages, latest.InboundThroughSeq) {
 				if err := a.manager.store.SupersedeDialogueTurnForBoundary(
 					latest.TurnID, a.manager.now(),
@@ -199,7 +201,8 @@ func (a *roundActor) processCommunicationV4Target(
 				if err != nil {
 					return err
 				}
-				if reloaded == nil || reloaded.Status != store.DialogueTurnSuperseded {
+				if reloaded == nil || (reloaded.Status != store.DialogueTurnSuperseded &&
+					reloaded.Status != store.DialogueTurnCompleted) {
 					return nil
 				}
 				latest = reloaded

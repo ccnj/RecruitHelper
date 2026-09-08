@@ -389,8 +389,9 @@ func validateDialogueTurnAIAdviceTx(
 // replyProcessInterrupted/intentProcessInterrupted,故收录这两个。
 // 业务性转人工(intentRejected、unsupportedMedia 等)不在此列,仍整体隔离
 // 候选人;世界状态失配自 2026-08-02 起在 pre-effect 阶段直接作废旧轮
-// (boundarySuperseded),只有带 effect 案底的轮还会以 inputBoundaryChanged
-// 走到这里并隔离候选人。
+// (boundarySuperseded),2026-09-08 起已终局案底的轮同样作废(已发前缀收
+// completed),只有带在途 intent 案底的轮还会以 inputBoundaryChanged 走到
+// 这里并隔离候选人。
 func dialogueOwnerFreezeExemptReason(reason string) bool {
 	switch reason {
 	case "replyFailed", "replyInvalid", "reasoningUsageUnsafe", "reducerRejected",
@@ -480,26 +481,47 @@ func markDialogueTurnManualTx(tx *gorm.DB, turn *DialogueTurn, reason string, at
 }
 
 // dialogueTurnBoundarySuperseded 是边界失配的显式终局原因(2026-08-02 甲方
-// 裁决,规格 v4 §一"旧轮失效"):判定结果落库后、真实 effect intent 构造前又
-// 观察到输入边界变化的旧轮,连同其未发 action 一律作废,不再自动执行,也不
-// 冻结候选人;新消息属于下一轮,下轮巡检按最新账本边界重开新轮重新裁决。
+// 裁决,规格 v4 §一"旧轮失效";2026-09-08 甲方裁决把分界从"构造过 intent 前"
+// 改为"没有在途 intent"):判定结果落库后又观察到输入边界变化、且轮内没有
+// 在途 intent 的旧轮,连同其未发 action 一律作废,不再自动执行,也不冻结
+// 候选人;已发前缀保留为事实、轮收 completed,无前缀收 superseded;新消息
+// 属于下一轮,下轮巡检按最新账本边界重开新轮重新裁决。
 const dialogueTurnBoundarySuperseded = "boundarySuperseded"
 
-// errDialogueTurnEffectBound 是包内哨兵:轮内已有动作行绑定过发送意图
-// (EffectIntentID/EffectStartedAt/SentAt 任一非空),按承重墙纪律不得作废
-// ——判据是动作行事实,不看 FailureReason 字符串,effectSuspect 族停靠轮
-// 天然带 EffectIntentID,被这里机械挡住。由调用方决定是拒绝开轮(开轮闸)
-// 还是回落保守 manualRequired(多气泡已发前缀后候选人插话的现状,该形态
-// 的取舍另案待甲方裁决)。
-var errDialogueTurnEffectBound = errors.New("dialogue turn has effect-bound actions")
+// errDialogueTurnEffectBound 是包内哨兵:轮内有动作行绑定着**在途**发送意图
+// (dispatching/reconciling/verifying/suspect),或声称派发过却缺 intent
+// 关联、intent 引用悬空——按承重墙纪律不得作废,等 WAL/suspect 收敛。判据是
+// 动作行与 intent 状态事实,不看 FailureReason 字符串;effectSuspect 族停靠
+// 轮天然带 suspect intent,被这里机械挡住。由调用方决定是拒绝开轮(开轮闸)
+// 还是回落保守 manualRequired(inputBoundaryChanged)。
+//
+// 2026-09-08 甲方裁决前,任何 ok 终局(已发前缀)也算案底,多气泡已发两条后
+// 候选人插话即整个候选人冻结等人;裁决后已发的话不构成继续旧轮的理由,只有
+// 在途意图才挡作废。
+var errDialogueTurnEffectBound = errors.New("dialogue turn has in-flight effect-bound actions")
 
-// supersedeDialogueTurnForBoundaryTx 把一个从未派发过发送意图的旧轮连同其
-// 未终局动作显式标记 superseded。形状对齐归档先例
-// supersedeCommunicationV4PreEffectTurnForArchiveTx:只改 turn/action 状态列,
-// 不产生新的投影 application 行,不触碰聚合 AutomationStatus 与已存在的
-// 不可变回执——head 重放校验语义不变。已 superseded 的轮幂等返回。
+// dialogueTurnEffectIntentTerminal 报告一个 intent 是否已终局——作废旧轮
+// 只被在途 intent 挡住。白名单写法:未知或新增的状态按保守方向视作在途。
+func dialogueTurnEffectIntentTerminal(status EffectIntentStatus) bool {
+	switch status {
+	case EffectIntentOk, EffectIntentResolvedOk, EffectIntentFailed, EffectIntentResolvedFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// supersedeDialogueTurnForBoundaryTx 把一个没有在途发送意图的旧轮连同其
+// 未派发动作显式作废。形状对齐归档先例
+// supersedeCommunicationV4PreEffectTurnForArchiveTx 与陈旧 planned 作废
+// (SupersedeStaleDialoguePlannedAction):只改 turn/action 状态列,不产生新的
+// 投影 application 行,不触碰聚合 AutomationStatus 与已存在的不可变回执——
+// head 重放校验语义不变;绑定过 intent 的动作行零触碰。轮的终局:有已发
+// 前缀收 completed(已发的算发过,锚点照滑),否则收 superseded;两者的
+// failure_reason 都记 boundarySuperseded。已终局的轮幂等返回。
 func supersedeDialogueTurnForBoundaryTx(tx *gorm.DB, turn *DialogueTurn, at time.Time) error {
-	if turn.Status == DialogueTurnSuperseded {
+	if turn.Status == DialogueTurnSuperseded ||
+		(turn.Status == DialogueTurnCompleted && turn.FailureReason == dialogueTurnBoundarySuperseded) {
 		return nil
 	}
 	switch turn.Status {
@@ -508,12 +530,12 @@ func supersedeDialogueTurnForBoundaryTx(tx *gorm.DB, turn *DialogueTurn, at time
 	default:
 		return ErrDialogueTurnState
 	}
-	// Q6(2026-08-03 甲方批准,2026-08-27 随停机点第二步实施):案底判据
-	// 放宽为"案底 intent 终局全部属于 failed/resolvedFailed(构造性零副作用)
-	// 才可作废"。干净失败重试链上的 retried 留档行不再终身挡住作废重开;
-	// 已发前缀(sent)、在途(pending)与 suspect 冻结中的 intent 照旧是
-	// 承重墙,一字不动。缺 intent 关联却声称已开始派发的异常形状按保守
-	// 方向视作案底。
+	// 案底判据沿革:2026-08-02 任何绑定过 intent 的行都是案底;Q6(2026-08-03
+	// 甲方批准,2026-08-27 实施)放宽为 failed/resolvedFailed 终局不算;
+	// 2026-09-08 甲方裁决再放宽为"只有在途 intent 才是案底"——ok 终局(已发
+	// 前缀)同样不挡作废。dispatching/reconciling/verifying/suspect 照旧是
+	// 承重墙,一字不动;缺 intent 关联却声称已开始派发、或 intent 引用悬空的
+	// 异常形状按保守方向视作案底。
 	var bound []CommunicationAction
 	if err := tx.Where(
 		"turn_id = ? AND (effect_intent_id IS NOT NULL OR effect_started_at IS NOT NULL OR sent_at IS NOT NULL)",
@@ -521,6 +543,7 @@ func supersedeDialogueTurnForBoundaryTx(tx *gorm.DB, turn *DialogueTurn, at time
 	).Find(&bound).Error; err != nil {
 		return err
 	}
+	hasSent := false
 	for index := range bound {
 		row := bound[index]
 		if row.EffectIntentID == nil {
@@ -534,8 +557,11 @@ func supersedeDialogueTurnForBoundaryTx(tx *gorm.DB, turn *DialogueTurn, at time
 			}
 			return err
 		}
-		if intent.Status != EffectIntentFailed && intent.Status != EffectIntentResolvedFailed {
+		if !dialogueTurnEffectIntentTerminal(intent.Status) {
 			return errDialogueTurnEffectBound
+		}
+		if row.SentAt != nil || row.Status == CommunicationActionSent {
+			hasSent = true
 		}
 	}
 	// planned 是未发动作,manualRequired 是停靠时被一同标注的未发动作;两者
@@ -553,10 +579,16 @@ func supersedeDialogueTurnForBoundaryTx(tx *gorm.DB, turn *DialogueTurn, at time
 		}).Error; err != nil {
 		return err
 	}
+	// 已发前缀的轮收 completed(对齐陈旧 planned 作废的形状:链部分完成,
+	// 已发的算发过),从未发出任何东西的轮收 superseded。
+	terminal := DialogueTurnSuperseded
+	if hasSent {
+		terminal = DialogueTurnCompleted
+	}
 	updated := tx.Model(&DialogueTurn{}).
 		Where("turn_id = ? AND status = ?", turn.TurnID, turn.Status).
 		Updates(map[string]any{
-			"status":         DialogueTurnSuperseded,
+			"status":         terminal,
 			"failure_reason": dialogueTurnBoundarySuperseded,
 			"updated_at":     at,
 		})
@@ -570,11 +602,12 @@ func supersedeDialogueTurnForBoundaryTx(tx *gorm.DB, turn *DialogueTurn, at time
 }
 
 // settleDialogueTurnBoundaryMismatchTx 是 AI 边界重验与结果落账重验发现输入
-// 边界已变时的统一收敛:pre-effect 轮按 2026-08-02 裁决作废(supersede),不
-// 冻结候选人;带 effect 案底的轮(多气泡已发前缀后候选人插话)保持既有保守
-// manualRequired 隔离——那条链已进入发送领域,归 WAL/suspect/人工收敛。
+// 边界已变时的统一收敛:没有在途 intent 的轮按 2026-08-02/2026-09-08 裁决
+// 作废(已发前缀收 completed),不冻结候选人;带在途 intent 案底的轮保持既有
+// 保守 manualRequired 隔离——那条链正在发送领域里,归 WAL/suspect/人工收敛。
 func settleDialogueTurnBoundaryMismatchTx(tx *gorm.DB, turn *DialogueTurn, at time.Time) error {
-	if turn.Status == DialogueTurnSuperseded {
+	if turn.Status == DialogueTurnSuperseded ||
+		(turn.Status == DialogueTurnCompleted && turn.FailureReason == dialogueTurnBoundarySuperseded) {
 		return nil
 	}
 	// binding 失败并不都等于"世界长出了新输入":v4 聚合已被巡检隔离或人工
@@ -604,7 +637,7 @@ func settleDialogueTurnBoundaryMismatchTx(tx *gorm.DB, turn *DialogueTurn, at ti
 // SupersedeDialogueTurnForBoundary 是巡检层在 store 边界重验报告
 // ErrDialogueTurnBinding 后的幂等兜底入口:store 层多半已在同事务内作废旧轮
 // (再进来是 no-op);个别只报错不收敛的路径由这里补收敛。语义与事务内版本
-// 一致:pre-effect 作废,effect 案底回落保守停靠。
+// 一致:无在途 intent 即作废(已发前缀收 completed),在途案底回落保守停靠。
 func (s *Store) SupersedeDialogueTurnForBoundary(turnID string, at time.Time) error {
 	if strings.TrimSpace(turnID) == "" {
 		return ErrDialogueTurnInvalid
@@ -694,7 +727,10 @@ func (s *Store) ApplyResumeBusinessClassification(turnID string, classifiedAt ti
 			if !errors.Is(err, ErrDialogueTurnBinding) {
 				return err
 			}
-			return markDialogueTurnManualTx(tx, &out, "inputBoundaryChanged", classifiedAt)
+			// 简历业务事件轮什么都还没发:边界失配按 2026-08-02 裁决作废旧轮,
+			// 不冻结候选人(2026-09-08 补齐,此前这里直接标 inputBoundaryChanged
+			// 并冻结,是漏改的角落)。
+			return settleDialogueTurnBoundaryMismatchTx(tx, &out, classifiedAt)
 		}
 		var profile CandidateProfile
 		if err := tx.First(&profile, "profile_id = ?", out.ProfileID).Error; err != nil {
@@ -1501,7 +1537,10 @@ func (s *Store) RecoverInterruptedAIInvocations(at time.Time) (int, error) {
 				return bindingErr
 			}
 			if bindingErr != nil {
-				if err := markDialogueTurnManualTx(tx, &turn, "inputBoundaryChanged", at); err != nil {
+				// 崩溃前只预留了意向调用、什么都没发的轮:边界失配按 2026-08-02
+				// 裁决作废,不冻结候选人(2026-09-08 补齐,此前直接标
+				// inputBoundaryChanged 并冻结)。
+				if err := settleDialogueTurnBoundaryMismatchTx(tx, &turn, at); err != nil {
 					return err
 				}
 				continue
