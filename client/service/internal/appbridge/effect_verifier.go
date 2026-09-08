@@ -351,18 +351,20 @@ func (v EffectVerifier) verifyCard(
 		targetHash = syncledger.WechatExchangeContentHash()
 	case protocol.PrimChatSendInviteCard:
 		if req.InviteCardArgs == nil || req.InviteCardArgs.ConversationRef == "" ||
-			!communication.ValidV4InterviewDetailsShape(
-				req.InviteCardArgs.Interview.StartsAt,
-				req.InviteCardArgs.Interview.EndsAt,
-				string(req.InviteCardArgs.Interview.Method),
+			!communication.ValidV4InterviewRequest(
+				req.InviteCardArgs.Interview.StartsAt, string(req.InviteCardArgs.Interview.Method),
 			) {
 			return dispatch.VerificationObservation{}, errors.New("验证请求不是完整 chat.sendInviteCard 意图")
 		}
 		conversationRef = req.InviteCardArgs.ConversationRef
-		value := req.InviteCardArgs.Interview
-		interview = &value
+		// 命令只带开始与方式(2026-09-08):期望值里没有结束时间,目标指纹是缺席投影;
+		// 卡上的结束时间按观察值收,认行逻辑见 classifyVerifiedCard。
+		interview = &protocol.InterviewDetails{
+			StartsAt: req.InviteCardArgs.Interview.StartsAt,
+			Method:   req.InviteCardArgs.Interview.Method,
+		}
 		targetHash = syncledger.InterviewInviteContentHash(
-			value.StartsAt, value.EndsAt, string(value.Method),
+			interview.StartsAt, 0, string(interview.Method),
 		)
 	default:
 		return dispatch.VerificationObservation{}, errors.New("验证请求不是卡片意图")
@@ -525,16 +527,20 @@ func classifyVerifiedCard(
 				matched = &messages[i]
 			}
 		case protocol.PrimChatSendInviteCard:
-			// 2026-09-04 落地 09-02 底稿 1.1:卡上带参数(智联)仍逐项相等且 hash 等于参数配方;
+			// 2026-09-04 落地 09-02 底稿 1.1:卡上带参数(智联)开始与方式须与命令相等、hash 等于
+			// 按卡上参数算的配方;结束时间取观察值(2026-09-08 甲方裁决:时长由手填,命令不带)。
 			// 卡上不带参数(BOSS,interview 缺席)以方向、类型、派发窗口三项判成功且 hash 等于
 			// 常量投影。不再要求 cardState=unknown——平台私有状态不解释。
 			if expectedInterview == nil || *message.CardType != protocol.CardTypeInterviewInvite {
 				continue
 			}
 			if message.Interview != nil {
-				if *message.Interview == *expectedInterview &&
+				observed := *message.Interview
+				if observed.StartsAt == expectedInterview.StartsAt &&
+					observed.Method == expectedInterview.Method &&
+					(observed.EndsAt == 0 || observed.EndsAt > observed.StartsAt) &&
 					message.ContentHash == syncledger.InterviewInviteContentHash(
-						expectedInterview.StartsAt, expectedInterview.EndsAt, string(expectedInterview.Method)) {
+						observed.StartsAt, observed.EndsAt, string(observed.Method)) {
 					matched = &messages[i]
 				}
 			} else if message.ContentHash == syncledger.InterviewInviteNeutralContentHash() {

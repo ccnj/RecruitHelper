@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -62,9 +61,8 @@ func (a *API) sendInterviewCard(w http.ResponseWriter, r *http.Request) {
 		Platform:         body.Platform,
 		AccountRef:       body.AccountRef,
 		ConversationRef:  body.ConversationRef,
-		Interview: protocol.InterviewDetails{
+		Interview: protocol.InterviewRequest{
 			StartsAt: body.StartsAt,
-			EndsAt:   body.StartsAt + communication.V4InterviewDurationMs,
 			Method:   protocol.InterviewMethodWechatVideo,
 		},
 	})

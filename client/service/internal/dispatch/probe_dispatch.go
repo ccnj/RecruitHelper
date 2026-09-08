@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strings"
 
-	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 )
@@ -20,7 +19,7 @@ type ProbeInterviewEditorRequest struct {
 	Platform        string
 	AccountRef      string
 	ConversationRef string
-	Interview       protocol.InterviewDetails
+	Interview       protocol.InterviewRequest
 }
 
 // ProbeInterviewEditor 派发 debug.probeInterviewEditor 并等待逻辑终局。
@@ -36,20 +35,13 @@ func (d *Dispatcher) ProbeInterviewEditor(
 	if req.Platform == "" || req.AccountRef == "" || req.ConversationRef == "" {
 		return nil, errors.New("缺少有效的账号/会话标识")
 	}
-	// 形态按 method 分支(2026-07-31 甲方裁决):线上仍是 startsAt+30 分钟的
-	// 微信视频;现场面试在平台上没有时长控件,endsAt 必须缺席而不得合成。
+	// 彩排只核开始时刻为正与方式在开放集合内(2026-09-08 起 args 不再带结束时间,
+	// 时长由手按平台表单填)。
 	if req.Interview.StartsAt <= 0 {
 		return nil, errors.New("邀面参数必须给出正的 startsAt")
 	}
 	switch req.Interview.Method {
-	case protocol.InterviewMethodWechatVideo:
-		if req.Interview.EndsAt != req.Interview.StartsAt+communication.V4InterviewDurationMs {
-			return nil, errors.New("微信视频彩排的 endsAt 必须是 startsAt+30 分钟")
-		}
-	case protocol.InterviewMethodOnsite:
-		if req.Interview.EndsAt != 0 {
-			return nil, errors.New("现场面试彩排不得携带 endsAt")
-		}
+	case protocol.InterviewMethodWechatVideo, protocol.InterviewMethodOnsite:
 	default:
 		return nil, errors.New("彩排面试方式只开放 wechatVideo 与 onsite")
 	}

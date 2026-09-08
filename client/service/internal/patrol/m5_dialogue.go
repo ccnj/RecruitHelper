@@ -527,22 +527,18 @@ func (a *roundActor) dispatchM5Action(
 			},
 		)
 	case store.CommunicationActionInterviewInvite:
-		if !communication.ValidV4PlannedInterview(
-			action.InterviewStartsAtMs, action.InterviewEndsAtMs, action.InterviewMethod,
-		) {
+		if !communication.ValidV4PlannedInterview(action.InterviewStartsAtMs, action.InterviewMethod) {
 			return a.manager.store.MarkM5AutomaticActionManualRequired(
 				action.ActionID,
 				"automaticActionInvalid",
 				a.manager.now(),
 			)
 		}
-		// 现场面试没有 endsAt：契约里它是 omitempty，留 0 即缺席，不得合成。
-		interview := &protocol.InterviewDetails{
+		// 结束时间不进命令(2026-09-08 甲方裁决):时长由手按平台表单填。存量动作行上
+		// 残留的 endsAt 在这里被有意丢弃,不再随派发。
+		interview := &protocol.InterviewRequest{
 			StartsAt: *action.InterviewStartsAtMs,
 			Method:   protocol.InterviewMethod(*action.InterviewMethod),
-		}
-		if action.InterviewEndsAtMs != nil {
-			interview.EndsAt = *action.InterviewEndsAtMs
 		}
 		handle, err = a.manager.runner.(AutomaticCardRunner).StartAutomaticCard(
 			ctx,

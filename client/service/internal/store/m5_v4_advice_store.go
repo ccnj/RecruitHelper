@@ -358,15 +358,8 @@ func supportedCommunicationV4CardPlan(plan communication.V4PlannedAction) bool {
 			plan.InterviewEndsAtMs == nil &&
 			plan.InterviewMethod == nil
 	case communication.V4ActionInterviewInvite:
-		if !communication.ValidV4InterviewShape(
-			plan.InterviewStartsAtMs, plan.InterviewEndsAtMs, plan.InterviewMethod,
-		) {
-			return false
-		}
-		// 线上会议的时长由我方派生,必须恰好是标准值;现场面试没有时长可言。
-		return plan.InterviewEndsAtMs == nil ||
-			*plan.InterviewEndsAtMs ==
-				*plan.InterviewStartsAtMs+communication.V4InterviewDurationMs
+		// 时长由手填(2026-09-08):计划只核开始与方式;残留的 endsAt 不参与判定。
+		return communication.ValidV4PlannedInterview(plan.InterviewStartsAtMs, plan.InterviewMethod)
 	default:
 		return false
 	}

@@ -1813,18 +1813,11 @@ func communicationActionMatchesV4Plan(
 			expectedText == "" &&
 			expectedParent != nil &&
 			sameOptionalPlanKey(action.DependsOnActionID, expectedParent) &&
-			communication.ValidV4InterviewShape(
-				action.InterviewStartsAtMs, action.InterviewEndsAtMs, action.InterviewMethod,
-			) &&
-			communication.ValidV4InterviewShape(
-				plan.InterviewStartsAtMs, plan.InterviewEndsAtMs, plan.InterviewMethod,
-			) &&
+			communication.ValidV4PlannedInterview(action.InterviewStartsAtMs, action.InterviewMethod) &&
+			communication.ValidV4PlannedInterview(plan.InterviewStartsAtMs, plan.InterviewMethod) &&
 			*action.InterviewStartsAtMs == *plan.InterviewStartsAtMs &&
 			sameOptionalInt64(action.InterviewEndsAtMs, plan.InterviewEndsAtMs) &&
 			*action.InterviewMethod == *plan.InterviewMethod &&
-			(action.InterviewEndsAtMs == nil ||
-				*action.InterviewEndsAtMs ==
-					*action.InterviewStartsAtMs+communication.V4InterviewDurationMs) &&
 			action.ContentHash == communicationInterviewInviteContentHash(
 				*action.InterviewStartsAtMs,
 				optionalInt64Value(action.InterviewEndsAtMs),
@@ -2031,9 +2024,7 @@ func materializeDependentCommunicationActionTx(
 		// 现场面试没有 endsAt，这里必须走 optionalInt64Value 而不是解引用：
 		// 直接解会在物化第一张 onsite 卡时 panic，而这条路径在 WS 结果处理的
 		// 事务里，全仓没有 recover，崩的是整个脑进程。
-		if !communication.ValidV4PlannedInterview(
-			action.InterviewStartsAtMs, action.InterviewEndsAtMs, action.InterviewMethod,
-		) {
+		if !communication.ValidV4PlannedInterview(action.InterviewStartsAtMs, action.InterviewMethod) {
 			return ErrCommunicationActionConflict
 		}
 		action.ContentHash = communicationInterviewInviteContentHash(
@@ -2162,7 +2153,7 @@ func communicationActionMatchesMessage(action CommunicationAction, message Messa
 			message.CardType == "interviewInvite" &&
 			message.CardState == "unknown" &&
 			sameOptionalInt64(message.InterviewStartsAtMs, action.InterviewStartsAtMs) &&
-			sameOptionalInt64(message.InterviewEndsAtMs, action.InterviewEndsAtMs) &&
+			// 结束时间由手填(2026-09-08):账本行带的是观察值,计划动作不持有它,不比。
 			sameOptionalString(message.InterviewMethod, action.InterviewMethod)
 	default:
 		return false
@@ -3097,11 +3088,8 @@ func validateM5AutomaticCommand(
 		var args protocol.ChatSendInviteCardArgs
 		if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
 			args.ConversationRef != conversationRef ||
-			!communication.ValidV4PlannedInterview(
-				action.InterviewStartsAtMs, action.InterviewEndsAtMs, action.InterviewMethod,
-			) ||
+			!communication.ValidV4PlannedInterview(action.InterviewStartsAtMs, action.InterviewMethod) ||
 			args.Interview.StartsAt != *action.InterviewStartsAtMs ||
-			args.Interview.EndsAt != optionalInt64Value(action.InterviewEndsAtMs) ||
 			string(args.Interview.Method) != *action.InterviewMethod {
 			return ErrCommunicationActionConflict
 		}

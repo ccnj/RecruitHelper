@@ -79,8 +79,8 @@ import type {
   DebugOsTypeArgs,
   DebugOsTypeData,
   DebugOsProbeData,
-  InterviewDetails,
   InterviewMethod,
+  InterviewRequest,
   JobPostingSection,
   JobReadPublishedListData,
   MessageAnchor,
@@ -3471,8 +3471,8 @@ export interface BossInterviewFormPlan {
   firstEndText: string
   /** 时间框回填值 HH:mm-HH:mm。 */
   timeValue: string
-  /** onsite:契约无 endsAt,结束由开始+1 小时合成,只填表、只留痕。 */
-  endSynthesized: boolean
+  /** 结束时刻的毫秒时间戳:两种形态都是开始+1 小时,随成功 data.interview 回脑落账。 */
+  endsAtMs: number
 }
 
 function pad2(value: number): string {
@@ -3489,10 +3489,14 @@ function localDateParts(at: Date): { year: number; month: number; day: number } 
 
 /**
  * 契约 interview → 表单要填的值。按本机时区拆;任一不合格即 invalid,**不取整、不改时间**(少做方向),
- * 由调用方零点击干净失败交脑下轮重铸。脑侧 canonical 时段是整点起 1 小时格,正常全部合格。
+ * 由调用方零点击干净失败交脑下轮重铸。
+ *
+ * 命令只带开始与方式(2026-09-08 甲方裁决:面试时长是平台表单细节,由手填)。BOSS 宽松时间的
+ * 结束列在选定开始后重新过滤、最早即开始+1 小时(平台事实 §十五),两种形态都填这一项;它随成功
+ * data.interview 回脑落账。改前脑侧写死 30 分钟、线上卡在这里必被拒(2026-09-08 真机)。
  */
 export function planBossInterviewForm(
-  interview: InterviewDetails, now: number,
+  interview: InterviewRequest, now: number,
 ): { status: 'ok'; plan: BossInterviewFormPlan } | { status: 'invalid'; detail: string } {
   const invalid = (detail: string): { status: 'invalid'; detail: string } => ({ status: 'invalid', detail })
   const method = interview.method
@@ -3508,25 +3512,7 @@ export function planBossInterviewForm(
   if (startMin < INTERVIEW_START_MIN || startMin > INTERVIEW_START_MAX) {
     return invalid(`开始时间 ${hhmm(startMin)} 不在平台 08:00–20:00 范围`)
   }
-  let endMin: number
-  let endSynthesized = false
-  if (method === 'onsite') {
-    if (typeof interview.endsAt === 'number') return invalid('线下面试的契约不携带结束时间')
-    endMin = startMin + INTERVIEW_MIN_DURATION
-    endSynthesized = true
-  } else {
-    const endsAt = interview.endsAt
-    if (typeof endsAt !== 'number' || !Number.isSafeInteger(endsAt)) return invalid('线上面试缺结束时间')
-    const end = new Date(endsAt)
-    if (end.getFullYear() !== start.getFullYear() || end.getMonth() !== start.getMonth() || end.getDate() !== start.getDate()) {
-      return invalid('结束时间与开始时间不在同一天')
-    }
-    endMin = end.getHours() * 60 + end.getMinutes()
-    if (end.getSeconds() !== 0 || end.getMilliseconds() !== 0 || end.getMinutes() % INTERVIEW_SLOT_MINUTES !== 0) {
-      return invalid(`结束时间 ${hhmm(endMin)}:${pad2(end.getSeconds())} 不在 30 分钟格上`)
-    }
-    if (endMin < startMin + INTERVIEW_MIN_DURATION) return invalid(`结束 ${hhmm(endMin)} 早于开始 ${hhmm(startMin)}+1 小时`)
-  }
+  const endMin = startMin + INTERVIEW_MIN_DURATION
   if (endMin > INTERVIEW_END_MAX) return invalid(`结束时间 ${hhmm(endMin)} 超出平台 21:00`)
   const today = localDateParts(new Date(now))
   const target = localDateParts(start)
@@ -3547,7 +3533,7 @@ export function planBossInterviewForm(
       endText: hhmm(endMin),
       firstEndText: hhmm(startMin + INTERVIEW_MIN_DURATION),
       timeValue: `${hhmm(startMin)}-${hhmm(endMin)}`,
-      endSynthesized,
+      endsAtMs: startsAt + INTERVIEW_MIN_DURATION * 60_000,
     },
   }
 }
@@ -4051,7 +4037,7 @@ async function sendBossInviteCard(
   if (button.disabled) throw new PlatformError('GUARD_FAILED', '约面试钮 disabled,本轮不发', 'afterRecovery')
 
   const trace: string[] = [
-    `计划 ${plan.radioText}${plan.meetingText ? '/' + plan.meetingText : ''} ${plan.date} ${plan.timeValue}${plan.endSynthesized ? '(结束=开始+1h,只填表)' : ''}`,
+    `计划 ${plan.radioText}${plan.meetingText ? '/' + plan.meetingText : ''} ${plan.date} ${plan.timeValue}(结束=开始+1h,由手填)`,
   ]
   const sendExpect = { radioText: plan.radioText, meetingText: plan.meetingText, meetingCode: plan.meetingCode, date: plan.date, timeValue: plan.timeValue }
 
@@ -4317,7 +4303,8 @@ async function sendBossInviteCard(
     contentHash,
     sourceKey: await bossSourceKey(hit.mid),
     observedAt: Date.now(),
-    interview: args.interview,
+    // 回报实际填入的起止(2026-09-08):结束时间是手填的,脑以此落账。
+    interview: { startsAt: args.interview.startsAt, endsAt: plan.endsAtMs, method: args.interview.method },
     ...(hit.time !== null && hit.time > 0 ? { tsApprox: hit.time } : {}),
   }
   if (validatePrimitiveData(PrimitiveName.ChatSendInviteCard, 1, data).length !== 0) {

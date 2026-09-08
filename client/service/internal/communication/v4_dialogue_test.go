@@ -312,8 +312,7 @@ func TestV4DialogueDeterministicallyClosesReplyActionSuggestions(t *testing.T) {
 			decision.Actions[1].Kind != V4ActionInterviewInvite ||
 			decision.Actions[1].InterviewStartsAtMs == nil ||
 			*decision.Actions[1].InterviewStartsAtMs != wantStart ||
-			decision.Actions[1].InterviewEndsAtMs == nil ||
-			*decision.Actions[1].InterviewEndsAtMs != wantStart+V4InterviewDurationMs ||
+			decision.Actions[1].InterviewEndsAtMs != nil ||
 			decision.Actions[1].InterviewMethod == nil ||
 			*decision.Actions[1].InterviewMethod != "wechatVideo" {
 			t.Fatalf("合法邀面建议没有派生固定卡片参数: decision=%+v err=%v", decision, err)
@@ -724,9 +723,6 @@ func TestRoundUpToInterviewTimeGrid(t *testing.T) {
 		if got := roundUpToInterviewTimeGrid(tc.in); got != tc.want {
 			t.Fatalf("%s: roundUpToInterviewTimeGrid(%d)=%d, want %d", tc.name, tc.in, got, tc.want)
 		}
-	}
-	if V4InterviewDurationMs%V4InterviewTimeGridMs != 0 {
-		t.Fatalf("面试时长必须落在平台时间格上: duration=%d grid=%d", V4InterviewDurationMs, V4InterviewTimeGridMs)
 	}
 	// 推荐时段步长(m5ai,2026-09-04 起 30 分钟)必须是平台格的整数倍:否则 AI 命中的
 	// 时刻会在这里被向上取整,发出的卡与话术承诺的时间对不上。

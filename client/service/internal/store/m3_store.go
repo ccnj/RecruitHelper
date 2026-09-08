@@ -1166,7 +1166,7 @@ func (s *Store) ResolveCardVerified(req VerifiedCardSuccess) (*Message, error) {
 		if intent.Platform != req.ConversationKey.Platform ||
 			intent.AccountRef != req.ConversationKey.AccountRef ||
 			intent.TargetRef != req.ConversationKey.ConversationRef ||
-			!cardContentHashMatchesIntent(&intent, req.Card.ContentHash) {
+			!cardContentHashMatchesIntent(&intent, req.Card) {
 			return ErrEffectIntentConflict
 		}
 		message, err := applyCardResultTx(tx, &intent, req.Card, req.At)
@@ -1528,11 +1528,26 @@ func interviewInviteNeutralContentHash() string {
 // cardContentHashMatchesIntent:卡片结果/验证观察到的 hash 是否属于该意图。
 // 意图指纹是按参数算的配方;卡上不带参数的平台(BOSS)观察到的是常量投影,
 // 2026-09-04 落地 09-02 底稿 1.2 后两者都算本次。换微信卡不变。
-func cardContentHashMatchesIntent(intent *EffectIntent, observed string) bool {
+// 2026-09-08 起邀面卡的意图指纹只含开始与方式(endsAt 投影为空串),观察行的 hash 可以
+// 带上手填的结束时间:此时要求观察行的 hash 与它自己的参数自洽,且去掉结束时间后的
+// 身份等于意图指纹——开始与方式对不上仍是冲突,只放宽结束时间。
+func cardContentHashMatchesIntent(intent *EffectIntent, card CardResultMutation) bool {
+	observed := card.ContentHash
 	if intent.SendFingerprint == observed {
 		return true
 	}
-	return intent.Primitive == primitiveChatSendInviteCard && observed == interviewInviteNeutralContentHash()
+	if intent.Primitive != primitiveChatSendInviteCard {
+		return false
+	}
+	if observed == interviewInviteNeutralContentHash() {
+		return true
+	}
+	if card.InterviewStartsAtMs == nil || card.InterviewMethod == nil {
+		return false
+	}
+	starts, method := *card.InterviewStartsAtMs, *card.InterviewMethod
+	return observed == communicationInterviewInviteContentHash(starts, optionalInt64Value(card.InterviewEndsAtMs), method) &&
+		intent.SendFingerprint == communicationInterviewInviteContentHash(starts, 0, method)
 }
 
 func applyCardResultTx(
@@ -1546,7 +1561,7 @@ func applyCardResultTx(
 	}
 	if !validMessageSourceKey(card.ContentHash) || !validMessageSourceKey(card.SourceKey) ||
 		intent.TargetRef == "" || card.ConversationRef != intent.TargetRef ||
-		!cardContentHashMatchesIntent(intent, card.ContentHash) {
+		!cardContentHashMatchesIntent(intent, card) {
 		return nil, ErrEffectIntentConflict
 	}
 	switch intent.Primitive {

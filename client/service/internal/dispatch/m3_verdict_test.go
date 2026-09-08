@@ -29,25 +29,27 @@ func makeEffectSuspectReviewable(t *testing.T, d *Dispatcher, st *store.Store, r
 	_ = d
 }
 
-func TestSendAutomaticInterviewCardRejectsNonThirtyMinuteDurationBeforeWAL(t *testing.T) {
-	actionID := "turn-non-thirty|interviewInvite"
+func TestSendAutomaticInterviewCardRejectsInvalidRequestBeforeWAL(t *testing.T) {
+	// 2026-09-08 起命令只带开始与方式(时长由手填):WAL 前只剩两道形态闸——开始时刻为正、
+	// 方式在开放集合内。此前这里钉的是"非 30 分钟拒绝",该概念已随常量删除。
+	actionID := "turn-bad-request|interviewInvite"
 	intentID, err := store.M5AutomaticIntentID(actionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	startsAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute).UnixMilli()
-	_, err = (&Dispatcher{}).SendAutomaticCard(SendAutomaticCardRequest{
-		IntentID: intentID, AutomaticActionID: actionID,
-		Platform: "zhilian", AccountRef: "account", ConversationRef: "conversation",
-		Primitive: protocol.PrimChatSendInviteCard,
-		Interview: &protocol.InterviewDetails{
-			StartsAt: startsAt,
-			EndsAt:   startsAt + (45 * time.Minute).Milliseconds(),
-			Method:   protocol.InterviewMethodWechatVideo,
-		},
-	})
-	if !errors.Is(err, store.ErrCommunicationActionInvalid) {
-		t.Fatalf("非 30 分钟邀面必须在 WAL 前拒绝: err=%v", err)
+	for name, interview := range map[string]*protocol.InterviewRequest{
+		"开始时刻为零":   {StartsAt: 0, Method: protocol.InterviewMethodWechatVideo},
+		"方式不在开放集合": {StartsAt: time.Now().Add(24 * time.Hour).UnixMilli(), Method: "phone"},
+	} {
+		_, err = (&Dispatcher{}).SendAutomaticCard(SendAutomaticCardRequest{
+			IntentID: intentID, AutomaticActionID: actionID,
+			Platform: "zhilian", AccountRef: "account", ConversationRef: "conversation",
+			Primitive: protocol.PrimChatSendInviteCard,
+			Interview: interview,
+		})
+		if !errors.Is(err, store.ErrCommunicationActionInvalid) {
+			t.Fatalf("%s: 形态不合格的邀面必须在 WAL 前拒绝: err=%v", name, err)
+		}
 	}
 }
 

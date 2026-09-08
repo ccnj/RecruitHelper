@@ -436,7 +436,7 @@
         "type": "object",
         "fields": {
           "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
-          "interview": { "ref": "InterviewDetails" }
+          "interview": { "ref": "InterviewRequest" }
         }
       },
       "DebugProbeInterviewEditorData": {
@@ -633,6 +633,13 @@
         "fields": {
           "startsAt": { "type": "int64", "minimum": 1 },
           "endsAt": { "type": "int64", "minimum": 1, "optional": true },
+          "method": { "type": "string", "enumRef": "enums.interviewMethod" }
+        }
+      },
+      "InterviewRequest": {
+        "type": "object",
+        "fields": {
+          "startsAt": { "type": "int64", "minimum": 1 },
           "method": { "type": "string", "enumRef": "enums.interviewMethod" }
         }
       },
@@ -864,7 +871,7 @@
         "type": "object",
         "fields": {
           "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
-          "interview": { "ref": "InterviewDetails" }
+          "interview": { "ref": "InterviewRequest" }
         }
       },
       "ChatSendInviteCardData": {
@@ -1765,7 +1772,7 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "conversation.tracked", "witness/1"],
       "execBudgetMs": 240000, "deadlineMs": 600000, "leaseMs": 30000,
       "verification": { "primitive": "chat.readThread", "ver": 1, "maxRounds": 3 },
-      "note": "只向既有 tracked 会话发送一次邀面卡,method 支持 wechatVideo 与 onsite:wechatVideo 必须带 endsAt 且大于 startsAt,onsite 必须缺席 endsAt(平台对现场面试不提供结束时间,不得由 startsAt 合成或以占位值冒充)。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;准备步骤不得产生候选人可见副作用,最终发送至多调用一次。成功按「发后页面可见」(2026-09-04):验证读窗口内存在方向 out、card/interviewInvite、稳定 sourceKey、时间不早于派发的行;卡上带邀面参数时参数须与命令逐项相等且 contentHash 等于参数配方(onsite 把缺席的 endsAt 投影为空串),卡上不带参数(interview 缺席)时以方向、类型、派发窗口三项判成功且 contentHash 等于无参数常量投影 sha256(\"card\\x1finterviewInvite\");平台私有状态值不得解释业务状态。任何阴性只进入 chat.readThread 验证或 suspect,禁止第二次动作"
+      "note": "只向既有 tracked 会话发送一次邀面卡,method 支持 wechatVideo 与 onsite。args.interview 只带 startsAt 与 method(2026-09-08 甲方裁决:面试时长是平台表单细节,由手填——智联线上选 30 分钟项、现场无时长控件,BOSS 两种形态都填开始加 1 小时);成功 data.interview 回报手实际填入或卡上观察到的 {startsAt,endsAt?,method},平台对该形态不提供结束时间时 endsAt 省略、不得合成。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;准备步骤不得产生候选人可见副作用,最终发送至多调用一次。成功按「发后页面可见」(2026-09-04):验证读窗口内存在方向 out、card/interviewInvite、稳定 sourceKey、时间不早于派发的行;卡上带邀面参数时 startsAt/method 须与命令相等、endsAt 取卡上观察值,contentHash 等于按观察参数算的配方(缺席的 endsAt 投影为空串),卡上不带参数(interview 缺席)时以方向、类型、派发窗口三项判成功且 contentHash 等于无参数常量投影 sha256(\"card\\x1finterviewInvite\");平台私有状态值不得解释业务状态。任何阴性只进入 chat.readThread 验证或 suspect,禁止第二次动作"
     },
     "chat.acceptWechat": {
       "ver": 1, "class": "effectful", "batch": "X",

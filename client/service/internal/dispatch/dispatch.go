@@ -510,14 +510,19 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 			validationErr = errors.New("邀面卡 data 无法解析")
 		case data.ConversationRef != args.ConversationRef:
 			validationErr = errors.New("邀面卡 result 的 conversationRef 与命令不一致")
-		case !validInterviewDetails(args.Interview) || data.Interview != args.Interview:
+		case !communication.ValidV4InterviewRequest(args.Interview.StartsAt, string(args.Interview.Method)) ||
+			data.Interview.StartsAt != args.Interview.StartsAt ||
+			data.Interview.Method != args.Interview.Method ||
+			!validInterviewDetails(data.Interview):
+			// 结束时间由手填(2026-09-08):data.interview 回报实际起止,只核开始与方式
+			// 与命令相等、形态自洽。
 			validationErr = errors.New("邀面卡 result 的参数与命令不一致")
 		case !validLowerHex64(data.ContentHash) ||
 			!syncledger.InterviewInviteContentHashAccepted(
 				data.ContentHash,
-				args.Interview.StartsAt,
-				args.Interview.EndsAt,
-				string(args.Interview.Method),
+				data.Interview.StartsAt,
+				data.Interview.EndsAt,
+				string(data.Interview.Method),
 			):
 			// 参数配方或无参数常量投影之一(规格 §4.5,2026-09-04);别的一律非法。
 			validationErr = errors.New("邀面卡 result 的 contentHash 非法")
@@ -1064,7 +1069,15 @@ func (d *Dispatcher) realCardResultPlan(
 		if err := json.Unmarshal([]byte(r.Args), &args); err != nil {
 			return store.ResultCommandMutation{}, err
 		}
-		startsAt, endsAt, method := args.Interview.StartsAt, args.Interview.EndsAt, string(args.Interview.Method)
+		// 面试字段以手回报的 data.interview 为准(2026-09-08:结束时间由手填);失败 result
+		// 没有 data,退回命令参数,只有开始与方式。
+		startsAt, endsAt, method := args.Interview.StartsAt, int64(0), string(args.Interview.Method)
+		if res.Status == protocol.ResultStatusOk {
+			var data protocol.ChatSendInviteCardData
+			if err := json.Unmarshal(res.Data, &data); err == nil && data.Interview.StartsAt > 0 {
+				startsAt, endsAt, method = data.Interview.StartsAt, data.Interview.EndsAt, string(data.Interview.Method)
+			}
+		}
 		card = store.CardResultMutation{
 			ConversationRef: args.ConversationRef,
 			CardType:        "interviewInvite", CardState: "unknown",

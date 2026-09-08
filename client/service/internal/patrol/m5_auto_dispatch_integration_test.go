@@ -248,15 +248,21 @@ func (h *m5PositiveHand) SendEnvelope(handID string, env protocol.Envelope) erro
 		if err := json.Unmarshal(body.Args, &args); err != nil {
 			return err
 		}
+		// 假手按智联形态回报:时长由手填 30 分钟(2026-09-08),卡上的起止随 data 回脑。
+		observed := protocol.InterviewDetails{
+			StartsAt: args.Interview.StartsAt,
+			EndsAt:   args.Interview.StartsAt + int64((30*time.Minute)/time.Millisecond),
+			Method:   args.Interview.Method,
+		}
 		data, err = protocol.Encode(protocol.ChatSendInviteCardData{
 			ConversationRef: args.ConversationRef,
 			ContentHash: syncledger.InterviewInviteContentHash(
-				args.Interview.StartsAt,
-				args.Interview.EndsAt,
-				string(args.Interview.Method),
+				observed.StartsAt,
+				observed.EndsAt,
+				string(observed.Method),
 			),
 			SourceKey:  strings.Repeat("b", 64),
-			Interview:  args.Interview,
+			Interview:  observed,
 			ObservedAt: h.observedAtMilli(),
 		})
 		evidenceType = string(protocol.SendInviteCardEvidenceTypeOutboundInterviewInviteObserved)

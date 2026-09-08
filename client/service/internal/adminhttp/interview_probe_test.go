@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -239,9 +238,6 @@ func TestProbeInterviewEditorAPIOnsiteOmitsEndsAt(t *testing.T) {
 	if sentArgs.Interview.Method != protocol.InterviewMethodOnsite {
 		t.Fatalf("method 必须透传 onsite: %q", sentArgs.Interview.Method)
 	}
-	if sentArgs.Interview.EndsAt != 0 {
-		t.Fatalf("现场面试不得派生 endsAt: %d", sentArgs.Interview.EndsAt)
-	}
 	if sentArgs.Interview.StartsAt != startsAt {
 		t.Fatalf("startsAt 必须原样透传: %d", sentArgs.Interview.StartsAt)
 	}
@@ -286,8 +282,8 @@ func TestProbeInterviewEditorAPIDefaultsToWechatVideoWithDuration(t *testing.T) 
 		t.Fatalf("彩排 args 解析失败: %v", err)
 	}
 	if sentArgs.Interview.Method != protocol.InterviewMethodWechatVideo ||
-		sentArgs.Interview.EndsAt != startsAt+communication.V4InterviewDurationMs {
-		t.Fatalf("缺省必须是 wechatVideo + 30 分钟: %+v", sentArgs.Interview)
+		sentArgs.Interview.StartsAt != startsAt {
+		t.Fatalf("缺省必须是 wechatVideo,且只带开始时刻: %+v", sentArgs.Interview)
 	}
 }
 

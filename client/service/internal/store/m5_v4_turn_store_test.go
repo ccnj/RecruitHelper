@@ -525,9 +525,7 @@ func TestCommunicationV4ReplyActionPersistsMeetingPlanAndReplaysWithoutGrowth(t 
 		advice.Outcome.PlannedActions[1].Kind != communication.V4ActionInterviewInvite ||
 		advice.Outcome.PlannedActions[1].InterviewStartsAtMs == nil ||
 		*advice.Outcome.PlannedActions[1].InterviewStartsAtMs != wantStart ||
-		advice.Outcome.PlannedActions[1].InterviewEndsAtMs == nil ||
-		*advice.Outcome.PlannedActions[1].InterviewEndsAtMs !=
-			wantStart+communication.V4InterviewDurationMs ||
+		advice.Outcome.PlannedActions[1].InterviewEndsAtMs != nil ||
 		advice.Outcome.PlannedActions[1].InterviewMethod == nil ||
 		*advice.Outcome.PlannedActions[1].InterviewMethod != "wechatVideo" {
 		t.Fatalf("邀面 continuation 没有保留脱敏两动作计划: %+v", advice.Outcome)

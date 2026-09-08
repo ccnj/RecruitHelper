@@ -184,9 +184,10 @@ func TestCardVerificationReadAtomicallyAdoptsObservedCard(t *testing.T) {
 			name: "interview invite", primitive: protocol.PrimChatSendInviteCard,
 			args: protocol.ChatSendInviteCardArgs{
 				ConversationRef: "conversation-card-verifier",
-				Interview: protocol.InterviewDetails{
-					StartsAt: 1_722_000_000_000, EndsAt: 1_722_001_800_000,
-					Method: protocol.InterviewMethodWechatVideo,
+				// 命令不带结束时间(2026-09-08);卡上观察到的 30 分钟结束由验证器收进账本。
+				Interview: protocol.InterviewRequest{
+					StartsAt: 1_722_000_000_000,
+					Method:   protocol.InterviewMethodWechatVideo,
 				},
 			},
 			hash: syncledger.InterviewInviteContentHash(

@@ -267,9 +267,17 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 		// 卡上不带邀面参数的平台(BOSS):观察到的是 §4.5 无参数常量投影,与派发 ok 结果校验
 		// (dispatch.go)、账本收编(store.cardContentHashMatchesIntent)同一把尺
 		// (《协议规格-v1》§9.4.3,2026-09-04 落地 09-02 底稿 1.1)。
+		// 卡上带参数的平台(智联):观察行的 hash 按卡上参数算,结束时间由手填、意图指纹
+		// 不含它(2026-09-08),所以以观察到的 interview 自算配方核自洽;开始与方式另在
+		// 下面与原 args 逐项核。
 		interview := request.InviteCardArgs.Interview
+		observedStart, observedEnd, observedMethod := interview.StartsAt, int64(0), string(interview.Method)
+		if observation.Interview != nil {
+			observedStart, observedEnd, observedMethod =
+				observation.Interview.StartsAt, observation.Interview.EndsAt, string(observation.Interview.Method)
+		}
 		fingerprintOK = syncledger.InterviewInviteContentHashAccepted(
-			observation.ContentHash, interview.StartsAt, interview.EndsAt, string(interview.Method))
+			observation.ContentHash, observedStart, observedEnd, observedMethod)
 	}
 	if !observation.Confirmed || !fingerprintOK {
 		reason := observation.Reason
@@ -409,16 +417,23 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 		// (《协议规格-v1》§9.4.3,2026-09-04 落地 09-02 底稿 1.1),data 与账本行的面试字段
 		// 取原 args——与派发 ok 收编同口径。此前这里要求 interview 非空,BOSS 卡一进验证读
 		// 就必然 miss、用尽轮数转 suspect(2026-09-04 场景三出口审查优化级第 2 条)。
+		interview := protocol.InterviewDetails{
+			StartsAt: request.InviteCardArgs.Interview.StartsAt,
+			Method:   request.InviteCardArgs.Interview.Method,
+		}
 		if observation.Interview != nil {
-			if *observation.Interview != request.InviteCardArgs.Interview {
+			if observation.Interview.StartsAt != interview.StartsAt ||
+				observation.Interview.Method != interview.Method ||
+				!validInterviewDetails(*observation.Interview) {
 				recordMiss("邀面卡验证正证参数与原 args 不一致")
 				return
 			}
+			// 结束时间以卡上观察为准(2026-09-08)。
+			interview = *observation.Interview
 		} else if observation.ContentHash != syncledger.InterviewInviteNeutralContentHash() {
 			recordMiss("邀面卡验证正证既无邀面参数又不是无参数常量投影")
 			return
 		}
-		interview := request.InviteCardArgs.Interview
 		data := protocol.ChatSendInviteCardData{
 			ConversationRef: request.InviteCardArgs.ConversationRef,
 			ContentHash:     observation.ContentHash,

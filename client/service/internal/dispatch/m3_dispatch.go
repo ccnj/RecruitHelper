@@ -54,7 +54,7 @@ type SendAutomaticCardRequest struct {
 	AccountRef        string
 	ConversationRef   string
 	Primitive         string
-	Interview         *protocol.InterviewDetails
+	Interview         *protocol.InterviewRequest
 	RequestSourceKey  string
 }
 
@@ -263,19 +263,17 @@ func (d *Dispatcher) SendAutomaticCard(req SendAutomaticCardRequest) (*SendMessa
 	case protocol.PrimChatSendInviteCard:
 		if req.Interview == nil ||
 			req.RequestSourceKey != "" ||
-			!communication.ValidV4PlannedInterviewDetails(
-				req.Interview.StartsAt, req.Interview.EndsAt, string(req.Interview.Method),
-			) {
+			!communication.ValidV4InterviewRequest(req.Interview.StartsAt, string(req.Interview.Method)) {
 			return nil, store.ErrCommunicationActionInvalid
 		}
 		argsRaw, err = protocol.Encode(protocol.ChatSendInviteCardArgs{
 			ConversationRef: req.ConversationRef,
 			Interview:       *req.Interview,
 		})
+		// 意图指纹只含开始与方式(endsAt 投影为空串,2026-09-08):结束时间由手填,观察行
+		// 的 hash 可以带上它,归属核对见 store.cardContentHashMatchesIntent。
 		fingerprint = syncledger.InterviewInviteContentHash(
-			req.Interview.StartsAt,
-			req.Interview.EndsAt,
-			string(req.Interview.Method),
+			req.Interview.StartsAt, 0, string(req.Interview.Method),
 		)
 	case protocol.PrimChatAcceptWechat:
 		if req.Interview != nil {
@@ -472,7 +470,7 @@ type SendDirectInterviewCardRequest struct {
 	Platform         string
 	AccountRef       string
 	ConversationRef  string
-	Interview        protocol.InterviewDetails
+	Interview        protocol.InterviewRequest
 }
 
 // SendDirectInterviewCard 走 M2 直发轨发送邀面卡。聚合非 active 闸由调用方
@@ -489,10 +487,8 @@ func (d *Dispatcher) SendDirectInterviewCard(
 		req.Platform == "" || req.AccountRef == "" || req.ConversationRef == "" {
 		return nil, errors.New("缺少有效的 intentId/账号/会话标识")
 	}
-	if req.Interview.StartsAt <= 0 ||
-		req.Interview.EndsAt != req.Interview.StartsAt+communication.V4InterviewDurationMs ||
-		req.Interview.Method != protocol.InterviewMethodWechatVideo {
-		return nil, errors.New("邀面参数必须是 startsAt+30 分钟的微信视频形态")
+	if req.Interview.StartsAt <= 0 || req.Interview.Method != protocol.InterviewMethodWechatVideo {
+		return nil, errors.New("邀面参数必须是微信视频形态且给出正的 startsAt")
 	}
 	argsRaw, err := protocol.Encode(protocol.ChatSendInviteCardArgs{
 		ConversationRef: req.ConversationRef,
@@ -508,11 +504,7 @@ func (d *Dispatcher) SendDirectInterviewCard(
 		return nil, err
 	}
 	payloadHash := hashBytes(argsRaw)
-	fingerprint := syncledger.InterviewInviteContentHash(
-		req.Interview.StartsAt,
-		req.Interview.EndsAt,
-		string(req.Interview.Method),
-	)
+	fingerprint := syncledger.InterviewInviteContentHash(req.Interview.StartsAt, 0, string(req.Interview.Method))
 
 	if existing, lookupErr := d.st.EffectIntentByID(req.IntentID); lookupErr != nil {
 		return nil, lookupErr

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -61,16 +60,14 @@ func (a *API) probeInterviewEditor(w http.ResponseWriter, r *http.Request) {
 	// 手侧预算 90s + 派发排队余量;超时只表示本次彩排未在窗口内终局。
 	ctx, cancel := context.WithTimeout(r.Context(), 130*time.Second)
 	defer cancel()
-	interview := protocol.InterviewDetails{
+	interview := protocol.InterviewRequest{
 		StartsAt: body.StartsAt,
-		EndsAt:   body.StartsAt + communication.V4InterviewDurationMs,
 		Method:   protocol.InterviewMethodWechatVideo,
 	}
 	switch strings.TrimSpace(body.Method) {
 	case "", string(protocol.InterviewMethodWechatVideo):
 	case string(protocol.InterviewMethodOnsite):
 		interview.Method = protocol.InterviewMethodOnsite
-		interview.EndsAt = 0
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "method 只开放 wechatVideo(缺省) 与 onsite",
