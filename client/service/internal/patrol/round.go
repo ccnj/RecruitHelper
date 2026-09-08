@@ -197,6 +197,10 @@ func (a *roundActor) execute(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := a.prepareSurface(ctx); err != nil {
+		a.handleCommandFailure(err)
+		return err
+	}
 	if a.manager.config.MaxPages >= 2 {
 		enter, unreadErr := a.beginUnreadPass(ctx, unreadDecisionAtRoundStart)
 		if unreadErr != nil {
@@ -1790,6 +1794,28 @@ func invokePrimitiveDirectWithLogicalID[T any](
 	return zero, logicalID, nil
 }
 
+// prepareSurface 是列表巡检轮的起手步骤:先把沟通台面保证出来,再读第一条命令。
+//
+// 巡检轮需要的台面是脑自己策划的阶段切换决定的——采集批次收口时工作页停在
+// 推荐页,开工闸读(微信配置、平台通知)停在个人中心。此前脑不为此走任何一步,
+// 让 readList 先撞一次 CTX_NOT_READY/pageAbsent 再救场,紧接着"临走看一眼"在刚
+// 导航出来的空页面上再报一次"没有打开的会话":两条预期内的失败在账本里与"页面
+// 真的坏了"长得一模一样(2026-09-08 BOSS 真机;智联开发账本 08 月起 57/1223 轮同款)。
+//
+// 甲方 09-08 裁决:脑知道的前置条件用步骤保证,不靠失败感知,也不从手的传感
+// 提示里猜(那条路已回退:BOSS 站点不感知登录态,ping 永远报 identityUnverified,
+// 提示一次也没触发)。于是每轮无条件派一条 nav.ensureSurface:两个平台的实现在
+// 页面已在沟通页时都是一次不导航的核对,代价是每轮多一条约一秒的命令。它不占
+// ensureUsed 的一次救场预算——轮中页面真的没了照旧走既有救场。
+func (a *roundActor) prepareSurface(ctx context.Context) error {
+	if err := a.setStage("preparingSurface"); err != nil {
+		return err
+	}
+	return a.driveEnsureSurface(ctx)
+}
+
+// ensureSurface 是轮中的一次性救场:某条读命令报 pageAbsent/contentScriptDead
+// 后把沟通页找回来,每轮只准一次。起手步骤不经这里。
 func (a *roundActor) ensureSurface(ctx context.Context, reason protocol.NotReadyReason) error {
 	if reason != protocol.NotReadyReasonPageAbsent && reason != protocol.NotReadyReasonContentScriptDead {
 		return wrapRunError(protocol.ErrCodeCtxNotReady, reason, ErrEnsureNotReady)
@@ -1801,6 +1827,13 @@ func (a *roundActor) ensureSurface(ctx context.Context, reason protocol.NotReady
 	if err := a.setStage("ensuringSurface"); err != nil {
 		return err
 	}
+	return a.driveEnsureSurface(ctx)
+}
+
+// driveEnsureSurface 派 nav.ensureSurface(im) 并把手的回答翻成轮级判定:掉登录
+// 即 loginRequired,没就绪即 pageBroken,登录态说不清即 unknown。起手步骤与轮中
+// 救场共用这一份判定,两者只在"记在哪个标记上"不同。
+func (a *roundActor) driveEnsureSurface(ctx context.Context) error {
 	data, err := invokePrimitiveDirect[protocol.NavEnsureSurfaceData](ctx, a, protocol.PrimNavEnsureSurface,
 		protocol.NavEnsureSurfaceArgs{Surface: protocol.SurfaceNameIm})
 	if err != nil {
