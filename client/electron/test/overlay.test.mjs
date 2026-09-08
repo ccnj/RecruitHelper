@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const {
   overlayBounds, overlayWindowOptions, overlayDevUrl, createOverlayWindow,
+  applyOverlayPosition, normalizeOverlayPosition, OVERLAY_POSITIONS,
   OVERLAY_WIDTH, OVERLAY_HEIGHT,
 } = require('../overlay.js')
 
@@ -17,6 +18,30 @@ const offset = overlayBounds({ x: 1920, y: 0, width: 1920, height: 1040 })
 check(offset.x === 1920 + 640 && offset.y === 0, '工作区不从 0 起也居中')
 const narrow = overlayBounds({ x: 0, y: 0, width: 500, height: 300 })
 check(narrow.x === 0 && narrow.width === 500 && narrow.height === OVERLAY_HEIGHT, '比工作区宽时截到工作区宽并贴左')
+
+// —— 六个档位 ——
+const wa = { x: 100, y: 25, width: 1440, height: 875 }
+const at = (p) => overlayBounds(wa, p)
+check(at('top').x === 500 && at('top').y === 25, 'top:顶部居中')
+check(at('bottom').x === 500 && at('bottom').y === 25 + 875 - 220, 'bottom:底部居中,贴工作区底边(任务栏之上)')
+check(at('topLeft').x === 100 && at('topLeft').y === 25, 'topLeft 贴左上')
+check(at('topRight').x === 100 + 1440 - 640 && at('topRight').y === 25, 'topRight 贴右上')
+check(at('bottomLeft').x === 100 && at('bottomLeft').y === 680, 'bottomLeft 贴左下')
+check(at('bottomRight').x === 900 && at('bottomRight').y === 680, 'bottomRight 贴右下')
+check(at('middle').x === 500 && at('middle').y === 25, '认不出的档位按顶部居中')
+check(normalizeOverlayPosition(undefined) === 'top' && normalizeOverlayPosition('bottomLeft') === 'bottomLeft', 'normalize 只认枚举')
+check(OVERLAY_POSITIONS.length === 6, '六个档位')
+
+// —— 运行期挪窗:几何没变不调 setBounds ——
+{
+  const calls = []
+  const fake = {
+    getBounds: () => ({ x: 500, y: 25, width: 640, height: 220 }),
+    setBounds: (b, animate) => calls.push([b, animate]),
+  }
+  check(applyOverlayPosition(fake, wa, 'top') === false && calls.length === 0, '档位未变不挪')
+  check(applyOverlayPosition(fake, wa, 'bottomRight') === true && calls.length === 1 && calls[0][0].x === 900 && calls[0][1] === false, '档位变了才 setBounds,且不带动画')
+}
 
 // —— 选项:硬约束 ——
 const opts = overlayWindowOptions({
@@ -57,8 +82,9 @@ const screen = { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 25, width: 144
 
 const calls = []
 const win = createOverlayWindow({
-  BrowserWindow: fakeWindowClass(calls), screen, preload: '/p', rendererArguments: [], entry: '/ui/overlay.html', platform: 'darwin',
+  BrowserWindow: fakeWindowClass(calls), screen, preload: '/p', rendererArguments: [], entry: '/ui/overlay.html', platform: 'darwin', position: 'bottomRight',
 })
+check(calls[0][1].x === 800 && calls[0][1].y === 25 + 875 - 220, '建窗按传入档位放(右下)')
 win.handlers['ready-to-show']()
 const names = calls.map((c) => c[0])
 check(names.includes('setIgnoreMouseEvents') && calls.find((c) => c[0] === 'setIgnoreMouseEvents')[1] === true, '建窗后立即鼠标穿透')

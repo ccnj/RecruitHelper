@@ -8,7 +8,7 @@
 // 开发版:多画最近命令五行与一行摘要;开关在脑里,这里每几秒读一次。
 // 数据只在内存里,不写 localStorage/IndexedDB(同机产品 UI 业务投影例外的前端义务)。
 import { useEffect, useRef, useState } from 'react'
-import { api, appGet, type HandHealth } from '../api'
+import { api, appGet, isStatusBarPosition, type HandHealth, type StatusBarPosition } from '../api'
 import {
   adaptOverviewSnapshot,
   type AppOverviewResponse,
@@ -53,6 +53,9 @@ export function OverlayApp() {
   const [view, setView] = useState<OverviewSnapshotView | null>(null)
   const [reachable, setReachable] = useState(false)
   const [detail, setDetail] = useState(false)
+  // null = 还没从脑读到档位。主进程建窗时已按脑里的值放好,页面在读到同一个值
+  // 之前不能拿默认值去"纠正"它,否则会先挪回顶部再挪回来闪一下。
+  const [position, setPosition] = useState<StatusBarPosition | null>(null)
   const [ledger, setLedger] = useState<OverlayLedgerRow[]>([])
   const [hands, setHands] = useState<HandHealth[]>([])
   const [suspectCount, setSuspectCount] = useState<number | null>(null)
@@ -68,11 +71,19 @@ export function OverlayApp() {
   })
   usePoll(SETTINGS_INTERVAL_MS, async () => {
     try {
-      setDetail((await api.statusBarSettings()).detailEnabled === true)
+      const settings = await api.statusBarSettings()
+      setDetail(settings.detailEnabled === true)
+      if (isStatusBarPosition(settings.position)) setPosition(settings.position)
     } catch {
       // 读不到开关就维持上一次的模式;脑整体不可达时顶行已经在说"未就绪"。
     }
   })
+  // 档位变了才让主进程挪窗:这是运行期唯一的窗口级调用,只在人改设置时发生,
+  // 而且窗本身不可聚焦,挪动不会把焦点从 Chrome 抢走。第一次读到的值也发一次:
+  // 与建窗时的档位相同就是空操作,不同(建窗时脑没回答)就纠正。
+  useEffect(() => {
+    if (position) void window.recruitHelper?.setOverlayPosition?.(position)
+  }, [position])
   usePoll(detail ? LEDGER_INTERVAL_MS : 0, async () => {
     try {
       const { ledger: rows } = await api.ledgerBrief(LEDGER_FETCH_LIMIT)
@@ -93,7 +104,7 @@ export function OverlayApp() {
   })
 
   return (
-    <div className={`ov-bar${detail ? ' is-detail' : ''}`}>
+    <div className={`ov-bar${detail ? ' is-detail' : ''}${(position ?? 'top').startsWith('bottom') ? ' is-bottom' : ''}`}>
       <TopLine view={reachable ? view : null} />
       {detail && <LedgerLines rows={ledger} />}
       {detail && <FooterLine view={reachable ? view : null} hands={hands} suspectCount={suspectCount} />}

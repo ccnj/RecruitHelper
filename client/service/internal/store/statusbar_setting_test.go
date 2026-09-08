@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // 默认关闭是这张表最重要的性质:新库、读取,都不得把开关带成开,也不得隐式建行。
 func TestStatusBarSettingDefaultsOffWithoutCreatingRow(t *testing.T) {
@@ -12,8 +15,8 @@ func TestStatusBarSettingDefaultsOffWithoutCreatingRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StatusBarSetting: %v", err)
 	}
-	if setting.DetailEnabled {
-		t.Fatalf("新库应是客户版零值: %+v", setting)
+	if setting.DetailEnabled || setting.Position != "" || setting.EffectivePosition() != StatusBarPositionTop {
+		t.Fatalf("新库应是客户版零值、位置归一到顶部: %+v", setting)
 	}
 	var count int64
 	if err := s.db.Model(&StatusBarSetting{}).Count(&count).Error; err != nil {
@@ -47,5 +50,34 @@ func TestStatusBarSettingToggleRoundTrip(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("单行表只能有一行: count=%d", count)
+	}
+}
+
+func TestStatusBarPositionRoundTripAndRejectsUnknown(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.SetStatusBarPosition("middle"); !errors.Is(err, ErrStatusBarPositionInvalid) {
+		t.Fatalf("未知档位应被拒绝,得到 %v", err)
+	}
+	if err := s.SetStatusBarPosition(StatusBarPositionBottomRight); err != nil {
+		t.Fatalf("SetStatusBarPosition: %v", err)
+	}
+	// 位置与开关各写各的列:改开关不得把位置刷回去。
+	if err := s.SetStatusBarDetail(true); err != nil {
+		t.Fatalf("SetStatusBarDetail: %v", err)
+	}
+	setting, err := s.StatusBarSetting()
+	if err != nil {
+		t.Fatalf("StatusBarSetting: %v", err)
+	}
+	if setting.Position != StatusBarPositionBottomRight || !setting.DetailEnabled {
+		t.Fatalf("两列应各自保留: %+v", setting)
+	}
+	for _, position := range StatusBarPositions {
+		if err := s.SetStatusBarPosition(position); err != nil {
+			t.Fatalf("枚举内的 %q 应可写: %v", position, err)
+		}
 	}
 }
