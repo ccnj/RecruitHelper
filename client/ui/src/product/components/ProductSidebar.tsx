@@ -1,4 +1,4 @@
-import type { CandidateView, ProductPage } from '../types'
+import type { BoundJobView, CandidateView, ProductPage } from '../types'
 import { ProductIcon, type ProductIconName } from './ProductIcon'
 
 interface NavItem {
@@ -21,11 +21,23 @@ const navItems: NavItem[] = [
   { key: 'settings', label: '配置', icon: 'settings' },
 ]
 
+const SYNC_JOBS_EXPLANATION =
+  '同步职位：重新读取后台职位，更新当前绑定职位，并让主动来聊的候选人能匹配到后台在招的其他职位'
+
+// 刷新图标的悬停提示:一句说明 + 当前同步状态与最近同步时间。首页那条职位卡
+// (2026-09-08 甲方裁决撤下)原先承载的「配置已同步」「同步于 …」两样信息都收
+// 进这里,不丢。
+export function syncJobsTitle(job: BoundJobView, available: boolean): string {
+  if (!available) return '运行控制尚未接入'
+  const when = job.lastSyncedAt ? `同步于 ${job.lastSyncedAt}` : '尚无同步记录'
+  return `${SYNC_JOBS_EXPLANATION}\n${job.syncStateLabel} · ${when}`
+}
+
 interface ProductSidebarProps {
   activePage: ProductPage
   customerName: string
   customerShortName: string
-  jobName: string | null
+  job: BoundJobView
   confirmationBadge: number
   // 必须是脑侧真实总数(ProductData.candidateTotals),不能拿列表长度充数——那是
   // 单页加载上限,截断时数字会停在上限值、看起来像"正好这么多人",还跟进页后的
@@ -35,31 +47,46 @@ interface ProductSidebarProps {
   version: string
   onNavigate: (page: ProductPage) => void
   onSearch: (value: string) => void
+  // 同步职位。2026-09-08 甲方裁决:首页「当前绑定职位」整条卡撤下,同步动作收成
+  // 左上角客户块里的一个刷新图标;动作本身不变,仍是产品 API 的同步职位。
+  onSyncJobs?: () => void | Promise<void>
 }
 
 export function ProductSidebar({
   activePage,
   customerName,
   customerShortName,
-  jobName,
+  job,
   confirmationBadge,
   candidateTotals,
   searchValue,
   version,
   onNavigate,
   onSearch,
+  onSyncJobs,
 }: ProductSidebarProps) {
+  const syncing = job.syncState === 'syncing'
   return (
     <aside className="rh-sidebar">
       <div className="rh-sidebar-customer">
         <div className="rh-sidebar-avatar" aria-hidden="true">{customerShortName || '客'}</div>
         <div className="rh-sidebar-customer-copy">
           <strong title={customerName}>{customerName}</strong>
-          <span title={jobName ?? '尚未绑定职位'}>
+          <span title={job.name ?? '尚未绑定职位'}>
             <ProductIcon name="briefcase" size={13} />
-            {jobName ?? '尚未绑定职位'}
+            {job.name ?? '尚未绑定职位'}
           </span>
         </div>
+        <button
+          aria-label="同步职位"
+          className={`rh-sidebar-sync${syncing ? ' is-syncing' : ''}`}
+          disabled={!onSyncJobs || syncing}
+          onClick={() => void onSyncJobs?.()}
+          title={syncJobsTitle(job, Boolean(onSyncJobs))}
+          type="button"
+        >
+          <ProductIcon name="refresh" size={16} />
+        </button>
       </div>
 
       <nav className="rh-sidebar-nav" aria-label="产品导航">

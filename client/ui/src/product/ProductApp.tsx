@@ -136,9 +136,10 @@ export function ProductApp({
         confirmationBadge={data.confirmationBadge}
         customerName={data.customer.name}
         customerShortName={data.customer.shortName}
-        jobName={data.customer.job.name}
+        job={data.customer.job}
         onNavigate={navigate}
         onSearch={setGlobalSearch}
+        onSyncJobs={actions.syncJobs}
         searchValue={globalSearch}
         version={data.clientVersion}
       />

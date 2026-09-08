@@ -14,6 +14,7 @@ const {
 } = require('./pluginSeed')
 const { TRAY_ICON_PNG_BASE64, APP_ICON_PNG_BASE64 } = require('./icons')
 const { RotatingLog } = require('./logRotate')
+const { resolveWindowSize } = require('./windowSize')
 const { createOverlayWindow } = require('./overlay')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
@@ -226,9 +227,13 @@ async function runUpdateInstall(adminToken) {
 }
 
 function createWindow(adminToken, uiEntry) {
+  // 按主显示器工作区收窗(理由见 windowSize.js):app ready 之后 screen 才可用,
+  // createWindow 只在 ready 之后调用。
+  const { width, height, minWidth } = resolveWindowSize(screen.getPrimaryDisplay().workAreaSize)
   win = new BrowserWindow({
-    width: 1200,
-    height: 840,
+    width,
+    height,
+    minWidth,
     title: 'AI增员助手',
     // 标题栏与任务栏图标。给 256 的大图让 Windows 自己按场景降采样,比预先压到
     // 某个尺寸清楚。不设的话这两处会一直是 Electron 的默认原子图标。
