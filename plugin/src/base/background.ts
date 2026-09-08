@@ -16,6 +16,7 @@ import { installHandLogSink } from './handLog'
 import { registerNetGuard } from './netGuard'
 import { registerTelemetryCapture } from './telemetry'
 import { readCounters } from './telemetry/counters'
+import { captureStatus, registerNetCapture, startCapture, stopCapture } from './telemetry/netCaptureRegister'
 import { registerTabGenerationTracking } from './tabGeneration'
 import { registerPlatform } from '../program/platform/registry'
 import { bossAdapter } from '../program/platform/boss'
@@ -49,6 +50,9 @@ registerNetGuard()
 // 平台自己的埋点上报,抄一份存本机。只读观测:不改页面、不改请求、不参与
 // 任何业务裁决,失败只记日志。
 registerTelemetryCapture()
+// 请求录制:十分钟窗口内平台页面发出的全部请求,同一条观察型通道。监听常驻、
+// 闸在代码里(SW 会被杀,动态注册的监听器活不过它);只记平台站点发出的。
+registerNetCapture()
 // 标签页导航代数:账号身份复核缓存的失效依据(协议规格 §12 第 9 条 2026-09-03 增补)。
 registerTabGenerationTracking()
 const reloadStartup = refreshPagesAfterRuntimeReload()
@@ -88,6 +92,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // 诊断页按需读平台的输入行为账本(只读、不常驻,见 telemetry/counters.ts)。
   if (msg?.type === 'telemetryCounters:read') {
     void readCounters().then(sendResponse)
+    return true
+  }
+  // 请求录制的开始 / 停止 / 状态,只有弹窗会发。
+  if (msg?.type === 'netCapture:start') {
+    void startCapture().then(sendResponse)
+    return true
+  }
+  if (msg?.type === 'netCapture:stop') {
+    void stopCapture().then(sendResponse)
+    return true
+  }
+  if (msg?.type === 'netCapture:status') {
+    void captureStatus().then(sendResponse)
     return true
   }
   if (handleInfrastructureMessage(msg, sendResponse)) return true
