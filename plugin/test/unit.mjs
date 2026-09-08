@@ -99,6 +99,7 @@ const {
   acceptZhilianWechatRequest,
   canonicalZhilianTab,
   ensureZhilianIM,
+  zhilianInterviewDetails,
   identifyZhilianCurrentConversation,
   inspectZhilianSendSurfaceDiagnostic,
   openZhilianConversation,
@@ -16359,7 +16360,7 @@ test('BOSS 接受前最后一道闸:只认换微信请求卡里的「同意」,�
   }
 })
 
-test('BOSS 邀面参数换算:按本机时区拆日期与起止,一律宽松时间;onsite 结束=开始+1h 只填表;不合格一律 invalid 不取整', () => {
+test('BOSS 邀面参数换算:按本机时区拆日期与起止,一律宽松时间;两种形态结束=开始+1h 由手填;不合格一律 invalid 不取整', () => {
   const { planBossInterviewForm } = bossTestHooks
   const now = new Date(2026, 8, 4, 12, 0).getTime()
   const at = (d, h, m = 0, sec = 0) => new Date(2026, 8, d, h, m, sec).getTime()
@@ -16367,14 +16368,16 @@ test('BOSS 邀面参数换算:按本机时区拆日期与起止,一律宽松时�
   assert.equal(onsite.status, 'ok')
   assert.deepEqual(
     [onsite.plan.method, onsite.plan.radioText, onsite.plan.meetingText, onsite.plan.meetingCode, onsite.plan.date, onsite.plan.year, onsite.plan.month, onsite.plan.day, onsite.plan.isToday,
-      onsite.plan.startText, onsite.plan.endText, onsite.plan.firstEndText, onsite.plan.timeValue, onsite.plan.endSynthesized],
-    ['onsite', '线下面试', null, null, '2026-09-05', 2026, 9, 5, false, '10:00', '11:00', '11:00', '10:00-11:00', true],
-    '线下:契约无 endsAt,表单结束=开始+1 小时,只填表留痕')
-  const video = planBossInterviewForm({ method: 'wechatVideo', startsAt: at(4, 14, 30), endsAt: at(4, 16) }, now)
+      onsite.plan.startText, onsite.plan.endText, onsite.plan.firstEndText, onsite.plan.timeValue, onsite.plan.endsAtMs],
+    ['onsite', '线下面试', null, null, '2026-09-05', 2026, 9, 5, false, '10:00', '11:00', '11:00', '10:00-11:00', at(5, 11)],
+    '线下:表单结束=开始+1 小时,随 data.interview 回脑')
+  // 命令只带开始与方式(2026-09-08 甲方裁决):线上同样由手填开始+1 小时——脑侧此前写死的
+  // 30 分钟在本表单上无法表达,2026-09-08 真机首张线上卡就被拒在这里。
+  const video = planBossInterviewForm({ method: 'wechatVideo', startsAt: at(4, 14, 30) }, now)
   assert.equal(video.status, 'ok')
-  assert.deepEqual([video.plan.radioText, video.plan.meetingText, video.plan.meetingCode, video.plan.date, video.plan.isToday, video.plan.timeValue, video.plan.firstEndText, video.plan.endSynthesized],
-    ['线上面试', '微信视频', '8', '2026-09-04', true, '14:30-16:00', '15:30', false])
-  const edge = planBossInterviewForm({ method: 'wechatVideo', startsAt: at(5, 20), endsAt: at(5, 21) }, now)
+  assert.deepEqual([video.plan.radioText, video.plan.meetingText, video.plan.meetingCode, video.plan.date, video.plan.isToday, video.plan.timeValue, video.plan.firstEndText, video.plan.endsAtMs],
+    ['线上面试', '微信视频', '8', '2026-09-04', true, '14:30-15:30', '15:30', at(4, 15, 30)])
+  const edge = planBossInterviewForm({ method: 'wechatVideo', startsAt: at(5, 20) }, now)
   assert.deepEqual([edge.status, edge.plan.timeValue], ['ok', '20:00-21:00'], '平台上下限 08:00 与 21:00 是闭区间')
   const nextMonth = planBossInterviewForm({ method: 'onsite', startsAt: new Date(2026, 9, 3, 9).getTime() }, now)
   assert.deepEqual([nextMonth.status, nextMonth.plan.year, nextMonth.plan.month, nextMonth.plan.day], ['ok', 2026, 10, 3], '下月:日历翻一页')
@@ -16389,12 +16392,6 @@ test('BOSS 邀面参数换算:按本机时区拆日期与起止,一律宽松时�
   assert.match(bad({ method: 'onsite', startsAt: at(5, 10, 0, 20) }), /30 分钟格/, '带秒也不取整')
   assert.match(bad({ method: 'onsite', startsAt: at(5, 7, 30) }), /08:00–20:00/)
   assert.match(bad({ method: 'onsite', startsAt: at(5, 20, 30) }), /08:00–20:00/)
-  assert.match(bad({ method: 'onsite', startsAt: at(5, 10), endsAt: at(5, 11) }), /不携带结束时间/, '契约:线下 endsAt 必须缺席')
-  assert.match(bad({ method: 'wechatVideo', startsAt: at(5, 10) }), /缺结束时间/)
-  assert.match(bad({ method: 'wechatVideo', startsAt: at(5, 10), endsAt: at(5, 10, 30) }), /早于开始/, '平台最小时长 1 小时')
-  assert.match(bad({ method: 'wechatVideo', startsAt: at(5, 20), endsAt: at(5, 21, 30) }), /超出平台 21:00/)
-  assert.match(bad({ method: 'wechatVideo', startsAt: at(5, 10), endsAt: at(5, 11, 10) }), /30 分钟格/)
-  assert.match(bad({ method: 'wechatVideo', startsAt: at(5, 10), endsAt: at(6, 11) }), /同一天/)
   assert.match(bad({ method: 'onsite', startsAt: at(4, 11) }), /已过/, '开始时间不在未来')
   assert.match(bad({ method: 'onsite', startsAt: new Date(2026, 10, 5, 9).getTime() }), /只翻一页/)
   assert.match(bad({ method: 'phone', startsAt: at(5, 10) }), /不在本平台开放范围/)
@@ -18296,6 +18293,16 @@ test('上屏键按 OS 选:darwin 只用空格,windows 与不传 OS 沿用默认�
     for (const code of [...commits(win), ...commits(plain)]) if (code !== 'Space') digitSeen.add(code)
   }
   assert.ok(digitSeen.size > 0, `windows / 不传 OS 应保留默认表的数字选词(14%),四个种子一个都没抽到不合理`)
+})
+
+test('智联邀面参数展开:命令只带开始与方式,线上由手加 30 分钟结束时间,现场结束缺席(2026-09-08 甲方裁决)', () => {
+  const startsAt = new Date(2026, 8, 9, 13, 0).getTime()
+  assert.deepEqual(zhilianInterviewDetails({ startsAt, method: 'wechatVideo' }),
+    { startsAt, endsAt: startsAt + 30 * 60_000, method: 'wechatVideo' },
+    '线上:时长项固定选 30 分钟,展开值与改前脑侧派生的逐字一致')
+  assert.deepEqual(zhilianInterviewDetails({ startsAt, method: 'onsite' }),
+    { startsAt, method: 'onsite' },
+    '现场:平台无时长控件,结束缺席、不合成')
 })
 
 for (const { name, fn } of tests) {

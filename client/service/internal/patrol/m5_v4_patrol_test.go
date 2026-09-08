@@ -1493,8 +1493,6 @@ func TestCommunicationV4PatrolSendsAIReplyThenInterviewCardThroughDispatcher(t *
 		t.Fatal(err)
 	}
 	if cardArgs.Interview.StartsAt != selected.UnixMilli() ||
-		cardArgs.Interview.EndsAt !=
-			selected.UnixMilli()+communication.V4InterviewDurationMs ||
 		cardArgs.Interview.Method != protocol.InterviewMethodWechatVideo {
 		t.Fatalf("dispatcher WAL 参数偏离冻结时段: %+v", cardArgs)
 	}
@@ -1527,9 +1525,7 @@ func TestCommunicationV4PatrolSendsAIReplyThenInterviewCardThroughDispatcher(t *
 		*actions[0].EffectIntentID == *actions[1].EffectIntentID ||
 		actions[1].InterviewStartsAtMs == nil ||
 		*actions[1].InterviewStartsAtMs != selected.UnixMilli() ||
-		actions[1].InterviewEndsAtMs == nil ||
-		*actions[1].InterviewEndsAtMs !=
-			selected.UnixMilli()+communication.V4InterviewDurationMs ||
+		actions[1].InterviewEndsAtMs != nil ||
 		actions[1].InterviewMethod == nil ||
 		*actions[1].InterviewMethod != "wechatVideo" {
 		t.Fatalf("邀面组合没有形成两条独立 WAL: actions=%+v err=%v", actions, err)

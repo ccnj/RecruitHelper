@@ -34,15 +34,16 @@ func (v *neutralInterviewCardVerifier) Verify(
 }
 
 func seedUnconfirmedInviteCard(
-	t *testing.T, interview protocol.InterviewDetails,
+	t *testing.T, interview protocol.InterviewRequest,
 ) (*Dispatcher, *store.Store, store.ConversationKey, *store.CmdRecord) {
 	t.Helper()
 	d, st, hand := newDisp(t)
 	key := seedSendTarget(t, st, hand, "acct-card-neutral", "conv-card-neutral")
 	args := protocol.ChatSendInviteCardArgs{ConversationRef: "conv-card-neutral", Interview: interview}
+	// 命令只带开始与方式(2026-09-08):意图指纹是缺席投影。
 	_, command := seedCardEffectIntent(
 		t, st, key, protocol.PrimChatSendInviteCard, args,
-		syncledger.InterviewInviteContentHash(interview.StartsAt, interview.EndsAt, string(interview.Method)), 1,
+		syncledger.InterviewInviteContentHash(interview.StartsAt, 0, string(interview.Method)), 1,
 	)
 	outcome, _, err := d.applyResultMessage(
 		"hand-send", "result-card-neutral",
@@ -64,15 +65,15 @@ func TestInviteCardVerificationAcceptsNeutralProjectionWithoutInterview(t *testi
 	neutral := syncledger.InterviewInviteNeutralContentHash()
 	tests := []struct {
 		name      string
-		interview protocol.InterviewDetails
+		interview protocol.InterviewRequest
 	}{
 		{
-			name: "wechatVideo", interview: protocol.InterviewDetails{
-				StartsAt: 1_722_000_000_000, EndsAt: 1_722_003_600_000, Method: protocol.InterviewMethodWechatVideo,
+			name: "wechatVideo", interview: protocol.InterviewRequest{
+				StartsAt: 1_722_000_000_000, Method: protocol.InterviewMethodWechatVideo,
 			},
 		},
 		{
-			name: "onsite", interview: protocol.InterviewDetails{
+			name: "onsite", interview: protocol.InterviewRequest{
 				StartsAt: 1_722_000_000_000, Method: protocol.InterviewMethodOnsite,
 			},
 		},
@@ -108,17 +109,12 @@ func TestInviteCardVerificationAcceptsNeutralProjectionWithoutInterview(t *testi
 			if card.Direction != "out" || card.ContentHash != neutral || card.CardState != "unknown" {
 				t.Fatalf("账本行应取手侧观察到的常量投影、状态 unknown: %+v", card)
 			}
-			// 面试字段与派发 ok 收编同口径:取意图参数,onsite 的 endsAt 缺席。
+			// 面试字段取命令的开始与方式;卡上不带参数,结束时间无从观察,两种形态都缺席
+			// (2026-09-08:结束时间不再由脑合成)。
 			if card.InterviewStartsAtMs == nil || *card.InterviewStartsAtMs != test.interview.StartsAt ||
-				card.InterviewMethod == nil || *card.InterviewMethod != string(test.interview.Method) {
-				t.Fatalf("账本行面试字段应取原 args: %+v", card)
-			}
-			if test.interview.Method == protocol.InterviewMethodOnsite {
-				if card.InterviewEndsAtMs != nil {
-					t.Fatalf("线下卡 endsAt 必须缺席: %+v", card)
-				}
-			} else if card.InterviewEndsAtMs == nil || *card.InterviewEndsAtMs != test.interview.EndsAt {
-				t.Fatalf("线上卡 endsAt 应取原 args: %+v", card)
+				card.InterviewMethod == nil || *card.InterviewMethod != string(test.interview.Method) ||
+				card.InterviewEndsAtMs != nil {
+				t.Fatalf("账本行面试字段应取原 args 的开始与方式、结束缺席: %+v", card)
 			}
 			var result protocol.ResultBody
 			if err := json.Unmarshal([]byte(current.ResultBody), &result); err != nil {
@@ -128,8 +124,9 @@ func TestInviteCardVerificationAcceptsNeutralProjectionWithoutInterview(t *testi
 			if err := json.Unmarshal(result.Data, &data); err != nil {
 				t.Fatalf("补记的 data 应可解析: %v", err)
 			}
-			if data.Interview != test.interview || data.ContentHash != neutral || data.ConversationRef != "conv-card-neutral" {
-				t.Fatalf("补记 data 应回显原 args 与常量投影: %+v", data)
+			want := protocol.InterviewDetails{StartsAt: test.interview.StartsAt, Method: test.interview.Method}
+			if data.Interview != want || data.ContentHash != neutral || data.ConversationRef != "conv-card-neutral" {
+				t.Fatalf("补记 data 应回显原 args 的开始与方式与常量投影: %+v", data)
 			}
 		})
 	}
@@ -137,12 +134,12 @@ func TestInviteCardVerificationAcceptsNeutralProjectionWithoutInterview(t *testi
 
 // 既无邀面参数、hash 又不是常量投影:不是本次的卡,仍按 miss 计轮。
 func TestInviteCardVerificationRejectsNilInterviewWithParamHash(t *testing.T) {
-	interview := protocol.InterviewDetails{
-		StartsAt: 1_722_000_000_000, EndsAt: 1_722_003_600_000, Method: protocol.InterviewMethodWechatVideo,
+	interview := protocol.InterviewRequest{
+		StartsAt: 1_722_000_000_000, Method: protocol.InterviewMethodWechatVideo,
 	}
 	d, st, key, command := seedUnconfirmedInviteCard(t, interview)
 	verifier := &neutralInterviewCardVerifier{
-		hash: syncledger.InterviewInviteContentHash(interview.StartsAt, interview.EndsAt, string(interview.Method)),
+		hash: syncledger.InterviewInviteContentHash(interview.StartsAt, 1_722_003_600_000, string(interview.Method)),
 	}
 	d.SetEffectVerifier(verifier)
 	d.verifyEffect(context.Background(), command.MsgID)

@@ -103,9 +103,8 @@ func bindInterviewCard(
 	}
 	args, err := protocol.Encode(protocol.ChatSendInviteCardArgs{
 		ConversationRef: h.fixture.ConversationRef,
-		Interview: protocol.InterviewDetails{
+		Interview: protocol.InterviewRequest{
 			StartsAt: h.startsAt,
-			EndsAt:   h.endsAt,
 			Method:   protocol.InterviewMethodWechatVideo,
 		},
 	})

@@ -616,7 +616,6 @@ func TestCommunicationV4InterviewCardActionBindsAndCompletesAfterTextEvidence(t 
 			ActionKey:           fixture.Turn.TurnID + "|interviewInvite",
 			Kind:                communication.V4ActionInterviewInvite,
 			InterviewStartsAtMs: &startsAt,
-			InterviewEndsAtMs:   &endsAt,
 			InterviewMethod:     &method,
 		},
 	)
@@ -638,8 +637,7 @@ func TestCommunicationV4InterviewCardActionBindsAndCompletesAfterTextEvidence(t 
 		actions[1].DependsOnActionID == nil ||
 		actions[1].InterviewStartsAtMs == nil ||
 		*actions[1].InterviewStartsAtMs != startsAt ||
-		actions[1].InterviewEndsAtMs == nil ||
-		*actions[1].InterviewEndsAtMs != endsAt ||
+		actions[1].InterviewEndsAtMs != nil ||
 		actions[1].InterviewMethod == nil ||
 		*actions[1].InterviewMethod != method {
 		t.Fatalf("正文正证未实体化邀面 action: actions=%+v err=%v", actions, err)
@@ -656,7 +654,7 @@ func TestCommunicationV4InterviewCardActionBindsAndCompletesAfterTextEvidence(t 
 	}
 	args, err := protocol.Encode(protocol.ChatSendInviteCardArgs{
 		ConversationRef: fixture.ConversationRef,
-		Interview:       interview,
+		Interview:       protocol.InterviewRequest{StartsAt: interview.StartsAt, Method: interview.Method},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -759,19 +757,21 @@ func TestCommunicationV4InterviewCardActionBindsAndCompletesAfterTextEvidence(t 
 	}
 }
 
-func TestCommunicationV4InterviewCardPlanRequiresThirtyMinutes(t *testing.T) {
+// 2026-09-08 甲方裁决之后计划不再持有时长(由手按平台表单填):升级前铸的存量计划行
+// 可能残留任意 endsAt,它不再是判据——此前这里钉的是"非 30 分钟不得获批"。
+func TestCommunicationV4InterviewCardPlanIgnoresResidualEndsAt(t *testing.T) {
 	startsAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute).UnixMilli()
 	method := "wechatVideo"
 	for _, duration := range []time.Duration{15 * time.Minute, 45 * time.Minute} {
 		endsAt := startsAt + duration.Milliseconds()
-		if supportedCommunicationV4CardPlan(communication.V4PlannedAction{
+		if !supportedCommunicationV4CardPlan(communication.V4PlannedAction{
 			ActionKey:           "turn|interviewInvite",
 			Kind:                communication.V4ActionInterviewInvite,
 			InterviewStartsAtMs: &startsAt,
 			InterviewEndsAtMs:   &endsAt,
 			InterviewMethod:     &method,
 		}) {
-			t.Fatalf("非 30 分钟邀面计划不得获批: duration=%s", duration)
+			t.Fatalf("残留 endsAt 的存量计划必须照常获批: duration=%s", duration)
 		}
 	}
 }
@@ -782,7 +782,7 @@ func TestCommunicationV4InterviewCardPlanRequiresThirtyMinutes(t *testing.T) {
 // communication.ValidV4InterviewShape,形态与 method 必须自洽。
 func TestCommunicationV4InterviewCardPlanAcceptsOnsiteWithoutEndsAt(t *testing.T) {
 	startsAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute).UnixMilli()
-	endsAt := startsAt + communication.V4InterviewDurationMs
+	endsAt := startsAt + int64((30*time.Minute)/time.Millisecond)
 	onsite := "onsite"
 	online := "wechatVideo"
 	plan := func(method *string, ends *int64) communication.V4PlannedAction {
@@ -794,17 +794,24 @@ func TestCommunicationV4InterviewCardPlanAcceptsOnsiteWithoutEndsAt(t *testing.T
 			InterviewMethod:     method,
 		}
 	}
-	if !supportedCommunicationV4CardPlan(plan(&onsite, nil)) {
-		t.Fatal("缺席 endsAt 的现场面试计划必须获批")
+	// 2026-09-08 起计划只核开始与方式,endsAt 不进计划(时长由手填);存量计划行残留的
+	// endsAt 也不再是判据。
+	for name, candidate := range map[string]communication.V4PlannedAction{
+		"现场面试":        plan(&onsite, nil),
+		"现场面试带残留结束时间": plan(&onsite, &endsAt),
+		"线上会议":        plan(&online, nil),
+		"线上会议带残留结束时间": plan(&online, &endsAt),
+	} {
+		if !supportedCommunicationV4CardPlan(candidate) {
+			t.Fatalf("%s 的计划必须获批", name)
+		}
 	}
-	if supportedCommunicationV4CardPlan(plan(&onsite, &endsAt)) {
-		t.Fatal("现场面试带 endsAt 不得获批:平台不提供结束时间,不得合成")
+	phone := "phone"
+	if supportedCommunicationV4CardPlan(plan(&phone, nil)) {
+		t.Fatal("方式不在开放集合的计划不得获批")
 	}
-	if supportedCommunicationV4CardPlan(plan(&online, nil)) {
-		t.Fatal("线上会议缺 endsAt 不得获批")
-	}
-	if !supportedCommunicationV4CardPlan(plan(&online, &endsAt)) {
-		t.Fatal("标准时长的线上会议计划必须获批")
+	if supportedCommunicationV4CardPlan(plan(nil, nil)) {
+		t.Fatal("缺方式的计划不得获批")
 	}
 }
 

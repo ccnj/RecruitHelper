@@ -57,6 +57,7 @@ import type {
   DebugProbeInterviewEditorArgs,
   DebugProbeInterviewEditorData,
   InterviewDetails,
+  InterviewRequest,
   JobPrepareDraftArgs,
   JobPrepareDraftData,
   JobPublishDraftData,
@@ -14895,6 +14896,20 @@ export async function revealZhilianPeerPhone(
   }
 }
 
+/** 智联线上面试的时长项固定选 30 分钟(2026-07-23 真机:15/30/45/60 四项)。 */
+const ZHILIAN_ONLINE_INTERVIEW_MS = 30 * 60_000
+
+/**
+ * 命令只带开始与方式(2026-09-08 甲方裁决:面试时长是平台表单细节,由手填)。这里把它
+ * 展开成本平台要填、要核的完整参数:线上加 30 分钟结束时间,现场面试无时长控件、结束
+ * 缺席。下游的填表、期望身份与发后逐项核对全部按这份展开值走,与改前逐字一致。
+ */
+export function zhilianInterviewDetails(request: InterviewRequest): InterviewDetails {
+  return request.method === 'onsite'
+    ? { startsAt: request.startsAt, method: 'onsite' }
+    : { startsAt: request.startsAt, endsAt: request.startsAt + ZHILIAN_ONLINE_INTERVIEW_MS, method: 'wechatVideo' }
+}
+
 export async function sendZhilianInviteCard(
   args: ZhilianSendInviteCardArgs,
   guards: ZhilianSendGuards,
@@ -14904,7 +14919,7 @@ export async function sendZhilianInviteCard(
   const data = await sendZhilianCard(
     args.conversationRef,
     'interviewInvite',
-    args.interview,
+    zhilianInterviewDetails(args.interview),
     guards,
     ctx,
     expectedPrincipalFingerprint,
@@ -14946,9 +14961,8 @@ export async function probeZhilianInterviewEditor(
   if (!expectedPrincipalFingerprint) {
     throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
   }
-  const interview = args.interview
-  // 形态按 method 分支（2026-07-31 甲方裁决）：线上仍要求 15/45/30/60 分钟的
-  // 时长枚举；现场面试平台无时长控件，endsAt 必须缺席而不得由 startsAt 合成。
+  const interview = zhilianInterviewDetails(args.interview)
+  // 命令只带开始与方式,时长由手展开(2026-09-08);下面的形态闸核的是展开后的值。
   const onsiteProbe = interview.method === 'onsite'
   const badStart = !Number.isSafeInteger(interview.startsAt) ||
     interview.startsAt <= 0 || interview.startsAt % 60_000 !== 0

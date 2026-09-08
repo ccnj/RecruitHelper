@@ -56,9 +56,9 @@ func TestCardVerificationMissesThreeRoundsThenSuspectWithoutNewAction(t *testing
 			name: "interview invite", primitive: protocol.PrimChatSendInviteCard,
 			args: protocol.ChatSendInviteCardArgs{
 				ConversationRef: "conv-card-verify-miss",
-				Interview: protocol.InterviewDetails{
-					StartsAt: 1_722_000_000_000, EndsAt: 1_722_001_800_000,
-					Method: protocol.InterviewMethodWechatVideo,
+				Interview: protocol.InterviewRequest{
+					StartsAt: 1_722_000_000_000,
+					Method:   protocol.InterviewMethodWechatVideo,
 				},
 			},
 			hash: syncledger.InterviewInviteContentHash(
@@ -68,7 +68,7 @@ func TestCardVerificationMissesThreeRoundsThenSuspectWithoutNewAction(t *testing
 				t.Helper()
 				if request.InviteCardArgs == nil ||
 					request.InviteCardArgs.ConversationRef != "conv-card-verify-miss" ||
-					request.InviteCardArgs.Interview.EndsAt != 1_722_001_800_000 ||
+					request.InviteCardArgs.Interview.StartsAt != 1_722_000_000_000 ||
 					request.WechatInviteArgs != nil {
 					t.Fatalf("邀面验证请求未保留原 args: %+v", request)
 				}

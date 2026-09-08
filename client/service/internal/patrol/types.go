@@ -196,7 +196,7 @@ type AutomaticCardRequest struct {
 	AccountRef       string
 	ConversationRef  string
 	Kind             store.CommunicationActionKind
-	Interview        *protocol.InterviewDetails
+	Interview        *protocol.InterviewRequest
 	RequestSourceKey string
 }
 

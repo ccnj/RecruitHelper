@@ -30,8 +30,6 @@ const (
 
 const IntentSourceBusinessEvent IntentSource = "businessEvent"
 
-const V4InterviewDurationMs int64 = 30 * 60 * 1000
-
 // V4InterviewTimeGridMs 是两平台公共的邀面时间格(2026-09-02 甲方裁决,批 D 2.4):
 // 智联选择器是 5 分钟格(2026-07-28 真机),BOSS 宽松时间是 30 分钟格(2026-08-28 真机),
 // 取最粗公共格 30 分钟,两边都能表达。取整仍只在时间出生点做一次。
@@ -495,51 +493,43 @@ func v4ReplyMenuWechatLine(status V4WechatStatus) m5ai.ReplyMenuWechatLine {
 	}
 }
 
-// ValidV4InterviewShape 是邀面参数形态的唯一判据:线上会议必须带晚于开始的
-// endsAt,现场面试必须缺席 endsAt——平台对现场面试不提供结束时间,合成或以
-// 占位值冒充都会让发后正证配不上。
+// ValidV4InterviewShape 是邀面参数形态的唯一判据:开始时刻为正、method 在开放
+// 集合内;endsAt 可缺席,存在时必须晚于开始。
 //
-// 它只管"形态与 method 是否自洽",不管时长是否恰好是我方标准值,那是计划侧
-// 的额外要求。三处闸(建议应用策略、消息落库校验、动作与计划配对)都必须经
-// 由它分支:2026-08-04 真机首验就是因为其中一处仍写死 wechatVideo 与"endsAt
-// 必须非空",线下卡到了发送前一步被判 multiVisibleActionPolicyConflict、
-// 整轮作废重采。
+// 2026-09-08 甲方裁决之后,结束时间不再是脑的意图:它由手按各平台邀面表单填写
+// (智联线上选 30 分钟项、现场面试无时长控件;BOSS 两种形态都填开始加 1 小时),
+// 经成功 data 或线程读回作为观察事实进账本。因此这里对两种 method 都不再要求
+// endsAt 的有无——观察到什么就是什么。三处闸(建议应用策略、消息落库校验、动作
+// 与计划配对)仍必须经由它分支:2026-08-04 真机首验就是因为其中一处仍写死
+// wechatVideo 与"endsAt 必须非空",线下卡到了发送前一步被判
+// multiVisibleActionPolicyConflict、整轮作废重采。
 func ValidV4InterviewShape(startsAtMs, endsAtMs *int64, method *string) bool {
 	if startsAtMs == nil || method == nil || *startsAtMs <= 0 {
 		return false
 	}
 	switch *method {
-	case "wechatVideo":
-		return endsAtMs != nil && *endsAtMs > *startsAtMs
-	case "onsite":
-		return endsAtMs == nil
+	case "wechatVideo", "onsite":
+		return endsAtMs == nil || *endsAtMs > *startsAtMs
 	default:
 		return false
 	}
 }
 
-// ValidV4PlannedInterview 在形态自洽之外，另外要求线上会议的时长恰好是我方
-// 派生的标准值；现场面试在平台上没有时长可言，endsAt 缺席即合法。
-//
-// 计划、派发、命令核对、args 构造、result 校验与验证读六处必须共用它。
-// 2026-08-04 的教训是分两次交的学费：第一次只放开了发送路径，第二次只放开了
-// 三处闸，剩下的照样把线下卡挡在半路——其中一处还会解空指针崩掉整个脑进程。
-func ValidV4PlannedInterview(startsAtMs, endsAtMs *int64, method *string) bool {
-	if !ValidV4InterviewShape(startsAtMs, endsAtMs, method) {
+// ValidV4PlannedInterview 是计划侧邀面动作的判据:只看开始时刻与方式。计划、
+// 派发、命令核对与动作配对必须共用它——2026-08-04 的教训是分两次交的学费:
+// 第一次只放开了发送路径,第二次只放开了三处闸,剩下的照样把线下卡挡在半路,
+// 其中一处还会解空指针崩掉整个脑进程。计划行上残留的 endsAt(2026-09-08 之前
+// 铸的存量动作)不参与判定,派发时也不进 args。
+func ValidV4PlannedInterview(startsAtMs *int64, method *string) bool {
+	if startsAtMs == nil || method == nil || *startsAtMs <= 0 {
 		return false
 	}
-	return endsAtMs == nil || *endsAtMs == *startsAtMs+V4InterviewDurationMs
+	return *method == "wechatVideo" || *method == "onsite"
 }
 
-// ValidV4PlannedInterviewDetails 是上面那个的值语义版本，服务契约类型
-// protocol.InterviewDetails：那里 endsAt 是 int64+omitempty，0 即缺席
-// （契约的 minimum 是 1，0 不是合法时刻）。
-func ValidV4PlannedInterviewDetails(startsAtMs, endsAtMs int64, method string) bool {
-	var ends *int64
-	if endsAtMs > 0 {
-		ends = &endsAtMs
-	}
-	return ValidV4PlannedInterview(&startsAtMs, ends, &method)
+// ValidV4InterviewRequest 是上面那个的契约值语义版本,服务 protocol.InterviewRequest。
+func ValidV4InterviewRequest(startsAtMs int64, method string) bool {
+	return ValidV4PlannedInterview(&startsAtMs, &method)
 }
 
 // ValidV4InterviewDetailsShape 只核形态与 method 自洽，不要求标准时长。
@@ -612,17 +602,13 @@ func planV4ReplyActions(
 			Kind:                V4ActionInterviewInvite,
 			InterviewStartsAtMs: &startsAt,
 		}
+		// 结束时间不进计划(2026-09-08 甲方裁决):时长由手按平台表单填,实际起止随
+		// 成功 data 回账本。两种方式都只带开始与方式。
+		method := "wechatVideo"
 		if suggestion.Action == m5ai.ReplyActionStartOnsiteInterview {
-			// 现场面试在平台上没有时长控件,endsAt 必须缺席而不得由 startsAt
-			// 合成——手侧与协议规格 §4.5 都按缺席校验并投影 sourceKey。
-			method := "onsite"
-			planned.InterviewMethod = &method
-		} else {
-			endsAt := startsAt + V4InterviewDurationMs
-			method := "wechatVideo"
-			planned.InterviewEndsAtMs = &endsAt
-			planned.InterviewMethod = &method
+			method = "onsite"
 		}
+		planned.InterviewMethod = &method
 		return append(plans, planned), true
 	default:
 		return nil, false

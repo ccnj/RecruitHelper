@@ -60,6 +60,7 @@ export {
   canonicalZhilianTab,
   identifyZhilianCurrentConversation,
   ensureZhilianIM,
+  zhilianInterviewDetails,
   openZhilianConversation,
   readZhilianList,
   readZhilianThread,

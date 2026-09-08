@@ -75,6 +75,14 @@ func validWechatCardResult(ref, conversationRef, sourceKey string) protocol.Resu
 	}
 }
 
+// observedZhilianInterview 模拟智联手的回报:命令只带开始与方式(2026-09-08),手按平台
+// 时长项填 30 分钟,卡上观察到的起止随 data.interview 回脑。
+func observedZhilianInterview(request protocol.InterviewRequest) protocol.InterviewDetails {
+	return protocol.InterviewDetails{
+		StartsAt: request.StartsAt, EndsAt: request.StartsAt + 1_800_000, Method: request.Method,
+	}
+}
+
 func validInviteCardResult(
 	ref, conversationRef, sourceKey string,
 	interview protocol.InterviewDetails,
@@ -119,28 +127,27 @@ func TestCardResultsAtomicallyCreateBusinessFacts(t *testing.T) {
 	t.Run("interview invite", func(t *testing.T) {
 		d, st, hand := newDisp(t)
 		key := seedSendTarget(t, st, hand, "acct-card-interview", "conv-card-interview")
-		interview := protocol.InterviewDetails{
-			StartsAt: 1_722_000_000_000, EndsAt: 1_722_001_800_000,
-			Method: protocol.InterviewMethodWechatVideo,
-		}
-		hash := syncledger.InterviewInviteContentHash(
-			interview.StartsAt, interview.EndsAt, string(interview.Method),
-		)
+		request := protocol.InterviewRequest{StartsAt: 1_722_000_000_000, Method: protocol.InterviewMethodWechatVideo}
+		observed := observedZhilianInterview(request)
+		// 意图指纹是缺席投影(命令不带结束时间);账本行 hash 取手观察到的带结束时间的配方,
+		// 收编按"去掉结束时间后的身份等于意图指纹"放行(store.cardContentHashMatchesIntent)。
+		fingerprint := syncledger.InterviewInviteContentHash(request.StartsAt, 0, string(request.Method))
+		observedHash := syncledger.InterviewInviteContentHash(observed.StartsAt, observed.EndsAt, string(observed.Method))
 		_, command := seedCardEffectIntent(
 			t, st, key, protocol.PrimChatSendInviteCard,
-			protocol.ChatSendInviteCardArgs{ConversationRef: key.ConversationRef, Interview: interview},
-			hash, 1,
+			protocol.ChatSendInviteCardArgs{ConversationRef: key.ConversationRef, Interview: request},
+			fingerprint, 1,
 		)
 		sourceKey := strings.Repeat("b", 64)
 		outcome, _, err := d.applyResultMessage(
 			"hand-send", "result-card-interview",
-			validInviteCardResult(command.MsgID, key.ConversationRef, sourceKey, interview),
+			validInviteCardResult(command.MsgID, key.ConversationRef, sourceKey, observed),
 		)
 		if err != nil || outcome != ocDone {
 			t.Fatalf("邀面卡 result 入账失败: outcome=%v err=%v", outcome, err)
 		}
 		assertCardBusinessFact(t, st, key, command.IntentID, "interviewInvite", "unknown",
-			hash, sourceKey, &interview)
+			observedHash, sourceKey, &observed)
 	})
 
 	t.Run("interview invite neutral hash", func(t *testing.T) {
@@ -148,16 +155,15 @@ func TestCardResultsAtomicallyCreateBusinessFacts(t *testing.T) {
 		// 面试字段仍取意图参数;意图指纹仍是参数配方,收编不得判冲突。
 		d, st, hand := newDisp(t)
 		key := seedSendTarget(t, st, hand, "acct-card-interview-neutral", "conv-card-interview-neutral")
+		request := protocol.InterviewRequest{StartsAt: 1_722_000_000_000, Method: protocol.InterviewMethodWechatVideo}
+		// BOSS 形态:手填开始+1 小时并随 data.interview 回报,卡上不带参数所以 hash 是常量投影。
 		interview := protocol.InterviewDetails{
-			StartsAt: 1_722_000_000_000, EndsAt: 1_722_001_800_000,
-			Method: protocol.InterviewMethodWechatVideo,
+			StartsAt: request.StartsAt, EndsAt: request.StartsAt + 3_600_000, Method: request.Method,
 		}
-		hash := syncledger.InterviewInviteContentHash(
-			interview.StartsAt, interview.EndsAt, string(interview.Method),
-		)
+		hash := syncledger.InterviewInviteContentHash(request.StartsAt, 0, string(request.Method))
 		_, command := seedCardEffectIntent(
 			t, st, key, protocol.PrimChatSendInviteCard,
-			protocol.ChatSendInviteCardArgs{ConversationRef: key.ConversationRef, Interview: interview},
+			protocol.ChatSendInviteCardArgs{ConversationRef: key.ConversationRef, Interview: request},
 			hash, 1,
 		)
 		sourceKey := strings.Repeat("e", 64)
@@ -269,30 +275,35 @@ func TestCardResultStrictValidationFailsClosedWithoutAppending(t *testing.T) {
 			},
 		},
 		{
+			// 手回报的开始时刻与命令不同:结束时间由手填可以不同,开始与方式不行。
 			name: "invite params mismatch", primitive: protocol.PrimChatSendInviteCard,
 			args: protocol.ChatSendInviteCardArgs{
 				ConversationRef: "conv-strict",
-				Interview: protocol.InterviewDetails{
-					StartsAt: 1000, EndsAt: 2000, Method: protocol.InterviewMethodWechatVideo,
-				},
+				Interview:       protocol.InterviewRequest{StartsAt: 1000, Method: protocol.InterviewMethodWechatVideo},
 			},
-			hash: syncledger.InterviewInviteContentHash(1000, 2000, "wechatVideo"),
+			hash: syncledger.InterviewInviteContentHash(1000, 0, "wechatVideo"),
 			mutate: func(result *protocol.ResultBody) {
 				var data protocol.ChatSendInviteCardData
 				_ = json.Unmarshal(result.Data, &data)
-				data.Interview.EndsAt = 3000
+				data.Interview.StartsAt = 1500
 				result.Data, _ = protocol.Encode(data)
 			},
 		},
 		{
+			// 手回报的结束早于开始:形态不自洽,即便 hash 与它自洽也拒。
 			name: "invite non increasing time", primitive: protocol.PrimChatSendInviteCard,
 			args: protocol.ChatSendInviteCardArgs{
 				ConversationRef: "conv-strict",
-				Interview: protocol.InterviewDetails{
-					StartsAt: 2000, EndsAt: 1000, Method: protocol.InterviewMethodWechatVideo,
-				},
+				Interview:       protocol.InterviewRequest{StartsAt: 2000, Method: protocol.InterviewMethodWechatVideo},
 			},
-			hash: syncledger.InterviewInviteContentHash(2000, 1000, "wechatVideo"),
+			hash: syncledger.InterviewInviteContentHash(2000, 0, "wechatVideo"),
+			mutate: func(result *protocol.ResultBody) {
+				var data protocol.ChatSendInviteCardData
+				_ = json.Unmarshal(result.Data, &data)
+				data.Interview.EndsAt = 1000
+				data.ContentHash = syncledger.InterviewInviteContentHash(2000, 1000, "wechatVideo")
+				result.Data, _ = protocol.Encode(data)
+			},
 		},
 	}
 
@@ -307,7 +318,7 @@ func TestCardResultStrictValidationFailsClosedWithoutAppending(t *testing.T) {
 			case protocol.ChatSendWechatInviteArgs:
 				result = validWechatCardResult(command.MsgID, args.ConversationRef, sourceKey)
 			case protocol.ChatSendInviteCardArgs:
-				result = validInviteCardResult(command.MsgID, args.ConversationRef, sourceKey, args.Interview)
+				result = validInviteCardResult(command.MsgID, args.ConversationRef, sourceKey, observedZhilianInterview(args.Interview))
 			default:
 				t.Fatalf("未知测试 args %T", test.args)
 			}
