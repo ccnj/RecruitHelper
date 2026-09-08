@@ -341,6 +341,13 @@ export interface ChatReportRunResult {
 
 // 每日自动上传的开关与上次执行结果(2026-07-31 补充裁决)。开关默认关闭，
 // 且只有这一个入口能打开它。
+// 屏幕顶层状态栏的开关(2026-09-08 甲方裁决)。默认关闭=客户版;开=开发版,
+// 把最近命令(带候选人姓名)常驻在屏幕最上层。持久化在脑,重启不丢。
+export interface StatusBarSettings {
+  detailEnabled: boolean
+  error?: string
+}
+
 export interface LogReportSettings {
   lastAt?: string
   lastOk: boolean
@@ -938,6 +945,13 @@ export const api = {
   devReportSettings: () => get<FieldReportSettings>('/admin/dev/report/settings'),
   setDevReportAutoUpload: (autoUploadEnabled: boolean) =>
     post<FieldReportSettings>('/admin/dev/report/settings', { autoUploadEnabled }),
+  statusBarSettings: () => get<StatusBarSettings>('/admin/statusbar/settings'),
+  setStatusBarDetail: (detailEnabled: boolean) =>
+    post<StatusBarSettings>('/admin/statusbar/settings', { detailEnabled }),
+  // 状态栏用的精简账本:只要扫读字段,不带 args/guards/resultBody(那三样在
+  // readList 上动辄几百 KB,三秒一轮扛不住)。
+  ledgerBrief: (limit: number) =>
+    get<{ ledger: LedgerRow[] }>(`/admin/ledger?limit=${limit}&brief=1`),
   // OS 注入探针(鼠标)。脑侧唯一的派发入口就是这个端点,门禁盯着
   // (dispatch/osprobe_producer_test.go)——巡检与工作流一律不铸这条命令。
   //

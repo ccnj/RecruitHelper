@@ -1,7 +1,7 @@
 // Electron 主进程(壳):启动脑服务 → 等就绪 → 开窗加载 UI → 显式退出时停服务。
 // 三层职责硬边界:壳只管窗口与进程;逻辑中枢在 Go 服务;UI 只展示与人工回填。
 'use strict'
-const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, ipcMain } = require('electron')
+const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, ipcMain, screen } = require('electron')
 const crypto = require('node:crypto')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs')
@@ -14,6 +14,7 @@ const {
 } = require('./pluginSeed')
 const { TRAY_ICON_PNG_BASE64, APP_ICON_PNG_BASE64 } = require('./icons')
 const { RotatingLog } = require('./logRotate')
+const { createOverlayWindow } = require('./overlay')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
 const ADMIN_BASE = `http://127.0.0.1:${PORT}`
@@ -25,6 +26,7 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..')
 
 let service = null
 let win = null
+let overlay = null
 let tray = null
 let quitting = false
 let logStream = null
@@ -122,6 +124,38 @@ async function boot() {
 
   createWindow(adminToken, layout.uiEntry)
   createTray()
+  createOverlay(adminToken, layout.overlayEntry)
+}
+
+/** 两个渲染器共用的本地管理连接参数:只在进程参数里,不落盘、不进 URL。 */
+function rendererArguments(adminToken) {
+  return [
+    `--recruit-helper-admin-base=${ADMIN_BASE}`,
+    `--recruit-helper-admin-token=${adminToken}`,
+  ]
+}
+
+/**
+ * 屏幕顶层状态栏(2026-09-08 甲方裁决)。它是 UI 便利层,建不起来只记日志,
+ * 主窗与脑照常——但建起来之后**不再碰它**,理由见 overlay.js 开头。
+ */
+function createOverlay(adminToken, overlayEntry) {
+  try {
+    overlay = createOverlayWindow({
+      BrowserWindow,
+      screen,
+      preload: path.join(__dirname, 'preload.js'),
+      rendererArguments: rendererArguments(adminToken),
+      entry: overlayEntry,
+      devUrl: app.isPackaged ? '' : process.env.UI_URL,
+    })
+    overlay.on('closed', () => {
+      overlay = null
+    })
+  } catch (error) {
+    overlay = null
+    writeLog(`[main] 状态栏窗创建失败,继续无状态栏运行:${String(error?.message || error)}`)
+  }
 }
 
 /**
@@ -203,10 +237,7 @@ function createWindow(adminToken, uiEntry) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      additionalArguments: [
-        `--recruit-helper-admin-base=${ADMIN_BASE}`,
-        `--recruit-helper-admin-token=${adminToken}`,
-      ],
+      additionalArguments: rendererArguments(adminToken),
     },
   })
   // 开发期用 vite dev(UI_URL);打包后加载随包 UI 构建产物。
@@ -223,6 +254,12 @@ function createWindow(adminToken, uiEntry) {
   })
   win.on('closed', () => {
     win = null
+    // 没有托盘时,关主窗就是退出。状态栏窗还开着,window-all-closed 不会再来,
+    // 这里直接退,免得留一个只剩状态栏、无处可关的壳。
+    if (!tray && !quitting) {
+      quitting = true
+      app.quit()
+    }
   })
 }
 

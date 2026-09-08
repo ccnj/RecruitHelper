@@ -26,6 +26,10 @@ check(
   devDefault.uiEntry === join(REPO, 'client', 'ui', 'dist', 'index.html'),
   '开发态 UI 取自仓库工作树',
 )
+check(
+  devDefault.overlayEntry === join(REPO, 'client', 'ui', 'dist', 'overlay.html'),
+  '开发态状态栏页面与主窗同一份 dist',
+)
 
 const devOverride = resolveLayout({
   packaged: false,
@@ -51,6 +55,7 @@ check(win.brainBin === join(RES, 'brain', 'RecruitHelperBrain.exe'), '打包态�
 check(win.brainArgs.length === 0, '打包态不带 go run 参数')
 check(win.brainCwd === join(RES, 'brain'), '打包态 cwd 是脑二进制所在目录')
 check(win.uiEntry === join(RES, 'ui', 'index.html'), '打包态 UI 取自 resources/ui')
+check(win.overlayEntry === join(RES, 'ui', 'overlay.html'), '打包态状态栏页面取自 resources/ui')
 check(win.pluginDir === join(RES, 'plugin'), '打包态插件目录随包')
 
 const mac = resolveLayout({
