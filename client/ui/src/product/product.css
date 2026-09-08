@@ -142,6 +142,51 @@
   font-size: 11px;
 }
 
+/* 同步职位(2026-09-08 甲方裁决):首页职位卡撤下后,同步动作收成客户块右侧的
+   刷新图标;状态与最近同步时间进 title。加 .rh-product-app 前缀是为压过全局
+   button 样式,与 .rh-nav-item 同款。 */
+.rh-product-app .rh-sidebar-sync {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--rh-border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--rh-muted);
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease, background-color 140ms ease;
+}
+
+.rh-product-app .rh-sidebar-sync:hover:not(:disabled) {
+  border-color: var(--rh-primary);
+  background: var(--rh-primary-soft);
+  color: var(--rh-primary);
+}
+
+.rh-product-app .rh-sidebar-sync:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.rh-sidebar-sync.is-syncing svg {
+  animation: rh-sidebar-sync-spin 900ms linear infinite;
+}
+
+@keyframes rh-sidebar-sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rh-sidebar-sync.is-syncing svg {
+    animation: none;
+  }
+}
+
 .rh-sidebar-nav {
   display: flex;
   flex: 1;
@@ -975,51 +1020,6 @@
   margin-top: 1px;
   color: var(--rh-muted);
   font-size: 10px;
-}
-
-.rh-job-strip {
-  min-height: 62px;
-  display: grid;
-  grid-template-columns: auto minmax(180px, auto) auto 1fr auto;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-  padding: 11px 14px;
-  border: 1px solid #dce5f5;
-  border-radius: var(--rh-radius);
-  background: #fff;
-  box-shadow: var(--rh-shadow);
-}
-
-.rh-job-mark {
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  background: var(--rh-primary-soft);
-  color: var(--rh-primary);
-}
-
-.rh-job-copy {
-  display: flex;
-  flex-direction: column;
-}
-
-.rh-job-copy span,
-.rh-job-meta {
-  color: var(--rh-muted);
-  font-size: 10px;
-}
-
-.rh-job-copy strong {
-  font-size: 13px;
-}
-
-.rh-job-meta {
-  display: flex;
-  justify-content: flex-end;
-  gap: 18px;
 }
 
 .rh-home-lower-grid {
@@ -2862,15 +2862,6 @@
 
   .rh-business-window {
     width: 100%;
-  }
-
-  .rh-job-strip {
-    /* 窄屏隐藏 rh-job-meta，它不再占列；剩下 mark、copy、状态、同步按钮四列。 */
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-  }
-
-  .rh-job-meta {
-    display: none;
   }
 
   .rh-metric-grid,
