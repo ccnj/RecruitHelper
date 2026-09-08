@@ -93,3 +93,45 @@ func TestStatusBarSettingsRejectsBodyWithoutFlag(t *testing.T) {
 		}
 	}
 }
+
+type fakePlatformSource string
+
+func (f fakePlatformSource) CustomerPlatform() string { return string(f) }
+
+// 显示开关默认跟平台:BOSS 开、智联关、快照缺席关;人拨过之后换平台也不变。
+func TestStatusBarVisibleDefaultsByPlatformAndManualWins(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	newMux := func(platform string) *http.ServeMux {
+		api := New(st, newFakeAdminHub(), nil, nil, nil, "").SetCustomerPlatformSource(fakePlatformSource(platform))
+		mux := http.NewServeMux()
+		api.Routes(mux)
+		return mux
+	}
+	if got := statusBarRequest(t, newMux("boss"), http.MethodGet, ""); !got.Visible || got.VisibleSource != "platformDefault" || got.Platform != "boss" {
+		t.Fatalf("BOSS 默认应显示: %+v", got)
+	}
+	if got := statusBarRequest(t, newMux("zhilian"), http.MethodGet, ""); got.Visible || got.Platform != "zhilian" {
+		t.Fatalf("智联默认应隐藏: %+v", got)
+	}
+	if got := statusBarRequest(t, newMux(""), http.MethodGet, ""); got.Visible || got.Platform != "zhilian" {
+		t.Fatalf("快照缺席按智联、隐藏: %+v", got)
+	}
+	if got := statusBarRequest(t, newMux("zhilian"), http.MethodPost, `{"visible":true}`); !got.Visible || got.VisibleSource != "manual" {
+		t.Fatalf("智联明示开后应显示: %+v", got)
+	}
+	if got := statusBarRequest(t, newMux("boss"), http.MethodPost, `{"visible":false}`); got.Visible || got.VisibleSource != "manual" {
+		t.Fatalf("BOSS 明示关后应隐藏: %+v", got)
+	}
+	// 没装平台源(测试或极早期装配)也不炸,按智联。
+	bare := New(st, newFakeAdminHub(), nil, nil, nil, "")
+	mux := http.NewServeMux()
+	bare.Routes(mux)
+	if got := statusBarRequest(t, mux, http.MethodGet, ""); got.Platform != "zhilian" {
+		t.Fatalf("无平台源应按智联: %+v", got)
+	}
+}

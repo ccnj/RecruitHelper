@@ -45,6 +45,19 @@ function StatusBarSwitch() {
     }
   }, [saving])
 
+  const toggleVisible = useCallback(async (next: boolean) => {
+    if (saving) return
+    setSaving(true)
+    setError(null)
+    try {
+      setSettings(await api.setStatusBarVisible(next))
+    } catch (reason) {
+      setError(errorText(reason))
+    } finally {
+      setSaving(false)
+    }
+  }, [saving])
+
   const setPosition = useCallback(async (position: StatusBarPosition) => {
     if (saving) return
     setSaving(true)
@@ -59,9 +72,27 @@ function StatusBarSwitch() {
   }, [saving])
 
   const enabled = settings?.detailEnabled === true
+  const visible = settings?.visible === true
+  const visibleNote = settings === null
+    ? ''
+    : settings.visibleSource === 'platformDefault'
+      ? `（当前按平台默认：${settings.platform === 'boss' ? 'BOSS，开' : '智联，关'}）`
+      : '（已手动设置，不再跟平台）'
   return (
     <div className="panel">
       <h3>状态栏</h3>
+      <div className="dc-switch-row">
+        <button
+          aria-checked={visible}
+          aria-label="显示状态栏"
+          className={`dc-switch${visible ? ' is-on' : ''}`}
+          disabled={saving || settings === null}
+          onClick={() => void toggleVisible(!visible)}
+          role="switch"
+          type="button"
+        />
+        <span>显示状态栏{visibleNote}</span>
+      </div>
       <div className="dc-switch-row" role="radiogroup" aria-label="状态栏位置">
         <span>位置</span>
         {STATUS_BAR_POSITIONS.map((item) => (
@@ -91,6 +122,7 @@ function StatusBarSwitch() {
         <span>详细模式</span>
       </div>
       <p>
+        显示开关没人拨过时跟平台：BOSS 客户开、智联客户关；拨过一次就以拨的为准、重启仍保持。
         状态栏贴在主屏工作区的某个角，位置几秒内生效、重启仍保持。默认只显示一句话状态；
         打开详细模式后多显示最近五条命令（原语、候选人、状态、耗时）与批次、插件、待裁决摘要，
         同样几秒内生效、重启仍保持。候选人姓名会常驻在屏幕最上层，远程协助时对方也看得见，用完记得关。

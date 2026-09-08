@@ -52,6 +52,9 @@ function usePoll(intervalMs: number, task: () => Promise<void>) {
 export function OverlayApp() {
   const [view, setView] = useState<OverviewSnapshotView | null>(null)
   const [reachable, setReachable] = useState(false)
+  // null = 还没从脑读到显示开关。读到之前什么都不画:智联客户默认是关的,
+  // 不能先闪一条再收掉;脑不可达时维持上一次的值(首轮读不到就一直不画)。
+  const [visible, setVisible] = useState<boolean | null>(null)
   const [detail, setDetail] = useState(false)
   // null = 还没从脑读到档位。主进程建窗时已按脑里的值放好,页面在读到同一个值
   // 之前不能拿默认值去"纠正"它,否则会先挪回顶部再挪回来闪一下。
@@ -72,6 +75,7 @@ export function OverlayApp() {
   usePoll(SETTINGS_INTERVAL_MS, async () => {
     try {
       const settings = await api.statusBarSettings()
+      setVisible(settings.visible === true)
       setDetail(settings.detailEnabled === true)
       if (isStatusBarPosition(settings.position)) setPosition(settings.position)
     } catch {
@@ -103,6 +107,7 @@ export function OverlayApp() {
     }
   })
 
+  if (visible !== true) return null
   return (
     <div className={`ov-bar${detail ? ' is-detail' : ''}${(position ?? 'top').startsWith('bottom') ? ' is-bottom' : ''}`}>
       <TopLine view={reachable ? view : null} />

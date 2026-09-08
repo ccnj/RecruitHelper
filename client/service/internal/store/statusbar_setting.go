@@ -21,9 +21,40 @@ type StatusBarSetting struct {
 	DetailEnabled bool
 	// Position 是小窗贴在主屏工作区的哪个角(封闭枚举,见 StatusBarPositions)。
 	// 空串按顶部居中——旧库加列后拿到的就是空串,与首版行为一致。
-	Position  string
+	Position string
+	// Visible 是"显示状态栏"的三态:空串=没人拨过,跟平台默认(BOSS 开、其余关,
+	// 2026-09-08 甲方裁决);"on"/"off" 是人在诊断台拨过之后的明示值,此后不再看平台。
+	// 三态而不是 bool,是因为默认值取决于绑定平台,而平台在装机后才知道、还可能换。
+	Visible   string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+const (
+	StatusBarVisibleAuto = ""
+	StatusBarVisibleOn   = "on"
+	StatusBarVisibleOff  = "off"
+	// 没人拨过时只有这个平台默认显示。
+	StatusBarDefaultVisiblePlatform = "boss"
+)
+
+// EffectiveVisible 按当前绑定平台算出实际显示与否:明示值优先,否则 BOSS 开、其余关。
+func (s StatusBarSetting) EffectiveVisible(platform string) bool {
+	switch s.Visible {
+	case StatusBarVisibleOn:
+		return true
+	case StatusBarVisibleOff:
+		return false
+	}
+	return platform == StatusBarDefaultVisiblePlatform
+}
+
+// VisibleSource 告诉诊断台实际值是哪来的:platformDefault(没人拨过)或 manual。
+func (s StatusBarSetting) VisibleSource() string {
+	if s.Visible == StatusBarVisibleAuto {
+		return "platformDefault"
+	}
+	return "manual"
 }
 
 // 位置档位。名字直接是 Electron 侧几何函数的锚点名,两边不做翻译。
@@ -81,6 +112,15 @@ func (s *Store) StatusBarSetting() (StatusBarSetting, error) {
 // SetStatusBarDetail 落开关。只应由诊断台的人工点击调用。
 func (s *Store) SetStatusBarDetail(enabled bool) error {
 	return s.updateStatusBarColumns(map[string]any{"detail_enabled": enabled})
+}
+
+// SetStatusBarVisible 落"显示状态栏"的明示值。拨过一次就不再跟平台默认。
+func (s *Store) SetStatusBarVisible(visible bool) error {
+	value := StatusBarVisibleOff
+	if visible {
+		value = StatusBarVisibleOn
+	}
+	return s.updateStatusBarColumns(map[string]any{"visible": value})
 }
 
 // SetStatusBarPosition 落位置档位。不在枚举里直接拒绝。
