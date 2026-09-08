@@ -268,9 +268,21 @@ export function productCandidatePath(view: CandidateView): string {
   return `/app/candidates?view=${candidateViewToAPI[view]}&limit=200`
 }
 
-export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()): ProductData {
-  const empty = createEmptyProductData()
-  const { overview: rawOverview, runtime } = snapshot.overview
+/** overview 一个响应能装出来的三块投影;产品首页与屏幕顶层状态栏共用。 */
+export interface OverviewSnapshotView {
+  customer: ProductData['customer']
+  overview: ProductData['overview']
+  connections: ProductConnectionView[]
+}
+
+// adaptOverviewSnapshot 只吃 /app/overview。抽出来是为了状态栏(2026-09-08):
+// 它要说的那句状态与产品首页必须永远是同一句,所以推导只能有一份;而状态栏
+// 不该为了这一句去拉候选人列表与待确认批次。
+export function adaptOverviewSnapshot(
+  response: AppOverviewResponse,
+  now = new Date(),
+): OverviewSnapshotView {
+  const { overview: rawOverview, runtime } = response
   const businessWindowOpen = runtime.businessWindowOpen
   const customerName = clean(runtime.customerName) || (
     runtime.available
@@ -280,29 +292,6 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
   const job = adaptJob(rawOverview.job)
   const workflow = adaptWorkflow(runtime, businessWindowOpen)
   const funnel = adaptFunnel(rawOverview.funnel)
-  const confirmation = adaptConfirmation(snapshot.confirmation.confirmation, {
-    businessWindowOpen,
-    workflowPaused: workflow.state === 'paused' || workflow.state === 'waitingDailyWindow',
-  })
-  const candidates = {
-    communicating: adaptCandidateList(snapshot.candidates.communicating, 'communicating', now),
-    interviewed: adaptCandidateList(snapshot.candidates.interviewed, 'interviewed', now),
-    interviewElapsed: adaptCandidateList(
-      snapshot.candidates.interviewElapsed,
-      'interviewElapsed',
-      now,
-    ),
-    wechat: adaptCandidateList(snapshot.candidates.wechat, 'wechat', now),
-  }
-  const candidateTotals = {
-    communicating: candidateTotal(snapshot.candidates.communicating, candidates.communicating),
-    interviewed: candidateTotal(snapshot.candidates.interviewed, candidates.interviewed),
-    interviewElapsed: candidateTotal(
-      snapshot.candidates.interviewElapsed,
-      candidates.interviewElapsed,
-    ),
-    wechat: candidateTotal(snapshot.candidates.wechat, candidates.wechat),
-  }
   const statistics = rawOverview.statistics
 
   return {
@@ -355,10 +344,46 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
         newInterviews: metricValue(statistics.todayNewAppointments),
       },
     },
+    connections: adaptConnections(runtime, job),
+  }
+}
+
+export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()): ProductData {
+  const empty = createEmptyProductData()
+  const view = adaptOverviewSnapshot(snapshot.overview, now)
+  const businessWindowOpen = snapshot.overview.runtime.businessWindowOpen
+  const workflow = view.overview.workflow
+  const confirmation = adaptConfirmation(snapshot.confirmation.confirmation, {
+    businessWindowOpen,
+    workflowPaused: workflow.state === 'paused' || workflow.state === 'waitingDailyWindow',
+  })
+  const candidates = {
+    communicating: adaptCandidateList(snapshot.candidates.communicating, 'communicating', now),
+    interviewed: adaptCandidateList(snapshot.candidates.interviewed, 'interviewed', now),
+    interviewElapsed: adaptCandidateList(
+      snapshot.candidates.interviewElapsed,
+      'interviewElapsed',
+      now,
+    ),
+    wechat: adaptCandidateList(snapshot.candidates.wechat, 'wechat', now),
+  }
+  const candidateTotals = {
+    communicating: candidateTotal(snapshot.candidates.communicating, candidates.communicating),
+    interviewed: candidateTotal(snapshot.candidates.interviewed, candidates.interviewed),
+    interviewElapsed: candidateTotal(
+      snapshot.candidates.interviewElapsed,
+      candidates.interviewElapsed,
+    ),
+    wechat: candidateTotal(snapshot.candidates.wechat, candidates.wechat),
+  }
+
+  return {
+    customer: view.customer,
+    overview: view.overview,
     confirmation,
     candidates,
     candidateTotals,
-    connections: adaptConnections(runtime, job),
+    connections: view.connections,
     confirmationBadge: snapshot.confirmation.confirmation.ready
       ? safeCount(snapshot.confirmation.confirmation.selectableCount)
       : 0,
