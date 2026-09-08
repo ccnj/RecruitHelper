@@ -48,8 +48,9 @@ var errM5AdviceRoundSkipped = errors.New("m5 advice skipped for this patrol roun
 // settleM5TurnBoundaryChanged 收敛"AI 边界重验/结果落账时发现输入边界已变"
 // (2026-08-02 甲方裁决,规格 v4 §一"旧轮失效"):store 层多半已在同事务内把
 // 旧轮作废,这里做一次幂等兜底,然后以跳过哨兵结束本轮——新消息属于下一轮,
-// 下轮巡检按最新账本边界重开新轮重新裁决,候选人不冻结。带 effect 案底的轮
-// (多气泡已发前缀后候选人插话)由 store 回落保守 manualRequired,不作废。
+// 下轮巡检按最新账本边界重开新轮重新裁决,候选人不冻结。已发前缀自 2026-09-08
+// 起不再挡作废(轮收 completed);只有带在途 intent 案底的轮由 store 回落保守
+// manualRequired,不作废。
 func (a *roundActor) settleM5TurnBoundaryChanged(turnID string) error {
 	if err := a.manager.store.SupersedeDialogueTurnForBoundary(turnID, a.manager.now()); err != nil {
 		return err
@@ -63,7 +64,12 @@ func (a *roundActor) settleM5TurnBoundaryChanged(turnID string) error {
 func (a *roundActor) logM5TurnBoundarySettled(turnID string) {
 	turn, err := a.manager.store.DialogueTurnByID(turnID)
 	if err == nil && turn != nil && turn.Status == store.DialogueTurnManualRequired {
-		slog.Info("对话轮转人工:输入边界已变且旧轮带发送案底,交人工处置",
+		slog.Info("对话轮转人工:输入边界已变且旧轮带在途发送案底,交人工处置",
+			"turnId", turnID)
+		return
+	}
+	if err == nil && turn != nil && turn.Status == store.DialogueTurnCompleted {
+		slog.Info("对话轮作废:输入边界已变,已发前缀保留、未发剩余作废,轮收 completed,按最新账本边界重开新轮",
 			"turnId", turnID)
 		return
 	}

@@ -10,7 +10,8 @@ package store
 // 事件动作轨 drainCommunicationV4EventActions)在遭遇一条陈旧 planned 行时
 // 才调用本文件的入口;不存在启动清扫或定时清扫。判据机械——绑过发送意图
 // (EffectIntentID/EffectStartedAt/SentAt 任一非空)的行不算"未派发",永不
-// 作废(承重墙,与第 4 族 errDialogueTurnEffectBound 同一红线)。
+// 作废(承重墙,与第 4 族 supersedeDialogueTurnForBoundaryTx"绑过 intent 的
+// 行零触碰"同一红线;第 4 族对"轮"能否作废另有在途 intent 判据)。
 //
 // 关于"存量":陈旧 planned 行本身就是存量,但派发枚举只列聚合 active 的
 // 候选人,被冻结候选人(聚合 manualRequired)的 planned 行不进入枚举、天然
