@@ -1,0 +1,119 @@
+/* 状态栏是透明置顶窗里的一张纸:html/body 必须透明,只有横条本身有底色。
+   不引 styles.css——它给 html 铺了瓷白底,会把整个透明窗糊成一块白板。 */
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+body {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  color: #f1efe8;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ov-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* 0.6:甲方 09-08 Mac 上看过 0.82 后要更透,底下的页面要能看见;
+     再低浅色网页上白字就糊了,想再调只改这一个数。 */
+  background: rgba(24, 26, 32, 0.6);
+  border-radius: 0 0 10px 10px;
+}
+
+/* 贴屏幕底边的档位:内容贴窗底,圆角翻到上面;开发版从底边往上长。 */
+.ov-bar.is-bottom {
+  top: auto;
+  bottom: 0;
+  border-radius: 10px 10px 0 0;
+}
+
+.ov-top {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.ov-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background: #888780;
+}
+.ov-dot.is-success { background: #639922; }
+.ov-dot.is-warning { background: #ef9f27; }
+.ov-dot.is-danger { background: #e24b4a; }
+.ov-dot.is-neutral { background: #888780; }
+
+.ov-plugin { color: #f09595; flex: none; }
+
+.ov-label {
+  font-weight: 600;
+  font-size: 14px;
+  flex: none;
+}
+.ov-label.is-running { color: #97c459; }
+.ov-label.is-attention { color: #fac775; }
+.ov-label.is-failed { color: #f09595; }
+.ov-label.is-idle { color: #d3d1c7; }
+
+.ov-hint {
+  color: #b4b2a9;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ov-nums { color: #b4b2a9; flex: none; }
+.ov-nums b, .ov-foot b { color: #f1efe8; font-weight: 600; }
+
+.ov-ledger {
+  border-top: 1px solid rgba(241, 239, 232, 0.18);
+  padding: 5px 14px 6px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.ov-row {
+  display: grid;
+  grid-template-columns: 64px 176px 64px 1fr 44px;
+  gap: 8px;
+  padding: 2px 0;
+  align-items: center;
+  white-space: nowrap;
+}
+.ov-row > span { overflow: hidden; text-overflow: ellipsis; }
+.ov-row.is-readonly { color: #888780; }
+.ov-row.is-effectful { color: #f1efe8; }
+.ov-row.is-empty { color: #888780; display: block; }
+.ov-elapsed { text-align: right; }
+
+.ov-status.is-running { color: #85b7eb; }
+.ov-status.is-ok { color: #97c459; }
+.ov-status.is-failed { color: #f09595; }
+.ov-status.is-suspect { color: #fac775; }
+.ov-status.is-void { color: #888780; }
+.ov-row.is-readonly .ov-status.is-ok { color: #888780; }
+
+.ov-foot {
+  border-top: 1px solid rgba(241, 239, 232, 0.18);
+  padding: 6px 14px 7px;
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: #b4b2a9;
+  white-space: nowrap;
+  overflow: hidden;
+}

@@ -1,7 +1,7 @@
 // Electron 主进程(壳):启动脑服务 → 等就绪 → 开窗加载 UI → 显式退出时停服务。
 // 三层职责硬边界:壳只管窗口与进程;逻辑中枢在 Go 服务;UI 只展示与人工回填。
 'use strict'
-const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, ipcMain } = require('electron')
+const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, ipcMain, screen } = require('electron')
 const crypto = require('node:crypto')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs')
@@ -14,6 +14,10 @@ const {
 } = require('./pluginSeed')
 const { TRAY_ICON_PNG_BASE64, APP_ICON_PNG_BASE64 } = require('./icons')
 const { RotatingLog } = require('./logRotate')
+const { resolveWindowSize } = require('./windowSize')
+const {
+  createOverlayWindow, applyOverlayPosition, normalizeOverlayPosition, DEFAULT_OVERLAY_POSITION,
+} = require('./overlay')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
 const ADMIN_BASE = `http://127.0.0.1:${PORT}`
@@ -25,6 +29,7 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..')
 
 let service = null
 let win = null
+let overlay = null
 let tray = null
 let quitting = false
 let logStream = null
@@ -122,6 +127,73 @@ async function boot() {
 
   createWindow(adminToken, layout.uiEntry)
   createTray()
+  await createOverlay(adminToken, layout.overlayEntry)
+}
+
+/** 两个渲染器共用的本地管理连接参数:只在进程参数里,不落盘、不进 URL。 */
+function rendererArguments(adminToken) {
+  return [
+    `--recruit-helper-admin-base=${ADMIN_BASE}`,
+    `--recruit-helper-admin-token=${adminToken}`,
+  ]
+}
+
+/**
+ * 屏幕顶层状态栏(2026-09-08 甲方裁决)。它是 UI 便利层,建不起来只记日志,
+ * 主窗与脑照常——建起来之后唯一会碰它的是"人在诊断台改了位置档位"那一下
+ * (经 IPC 挪窗,不动焦点),理由见 overlay.js 开头。
+ */
+async function createOverlay(adminToken, overlayEntry) {
+  const position = await readOverlayPosition(adminToken)
+  try {
+    overlay = createOverlayWindow({
+      BrowserWindow,
+      screen,
+      preload: path.join(__dirname, 'preload.js'),
+      rendererArguments: rendererArguments(adminToken),
+      entry: overlayEntry,
+      devUrl: app.isPackaged ? '' : process.env.UI_URL,
+      position,
+    })
+    overlay.on('closed', () => {
+      overlay = null
+    })
+  } catch (error) {
+    overlay = null
+    writeLog(`[main] 状态栏窗创建失败,继续无状态栏运行:${String(error?.message || error)}`)
+  }
+  // 只认状态栏自己的渲染器:主窗那页没有理由挪它。
+  ipcMain.handle('recruit-helper:overlay-position', (event, requested) => {
+    if (!overlay || overlay.isDestroyed() || event.sender !== overlay.webContents) {
+      return { ok: false, error: '只有状态栏页面可以调整位置' }
+    }
+    const next = normalizeOverlayPosition(requested)
+    const moved = applyOverlayPosition(overlay, screen.getPrimaryDisplay().workArea, next)
+    if (moved) writeLog(`[main] 状态栏已挪到档位 ${next}`)
+    return { ok: true }
+  })
+}
+
+/**
+ * 建窗前问脑一次位置档位,免得先在顶部闪一下再跳到人设的位置。读不到就顶部居中,
+ * 页面加载后会再按脑里的值纠正一次。
+ */
+async function readOverlayPosition(adminToken) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 1500)
+  try {
+    const response = await fetch(`${ADMIN_BASE}/admin/statusbar/settings`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+      signal: controller.signal,
+    })
+    if (!response.ok) return DEFAULT_OVERLAY_POSITION
+    const body = await response.json().catch(() => ({}))
+    return normalizeOverlayPosition(body.position)
+  } catch {
+    return DEFAULT_OVERLAY_POSITION
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /**
@@ -192,9 +264,13 @@ async function runUpdateInstall(adminToken) {
 }
 
 function createWindow(adminToken, uiEntry) {
+  // 按主显示器工作区收窗(理由见 windowSize.js):app ready 之后 screen 才可用,
+  // createWindow 只在 ready 之后调用。
+  const { width, height, minWidth } = resolveWindowSize(screen.getPrimaryDisplay().workAreaSize)
   win = new BrowserWindow({
-    width: 1200,
-    height: 840,
+    width,
+    height,
+    minWidth,
     title: 'AI增员助手',
     // 标题栏与任务栏图标。给 256 的大图让 Windows 自己按场景降采样,比预先压到
     // 某个尺寸清楚。不设的话这两处会一直是 Electron 的默认原子图标。
@@ -203,10 +279,7 @@ function createWindow(adminToken, uiEntry) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      additionalArguments: [
-        `--recruit-helper-admin-base=${ADMIN_BASE}`,
-        `--recruit-helper-admin-token=${adminToken}`,
-      ],
+      additionalArguments: rendererArguments(adminToken),
     },
   })
   // 开发期用 vite dev(UI_URL);打包后加载随包 UI 构建产物。
@@ -223,6 +296,12 @@ function createWindow(adminToken, uiEntry) {
   })
   win.on('closed', () => {
     win = null
+    // 没有托盘时,关主窗就是退出。状态栏窗还开着,window-all-closed 不会再来,
+    // 这里直接退,免得留一个只剩状态栏、无处可关的壳。
+    if (!tray && !quitting) {
+      quitting = true
+      app.quit()
+    }
   })
 }
 

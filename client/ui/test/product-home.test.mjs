@@ -203,4 +203,13 @@ await confirmEndWorkflow(
 assert.equal(endRequests, 1,
   '用户确认后只调用一次结束工作流写入口')
 
+// 2026-09-08 甲方裁决:首页「当前绑定职位」职位卡与「同步职位」按钮撤下,同步动作
+// 收成侧栏客户块里的刷新图标(见 product-sidebar.test.mjs)。首页不得再渲染它们。
+{
+  const markup = render()
+  assert.ok(!markup.includes('当前绑定职位'), '首页不再渲染当前绑定职位卡')
+  assert.ok(!markup.includes('同步职位'), '首页不再渲染同步职位按钮')
+  assert.ok(!markup.includes('rh-job-strip'), '首页不再渲染 rh-job-strip')
+}
+
 console.log('产品首页结束与待切换控制测试通过')

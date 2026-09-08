@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -14,4 +15,14 @@ export default defineConfig({
   base: './', // 相对路径:Electron 经 file:// 加载构建产物时资源才能解析
   define: { __APP_VERSION__: JSON.stringify(version) },
   server: { port: 5273 },
+  // 两个入口:主窗 index.html;屏幕顶层状态栏 overlay.html(2026-09-08)。
+  // 后者是独立窗口里的独立页面,与主窗共用取数层与首页那句状态的推导。
+  build: {
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        overlay: fileURLToPath(new URL('./overlay.html', import.meta.url)),
+      },
+    },
+  },
 })

@@ -131,34 +131,8 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation, dail
         </div>
       </section>
 
-      <section className="rh-job-strip">
-        <div className="rh-job-mark"><ProductIcon name="briefcase" size={20} /></div>
-        <div className="rh-job-copy">
-          <span>当前绑定职位</span>
-          <strong>{customer.job.name ?? '尚未绑定职位'}</strong>
-        </div>
-        <StatusPill
-          label={customer.job.syncStateLabel}
-          tone={customer.job.syncState === 'synced' ? 'green' : customer.job.syncState === 'stale' ? 'amber' : 'slate'}
-        />
-        <div className="rh-job-meta">
-          <span>{customer.job.lastSyncedAt ? `同步于 ${customer.job.lastSyncedAt}` : '尚无同步记录'}</span>
-        </div>
-        <button
-          className="rh-button is-quiet"
-          disabled={!actions.syncJobs}
-          onClick={() => void actions.syncJobs?.()}
-          title={
-            actions.syncJobs
-              ? '重新读取后台职位：更新当前绑定职位，并让主动来聊的候选人能匹配到后台在招的其他职位'
-              : '运行控制尚未接入'
-          }
-          type="button"
-        >
-          同步职位
-        </button>
-      </section>
-
+      {/* 「当前绑定职位」职位卡与「同步职位」按钮 2026-09-08 甲方裁决撤下:职位名
+          侧栏客户块本来就有,同步动作收成那里的刷新图标(ProductSidebar)。 */}
       {planEntries.length > 0 && dailyPlan && (
         <section className="rh-panel rh-daily-plan">
           <header className="rh-daily-plan-head">

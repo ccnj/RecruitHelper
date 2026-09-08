@@ -1627,6 +1627,16 @@ h1, h2, h3, p { margin-top: 0; }
   gap: 10px;
 }
 
+/* 状态栏位置档位那一排单选:与开关行同一行高,标签紧贴各自的圆点。 */
+.dc-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 10px;
+  cursor: pointer;
+}
+.dc-radio input { margin: 0; }
+
 .dc-shell .dc-switch {
   flex: none;
   position: relative;
