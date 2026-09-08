@@ -28,7 +28,7 @@ function brainBinaryName(platform) {
  *   env?: Record<string, string|undefined>,
  *   exists?: (p: string) => boolean,
  * }} opts
- * @returns {{brainBin:string, brainArgs:string[], brainCwd:string, uiEntry:string, pluginDir:string, tipDir:string}}
+ * @returns {{brainBin:string, brainArgs:string[], brainCwd:string, uiEntry:string, overlayEntry:string, pluginDir:string, tipDir:string}}
  */
 function resolveLayout(opts) {
   const {
@@ -62,25 +62,29 @@ function resolveLayout(opts) {
       brainArgs: [],
       brainCwd: path.dirname(brainBin),
       uiEntry: path.join(resourcesPath, 'ui', 'index.html'),
+      overlayEntry: path.join(resourcesPath, 'ui', 'overlay.html'),
       pluginDir: path.join(resourcesPath, 'plugin'),
       tipDir: path.join(resourcesPath, 'tip'),
     }
   }
 
   const uiEntry = path.join(repoRoot, 'client', 'ui', 'dist', 'index.html')
+  // 状态栏页面与主窗同一次 UI 构建产出(vite 双入口),同目录。
+  const overlayEntry = path.join(repoRoot, 'client', 'ui', 'dist', 'overlay.html')
   const pluginDir = path.join(repoRoot, 'plugin', 'dist')
   // 开发期 TIP 直接指仓库里那份随包副本。安置逻辑只在打包态跑,所以这个路径
   // 平时不会被用到 —— 给出来是为了让两种形态的返回形状一致。
   const tipDir = path.join(repoRoot, 'third_party', 'tip')
   const override = env.BRAIND_BIN
   if (override) {
-    return { brainBin: override, brainArgs: [], brainCwd: repoRoot, uiEntry, pluginDir, tipDir }
+    return { brainBin: override, brainArgs: [], brainCwd: repoRoot, uiEntry, overlayEntry, pluginDir, tipDir }
   }
   return {
     brainBin: 'go',
     brainArgs: ['run', './client/service'],
     brainCwd: repoRoot,
     uiEntry,
+    overlayEntry,
     pluginDir,
     tipDir,
   }
