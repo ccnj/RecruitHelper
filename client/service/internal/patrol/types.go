@@ -25,10 +25,6 @@ const (
 	TriggerCurrentConversation = "manualCurrentConversation"
 
 	surfaceRecoverySuffix = "+surfaceRecovery"
-	// surfacePreparedSuffix 标记本轮起手按手的页面就绪提示先保证了沟通台面
-	// (预期内的阶段切换:采集批次收口在推荐页、开工闸读停在个人中心)。与
-	// surfaceRecovery 分开记:后者自此只剩"轮中页面真的没了"的救场。
-	surfacePreparedSuffix = "+surfacePrepared"
 
 	PauseUserStopped           = "userStopped"
 	PauseUserRequested         = "userPaused"
@@ -256,10 +252,6 @@ type HandState struct {
 	Online  bool
 	Session string
 	BootID  string
-	// Contexts 是手最近一次 ping 上报的各账号页面就绪提示(可为 nil:手还没
-	// 收到过任何带上下文的命令、或适配器不提供)。它只用于把 nav.ensureSurface
-	// 提到第一条读命令之前;提示陈旧或缺席时一律回落既有的失败驱动救场。
-	Contexts []protocol.PingContext
 }
 
 type HandAvailability interface {
@@ -436,16 +428,13 @@ type ConversationProjection struct {
 }
 
 type RoundOutcome struct {
-	Key        store.AccountKey
-	RoundID    string
-	Trigger    string
-	Status     string
-	EnsureUsed bool
-	// SurfacePrepared 表示本轮起手按页面就绪提示先派了 nav.ensureSurface;
-	// 它不占用 EnsureUsed 的一次救场预算。
-	SurfacePrepared bool
-	Projections     []ConversationProjection
-	Err             error
+	Key         store.AccountKey
+	RoundID     string
+	Trigger     string
+	Status      string
+	EnsureUsed  bool
+	Projections []ConversationProjection
+	Err         error
 }
 
 type TickResult struct {

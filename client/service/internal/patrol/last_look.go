@@ -27,15 +27,6 @@ const lastLookAuditCategory = "patrol_last_look"
 // 放行,调用方照原计划切换会话。调用方在返回后须自查 classificationCorrected,
 // 与正常单会话处理的停止边界同规则。
 func (a *roundActor) lastLookBeforeSwitch(ctx context.Context, targetRef string) error {
-	if a.freshSurface {
-		// 本轮起手刚把页面导航到沟通台面,之后还没打开过任何会话:当前会话
-		// 识别必然读到"无"。不为一个已知为空的读数派命令、记红行,直接照原
-		// 计划切换。只跳这一次——接下来打开的目标会话就是下次要看的"当前"。
-		a.freshSurface = false
-		slog.Info("临走看一眼:页面刚导航到沟通台面,尚无会话可看,照原计划切换",
-			"targetRef", targetRef)
-		return nil
-	}
 	if err := a.setStage("lastLook"); err != nil {
 		return err
 	}

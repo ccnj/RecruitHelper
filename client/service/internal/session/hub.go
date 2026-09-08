@@ -136,18 +136,6 @@ func (h *Hub) HandSession(handID string) (string, string, bool) {
 	return c.session, c.bootID, true
 }
 
-// HandContexts 返回该手最近一次 ping 上报的账号页面上下文健康(平台无关的
-// ready/reason 读数)。它是手的传感提示,不是账本:巡检轮只用它决定要不要在
-// 第一条读命令之前先保证沟通台面,从不据此跳过任何核对或授权任何动作。手不在
-// 注册表里返回 nil。
-func (h *Hub) HandContexts(handID string) []protocol.PingContext {
-	state, ok := h.reg.Get(handID)
-	if !ok {
-		return nil
-	}
-	return state.Contexts
-}
-
 // HandContractMatch 返回当前 ready 活连接在 hello 时冻结的契约一致性结论。
 // contractHash 仍不参与身份认证或握手拒绝；该读数只供 effectful 构造闸使用。
 func (h *Hub) HandContractMatch(handID string) (bool, bool) {

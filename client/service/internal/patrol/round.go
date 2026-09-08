@@ -17,20 +17,13 @@ import (
 )
 
 type roundActor struct {
-	manager    *Manager
-	account    *store.Account
-	hand       HandState
-	roundID    string
-	trigger    string
-	now        time.Time
-	ensureUsed bool
-	// surfacePrepared:本轮起手按手的页面就绪提示先派了 nav.ensureSurface。
-	// 它与 ensureUsed 分开:救场预算仍留给"轮中页面真的没了"。
-	surfacePrepared bool
-	// freshSurface:自起手保证台面以来本轮还没打开过任何会话。刚导航出来的
-	// 沟通页上没有会话是开着的,第一次切换前的"临走看一眼"必然读到"无",据此
-	// 跳过;任何线程读/打开会话一发生就清零,之后照常看。
-	freshSurface            bool
+	manager                 *Manager
+	account                 *store.Account
+	hand                    HandState
+	roundID                 string
+	trigger                 string
+	now                     time.Time
+	ensureUsed              bool
 	classificationCorrected bool
 	requireCurrentThread    bool
 	sourcingBatchIDAtStart  string
@@ -135,7 +128,6 @@ func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, h
 		finishErr = errors.Join(finishErr, generationErr)
 	}
 	outcome.EnsureUsed = actor.ensureUsed
-	outcome.SurfacePrepared = actor.surfacePrepared
 	outcome.Projections = actor.projection
 	outcome.Err = err
 	if err == nil {
@@ -149,20 +141,10 @@ func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, h
 			outcome.Err = errors.Join(outcome.Err, finishErr)
 		}
 	}
-	outcome.Trigger = actor.triggerWithSuffixes()
+	if actor.ensureUsed {
+		outcome.Trigger += surfaceRecoverySuffix
+	}
 	return outcome
-}
-
-// triggerWithSuffixes 给轮的 trigger 带上台面标记,账本行与 outcome 用同一份。
-func (a *roundActor) triggerWithSuffixes() string {
-	trigger := a.trigger
-	if a.surfacePrepared {
-		trigger += surfacePreparedSuffix
-	}
-	if a.ensureUsed {
-		trigger += surfaceRecoverySuffix
-	}
-	return trigger
 }
 
 func (a *roundActor) execute(ctx context.Context) error {
@@ -211,12 +193,8 @@ func (a *roundActor) execute(ctx context.Context) error {
 	filter := protocol.ListFilterAll
 	move := protocol.ListWindowMoveReset
 	a.checkedListFingerprints = make(map[string]string)
-	state, err := a.refreshHandState(ctx)
+	_, err = a.refreshHandState(ctx)
 	if err != nil {
-		return err
-	}
-	if err := a.prepareSurfaceIfAbsent(ctx, state); err != nil {
-		a.handleCommandFailure(err)
 		return err
 	}
 	if a.manager.config.MaxPages >= 2 {
@@ -1788,12 +1766,6 @@ func invokePrimitiveDirectWithLogicalID[T any](
 		return zero, "", errors.New("原语未返回持久逻辑派发引用")
 	}
 	logicalID := handle.LogicalDispatchID()
-	if name == protocol.PrimChatReadThread || name == protocol.PrimChatOpenConversation {
-		// 线程读与打开会话都意味着页面上从此有会话开着(不论它是导航打开的
-		// 还是 requireCurrent 要求本来就开着的),起手保证台面带来的"页面是空
-		// 的"事实到此失效。
-		actor.freshSurface = false
-	}
 	var rawData json.RawMessage
 	// 调度 Start 已在 actor 锁内完成；长时间只等持久逻辑命令，不阻塞
 	// QoS0 事件、用户暂停或账号绑定。无论正常返回还是测试 Goexit，defer
@@ -1818,63 +1790,6 @@ func invokePrimitiveDirectWithLogicalID[T any](
 	return zero, logicalID, nil
 }
 
-// prepareSurfaceIfAbsent 是列表巡检轮的起手台面步骤:手最近一次 ping 说本账号
-// 的沟通页不在(pageAbsent / contentScriptDead),就先派 nav.ensureSurface 再读
-// 列表,而不是让 readList 先撞一次 CTX_NOT_READY 再救场。
-//
-// 这类缺席是脑自己策划出来的、可预测的阶段切换:采集批次收口时标签页停在
-// 推荐页,开工闸读(微信配置、平台通知)停在个人中心。此前它们全靠读命令失败来
-// 感知,每次切换在账本里留一条红行,和"页面真的坏了"长得一模一样,报警通道被
-// 稀释。提示是传感读数不是账本:它说"在"而实际不在,readList 照旧失败并走既有
-// 救场;它说"不在"而实际在,ensureSurface 在两个平台上都是一次不导航的核对。
-// 因此本步骤不占 ensureUsed 的救场预算,也不改变任何失效方向。
-//
-// 提示缺席(手还没收过带上下文的命令、适配器不提供、账号不在列表里)一律视为
-// "不知道",什么都不做——不为一个读不出来的提示去动页面。
-func (a *roundActor) prepareSurfaceIfAbsent(ctx context.Context, state HandState) error {
-	if a.requireCurrentThread {
-		return nil
-	}
-	reason, absent := surfaceAbsentHint(state, a.account.Platform, a.account.AccountRef)
-	if !absent {
-		return nil
-	}
-	if err := a.setStage("preparingSurface"); err != nil {
-		return err
-	}
-	slog.Info("巡检轮起手:手报沟通页不在,先保证台面再读列表",
-		"platform", a.account.Platform, "accountRef", a.account.AccountRef,
-		"roundId", a.roundID, "reason", string(reason))
-	if err := a.driveEnsureSurface(ctx); err != nil {
-		return err
-	}
-	a.surfacePrepared = true
-	a.freshSurface = true
-	return nil
-}
-
-// surfaceAbsentHint 在手的 ping 上下文里找本账号那条;只有明确报 pageAbsent 或
-// contentScriptDead 才算"不在"。其余原因(掉登录、身份未验、页面坏了)不是
-// ensureSurface 能解决的,交给既有探针与失败路径。
-func surfaceAbsentHint(state HandState, platform, accountRef string) (protocol.NotReadyReason, bool) {
-	for _, context := range state.Contexts {
-		if context.Platform != platform || context.AccountRef != accountRef {
-			continue
-		}
-		if context.Ready {
-			return "", false
-		}
-		if context.Reason == protocol.NotReadyReasonPageAbsent ||
-			context.Reason == protocol.NotReadyReasonContentScriptDead {
-			return context.Reason, true
-		}
-		return "", false
-	}
-	return "", false
-}
-
-// ensureSurface 是轮中的一次性救场:某条读命令报 pageAbsent/contentScriptDead
-// 后把沟通页找回来,每轮只准一次。起手台面步骤不经这里。
 func (a *roundActor) ensureSurface(ctx context.Context, reason protocol.NotReadyReason) error {
 	if reason != protocol.NotReadyReasonPageAbsent && reason != protocol.NotReadyReasonContentScriptDead {
 		return wrapRunError(protocol.ErrCodeCtxNotReady, reason, ErrEnsureNotReady)
@@ -1886,13 +1801,6 @@ func (a *roundActor) ensureSurface(ctx context.Context, reason protocol.NotReady
 	if err := a.setStage("ensuringSurface"); err != nil {
 		return err
 	}
-	return a.driveEnsureSurface(ctx)
-}
-
-// driveEnsureSurface 派 nav.ensureSurface(im) 并把手的回答翻成轮级判定:掉登录
-// 即 loginRequired,没就绪即 pageBroken,登录态说不清即 unknown。起手步骤与轮中
-// 救场共用这一份判定,两者只在"记在哪个标记上"不同。
-func (a *roundActor) driveEnsureSurface(ctx context.Context) error {
 	data, err := invokePrimitiveDirect[protocol.NavEnsureSurfaceData](ctx, a, protocol.PrimNavEnsureSurface,
 		protocol.NavEnsureSurfaceArgs{Surface: protocol.SurfaceNameIm})
 	if err != nil {
@@ -1957,7 +1865,10 @@ func (a *roundActor) finish(runErr error) error {
 		status = "failed"
 		stage = "superseded"
 	}
-	trigger := a.triggerWithSuffixes()
+	trigger := a.trigger
+	if a.ensureUsed {
+		trigger += surfaceRecoverySuffix
+	}
 	if err := a.manager.store.MutatePatrolRound(a.account.Platform, a.account.AccountRef, a.roundID, func(round *store.PatrolRound) error {
 		round.Status = status
 		round.Stage = stage
