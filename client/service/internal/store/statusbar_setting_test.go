@@ -81,3 +81,35 @@ func TestStatusBarPositionRoundTripAndRejectsUnknown(t *testing.T) {
 		}
 	}
 }
+
+// 显示开关:没人拨过时 BOSS 开、其余(含快照缺席的空平台)关;拨过之后不再看平台。
+func TestStatusBarVisibleFollowsPlatformUntilSetManually(t *testing.T) {
+	var auto StatusBarSetting
+	if !auto.EffectiveVisible("boss") || auto.EffectiveVisible("zhilian") || auto.EffectiveVisible("") {
+		t.Fatalf("默认应 BOSS 开、其余关")
+	}
+	if auto.VisibleSource() != "platformDefault" {
+		t.Fatalf("没拨过应标 platformDefault,得到 %q", auto.VisibleSource())
+	}
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.SetStatusBarVisible(true); err != nil {
+		t.Fatalf("SetStatusBarVisible: %v", err)
+	}
+	setting, err := s.StatusBarSetting()
+	if err != nil {
+		t.Fatalf("StatusBarSetting: %v", err)
+	}
+	if !setting.EffectiveVisible("zhilian") || setting.VisibleSource() != "manual" {
+		t.Fatalf("明示开后智联也应显示: %+v", setting)
+	}
+	if err := s.SetStatusBarVisible(false); err != nil {
+		t.Fatalf("SetStatusBarVisible(false): %v", err)
+	}
+	setting, _ = s.StatusBarSetting()
+	if setting.EffectiveVisible("boss") {
+		t.Fatalf("明示关后 BOSS 也应隐藏: %+v", setting)
+	}
+}

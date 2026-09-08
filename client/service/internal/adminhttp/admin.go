@@ -33,6 +33,7 @@ type API struct {
 	adminToken      string
 	providerConfig  *m5ai.ProviderConfigStore
 	jobConfigSource *jobconfig.Source
+	platformSource  CustomerPlatformSource
 	// jobClassReporter 是第十项出站(职位类别审计上报)的 fire-and-forget 上报器;
 	// nil 即不上报(测试/未接线),两个调用点都以 nil 安全。
 	jobClassReporter *jobclassreport.Reporter
@@ -89,6 +90,23 @@ func (a *API) SetSubSmartProviderStore(store *m5ai.ProviderConfigStore, onApplie
 
 func (a *API) SetJobConfigSource(source *jobconfig.Source) *API {
 	a.jobConfigSource = source
+	// 状态栏默认显示与否看客户绑定平台,平台就在这份客户快照里;单独再注入一次
+	// 只为测试能塞假源,生产装配不必多一行。
+	if source != nil {
+		a.platformSource = source
+	}
+	return a
+}
+
+// CustomerPlatformSource 与 productapp.CustomerPlatformSource 同形:读本地客户快照
+// 的平台归属,空串表示快照缺席。
+type CustomerPlatformSource interface {
+	CustomerPlatform() string
+}
+
+// SetCustomerPlatformSource 注入客户平台读取器(测试用;生产由 SetJobConfigSource 顺带装上)。
+func (a *API) SetCustomerPlatformSource(source CustomerPlatformSource) *API {
+	a.platformSource = source
 	return a
 }
 

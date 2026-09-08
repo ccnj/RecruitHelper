@@ -346,6 +346,10 @@ export interface ChatReportRunResult {
 // 屏幕顶层状态栏的开关(2026-09-08 甲方裁决)。默认关闭=客户版;开=开发版,
 // 把最近命令(带候选人姓名)常驻在屏幕最上层。持久化在脑,重启不丢。
 export interface StatusBarSettings {
+  // 实际显示与否(脑按绑定平台算好):没人拨过时 BOSS 开、智联关;拨过以拨的为准。
+  visible: boolean
+  visibleSource: 'platformDefault' | 'manual'
+  platform: string
   detailEnabled: boolean
   position: StatusBarPosition
   error?: string
@@ -966,6 +970,8 @@ export const api = {
   setDevReportAutoUpload: (autoUploadEnabled: boolean) =>
     post<FieldReportSettings>('/admin/dev/report/settings', { autoUploadEnabled }),
   statusBarSettings: () => get<StatusBarSettings>('/admin/statusbar/settings'),
+  setStatusBarVisible: (visible: boolean) =>
+    post<StatusBarSettings>('/admin/statusbar/settings', { visible }),
   setStatusBarDetail: (detailEnabled: boolean) =>
     post<StatusBarSettings>('/admin/statusbar/settings', { detailEnabled }),
   setStatusBarPosition: (position: StatusBarPosition) =>
