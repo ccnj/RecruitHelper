@@ -15288,6 +15288,12 @@ interface MainCaptureStepReady {
   rectBottom: number
   rectLeft: number
   rectRight: number
+  // 露出带(CSS px,视口坐标):容器在屏幕上真正可见的行区间,页面侧用 elementFromPoint
+  // 探得,已扣掉视口外、祖先 overflow 裁掉与悬浮元素盖住的部分。它才是"一屏能截多少"
+  // 的事实;probe=fallback/unavailable 表示探测退回了矩形∩视口(等于旧口径)。
+  visibleTop: number
+  visibleBottom: number
+  visibleProbe: 'ok' | 'fallback' | 'unavailable'
 }
 interface MainCaptureStepFailed {
   status: 'failed'
@@ -15355,7 +15361,39 @@ async function mainChatCaptureStep(
   } else if (op === 'scrollTo') {
     scrollEl.scrollTop = Math.max(0, requestedTop)
   }
+  // 露出带探测:自容器裁剪矩形的底边向上、顶边向下,用 elementFromPoint 找命中点仍落在
+  // 容器内的最外一行。视口外(返回 null)、祖先 overflow 裁掉、悬浮元素盖住的行都被排除——
+  // 这三种情况下 clientHeight 都大于屏幕上真正露出的高度,按 clientHeight 滚就每屏丢一截。
+  // 探测量超过带高 40% 仍找不到即退回矩形∩视口(probe=fallback):宁可留缝也不让截图失败。
+  const visibleBandOf = (el: HTMLElement): { top: number; bottom: number; probe: 'ok' | 'fallback' | 'unavailable' } => {
+    const rect = el.getBoundingClientRect()
+    const clipTop = Math.max(0, rect.top)
+    const clipBottom = Math.min(window.innerHeight, rect.bottom)
+    const clipLeft = Math.max(0, rect.left)
+    const clipRight = Math.min(window.innerWidth, rect.right)
+    if (clipBottom - clipTop < 1 || clipRight - clipLeft < 1 || typeof document.elementFromPoint !== 'function') {
+      return { top: clipTop, bottom: clipBottom, probe: 'unavailable' }
+    }
+    const x = Math.min(window.innerWidth - 1, Math.floor((clipLeft + clipRight) / 2))
+    const inside = (y: number): boolean => {
+      const hit = document.elementFromPoint(x, y)
+      return hit !== null && (hit === el || el.contains(hit))
+    }
+    const limit = Math.max(1, Math.floor((clipBottom - clipTop) * 0.4))
+    let bottom = Math.ceil(clipBottom) - 1
+    for (let n = 0; !inside(bottom); n += 1) {
+      bottom -= 1
+      if (n >= limit || bottom <= clipTop) return { top: clipTop, bottom: clipBottom, probe: 'fallback' }
+    }
+    let top = Math.floor(clipTop)
+    for (let n = 0; !inside(top); n += 1) {
+      top += 1
+      if (n >= limit || top >= bottom) return { top: clipTop, bottom: clipBottom, probe: 'fallback' }
+    }
+    return { top, bottom: bottom + 1, probe: 'ok' }
+  }
   const rect = scrollEl.getBoundingClientRect()
+  const band = visibleBandOf(scrollEl)
   return {
     status: 'ready',
     visible: document.visibilityState === 'visible',
@@ -15369,6 +15407,9 @@ async function mainChatCaptureStep(
     rectBottom: rect.bottom,
     rectLeft: rect.left,
     rectRight: rect.right,
+    visibleTop: band.top,
+    visibleBottom: band.bottom,
+    visibleProbe: band.probe,
   }
 }
 
@@ -15410,6 +15451,34 @@ interface StitchOutcome {
   truncated: boolean
 }
 
+interface StitchOptions {
+  anchor: 'top' | 'bottom'
+  maxFrames: number
+  progressLabel: string
+  // 手侧日志 code 后缀:聊天与简历截图常背靠背发生,同 code 60 秒节流会吞掉第二条。
+  kind: 'chat' | 'resume'
+}
+
+// 露出带(SW 侧视图):height 是"一屏真正能截多少",offset 是露出带顶边相对容器盒顶边的
+// 位移(容器顶部被遮时 >0)。两者在整次拼接内必须恒定,否则同一 scrollTop 对应的屏幕
+// 行区间已平移,坐标系失效。
+interface VisibleBand {
+  top: number
+  bottom: number
+  height: number
+  offset: number
+  probe: MainCaptureStepReady['visibleProbe']
+}
+function visibleBandOfMetrics(m: MainCaptureStepReady): VisibleBand {
+  const top = m.visibleTop
+  const bottom = Math.max(top, m.visibleBottom)
+  return { top, bottom, height: bottom - top, offset: top - m.rectTop, probe: m.visibleProbe }
+}
+// 滚动步长=露出带高(整数),封顶 clientHeight:滚多少与截多少必须是同一个数。
+function captureStepOf(m: MainCaptureStepReady): number {
+  return Math.max(1, Math.min(m.clientH, Math.floor(visibleBandOfMetrics(m).height)))
+}
+
 // 懒加载排干+锚定等稳(移植旧 settleScrollContainer):
 // 聊天滚到顶会触发平台 prepend 更早历史并顶开 scrollTop,开拍前必须先排干等稳,
 // 否则坐标系中途平移必出坏图。连续 2 轮(各 ≥1s 观测窗)高度零增长视为到头;
@@ -15421,7 +15490,7 @@ async function settleForCapture(
   options: { anchor: 'top' | 'bottom'; maxFrames: number },
 ): Promise<MainCaptureStepReady> {
   let metrics = await step('measure')
-  const budgetPx = (options.maxFrames + 1) * metrics.clientH
+  const budgetPx = (options.maxFrames + 1) * captureStepOf(metrics)
   let quietRounds = 0
   for (let round = 0; round < 20 && quietRounds < 2; round += 1) {
     if (metrics.scrollHeight >= budgetPx) break
@@ -15475,16 +15544,32 @@ async function stitchOnce(
   pacer: MutationPacer,
   ctx: PrimitiveContext,
   settled: MainCaptureStepReady,
-  options: { anchor: 'top' | 'bottom'; maxFrames: number; progressLabel: string },
+  options: StitchOptions,
 ): Promise<StitchOutcome> {
   const dpr = settled.dpr
   const clientH = settled.clientH
   const totalScroll = Math.max(settled.scrollHeight, clientH)
+  // 步长=露出带高,不再是 clientHeight(2026-09-08)。此前按 clientHeight 滚、按露出矩形裁,
+  // 容器底边被视口/祖先/悬浮元素遮住的那截每帧都丢,长图每屏留一道白缝(客户机实测每帧
+  // 固定 13 物理像素,缝落在文字上就露馅,落在气泡空隙里看不出来)。
+  const band = visibleBandOfMetrics(settled)
+  if (band.height < 1) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '截图容器在屏幕上没有露出', 'afterRecovery')
+  }
+  const stepCss = captureStepOf(settled)
+  if (band.probe !== 'ok' || stepCss < clientH - 2) {
+    reportHandLog(
+      'warn', `captureVisibleBandShort.${options.kind}`,
+      `截图容器露出带短于 clientHeight,按露出带步进(probe=${band.probe})`,
+      `clientH=${clientH} band=${band.height} offset=${band.offset.toFixed(1)} step=${stepCss} ` +
+      `innerH=${settled.innerH} rectTop=${settled.rectTop.toFixed(1)} rectBottom=${settled.rectBottom.toFixed(1)} dpr=${dpr}`,
+    )
+  }
 
-  const framesForContent = Math.max(1, Math.ceil(totalScroll / clientH))
-  const framesByCanvas = Math.max(1, Math.floor(CAPTURE_MAX_SIDE / Math.max(1, Math.round(clientH * dpr))))
+  const framesForContent = Math.max(1, Math.ceil(totalScroll / stepCss))
+  const framesByCanvas = Math.max(1, Math.floor(CAPTURE_MAX_SIDE / Math.max(1, Math.round(stepCss * dpr))))
   const budget = Math.min(options.maxFrames, framesForContent, framesByCanvas)
-  const coveredCssH = Math.min(totalScroll, budget * clientH)
+  const coveredCssH = Math.min(totalScroll, budget * stepCss)
   const startTop = options.anchor === 'bottom' ? Math.max(0, totalScroll - coveredCssH) : 0
 
   const cropCssLeft = Math.max(0, settled.rectLeft)
@@ -15507,7 +15592,7 @@ async function stitchOnce(
   for (let i = 0; i < budget; i += 1) {
     ctx.checkpoint()
     const maxScrollable = Math.max(0, totalScroll - clientH)
-    const requestedTop = Math.max(0, Math.min(Math.round(startTop + i * clientH), maxScrollable))
+    const requestedTop = Math.max(0, Math.min(Math.round(startTop + i * stepCss), maxScrollable))
     await pacer.beforeMutation()
     await step('scrollTo', requestedTop)
     await swSleep(150)
@@ -15544,9 +15629,15 @@ async function stitchOnce(
       throw new CaptureDirty('frame-moved')
     }
 
-    const vTop = Math.max(0, after.rectTop)
-    const vBottom = Math.min(after.innerH, after.rectBottom)
-    const vCssH = Math.max(0, vBottom - vTop)
+    // 露出带逐帧复核:遮盖物变化(浮层出现/消失、布局抖动)会让同一 scrollTop 对应的
+    // 屏幕行区间平移,坐标系即失效,整体重拍。
+    const frameBand = visibleBandOfMetrics(after)
+    if (Math.abs(frameBand.offset - band.offset) > 4 || Math.abs(frameBand.height - band.height) > 4) {
+      frame.close()
+      throw new CaptureDirty('visible-band-changed')
+    }
+    const vTop = frameBand.top
+    const vCssH = frameBand.height
     if (vCssH < 1) {
       frame.close()
       break
@@ -15628,7 +15719,7 @@ async function stitchCapture(
   tab: chrome.tabs.Tab,
   step: CaptureStepRunner,
   ctx: PrimitiveContext,
-  options: { anchor: 'top' | 'bottom'; maxFrames: number; progressLabel: string },
+  options: StitchOptions,
 ): Promise<StitchOutcome> {
   return await stitchCaptureWithPacer(tab, step, new MutationPacer(), ctx, options)
 }
@@ -15639,7 +15730,7 @@ async function stitchCaptureWithPacer(
   step: CaptureStepRunner,
   pacer: MutationPacer,
   ctx: PrimitiveContext,
-  options: { anchor: 'top' | 'bottom'; maxFrames: number; progressLabel: string },
+  options: StitchOptions,
 ): Promise<StitchOutcome> {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const settled = await settleForCapture(step, pacer, ctx, options)
@@ -15867,8 +15958,40 @@ async function mainResumeCaptureStep(
     })
     return best || el
   }
+  // 露出带探测:自容器裁剪矩形的底边向上、顶边向下,用 elementFromPoint 找命中点仍落在
+  // 容器内的最外一行。视口外(返回 null)、祖先 overflow 裁掉、悬浮元素盖住的行都被排除——
+  // 这三种情况下 clientHeight 都大于屏幕上真正露出的高度,按 clientHeight 滚就每屏丢一截。
+  // 探测量超过带高 40% 仍找不到即退回矩形∩视口(probe=fallback):宁可留缝也不让截图失败。
+  const visibleBandOf = (el: HTMLElement): { top: number; bottom: number; probe: 'ok' | 'fallback' | 'unavailable' } => {
+    const rect = el.getBoundingClientRect()
+    const clipTop = Math.max(0, rect.top)
+    const clipBottom = Math.min(window.innerHeight, rect.bottom)
+    const clipLeft = Math.max(0, rect.left)
+    const clipRight = Math.min(window.innerWidth, rect.right)
+    if (clipBottom - clipTop < 1 || clipRight - clipLeft < 1 || typeof document.elementFromPoint !== 'function') {
+      return { top: clipTop, bottom: clipBottom, probe: 'unavailable' }
+    }
+    const x = Math.min(window.innerWidth - 1, Math.floor((clipLeft + clipRight) / 2))
+    const inside = (y: number): boolean => {
+      const hit = document.elementFromPoint(x, y)
+      return hit !== null && (hit === el || el.contains(hit))
+    }
+    const limit = Math.max(1, Math.floor((clipBottom - clipTop) * 0.4))
+    let bottom = Math.ceil(clipBottom) - 1
+    for (let n = 0; !inside(bottom); n += 1) {
+      bottom -= 1
+      if (n >= limit || bottom <= clipTop) return { top: clipTop, bottom: clipBottom, probe: 'fallback' }
+    }
+    let top = Math.floor(clipTop)
+    for (let n = 0; !inside(top); n += 1) {
+      top += 1
+      if (n >= limit || top >= bottom) return { top: clipTop, bottom: clipBottom, probe: 'fallback' }
+    }
+    return { top, bottom: bottom + 1, probe: 'ok' }
+  }
   const metricsOf = (scrollEl: HTMLElement): MainCaptureStepReady => {
     const rect = scrollEl.getBoundingClientRect()
+    const band = visibleBandOf(scrollEl)
     return {
       status: 'ready',
       visible: document.visibilityState === 'visible',
@@ -15882,6 +16005,9 @@ async function mainResumeCaptureStep(
       rectBottom: rect.bottom,
       rectLeft: rect.left,
       rectRight: rect.right,
+      visibleTop: band.top,
+      visibleBottom: band.bottom,
+      visibleProbe: band.probe,
     }
   }
 
@@ -16059,6 +16185,7 @@ export async function captureZhilianResumeScreenshot(
       anchor: 'top',
       maxFrames: 16,
       progressLabel: '简历截图',
+      kind: 'resume',
     })
   } catch (error) {
     await closeResumeModalBestEffort(step, pacer, openedAt)
@@ -16136,6 +16263,7 @@ export async function captureZhilianThreadScreenshot(
     anchor: 'bottom',
     maxFrames: 16,
     progressLabel: '聊天截图',
+    kind: 'chat',
   })
   const data = await uploadCaptureJpeg(outcome)
   if (validatePrimitiveData(PrimitiveName.ChatCaptureThreadScreenshot, 1, data).length !== 0) {
