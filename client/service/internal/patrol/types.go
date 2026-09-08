@@ -436,11 +436,11 @@ type ConversationProjection struct {
 }
 
 type RoundOutcome struct {
-	Key         store.AccountKey
-	RoundID     string
-	Trigger     string
-	Status      string
-	EnsureUsed  bool
+	Key        store.AccountKey
+	RoundID    string
+	Trigger    string
+	Status     string
+	EnsureUsed bool
 	// SurfacePrepared 表示本轮起手按页面就绪提示先派了 nav.ensureSurface;
 	// 它不占用 EnsureUsed 的一次救场预算。
 	SurfacePrepared bool

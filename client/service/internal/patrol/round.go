@@ -17,13 +17,13 @@ import (
 )
 
 type roundActor struct {
-	manager                 *Manager
-	account                 *store.Account
-	hand                    HandState
-	roundID                 string
-	trigger                 string
-	now                     time.Time
-	ensureUsed              bool
+	manager    *Manager
+	account    *store.Account
+	hand       HandState
+	roundID    string
+	trigger    string
+	now        time.Time
+	ensureUsed bool
 	// surfacePrepared:本轮起手按手的页面就绪提示先派了 nav.ensureSurface。
 	// 它与 ensureUsed 分开:救场预算仍留给"轮中页面真的没了"。
 	surfacePrepared bool
