@@ -157,13 +157,18 @@ func TestResultDataRejectsTerminalWithoutResult(t *testing.T) {
 }
 
 type handAvailabilityTestHub struct {
-	session string
-	bootID  string
-	online  bool
+	session  string
+	bootID   string
+	online   bool
+	contexts []protocol.PingContext
 }
 
 func (h *handAvailabilityTestHub) HandSession(string) (string, string, bool) {
 	return h.session, h.bootID, h.online
+}
+
+func (h *handAvailabilityTestHub) HandContexts(string) []protocol.PingContext {
+	return h.contexts
 }
 
 func TestHandAvailabilityProjectsGenerationOnly(t *testing.T) {
@@ -171,12 +176,20 @@ func TestHandAvailabilityProjectsGenerationOnly(t *testing.T) {
 		session: "session-availability",
 		bootID:  "boot-availability",
 		online:  true,
+		contexts: []protocol.PingContext{{
+			Platform: "zhilian", AccountRef: "account-availability",
+			Ready: false, Reason: protocol.NotReadyReasonPageAbsent,
+		}},
 	}
 	availability := HandAvailability{Hub: hub}
 	got, err := availability.State(context.Background(), "hand-availability")
 	if err != nil || !got.Online ||
 		got.Session != "session-availability" || got.BootID != "boot-availability" {
 		t.Fatalf("手代际投影错误: state=%+v err=%v", got, err)
+	}
+	if len(got.Contexts) != 1 || got.Contexts[0].AccountRef != "account-availability" ||
+		got.Contexts[0].Ready || got.Contexts[0].Reason != protocol.NotReadyReasonPageAbsent {
+		t.Fatalf("页面就绪提示未透传: %+v", got.Contexts)
 	}
 
 	hub.online = false
