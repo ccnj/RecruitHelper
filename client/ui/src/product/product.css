@@ -79,9 +79,12 @@
   border: 0;
 }
 
+/* 侧栏固定 200px 且永远展开(2026-09-08 甲方裁决):此前窄于 900px 缩成 76px
+   图标条、窄于 680px 变顶栏,两档都已删;窗口最小宽度 600 由 Electron 主进程
+   保证(client/electron/windowSize.js),主内容区在这个下限上不会被挤坏。 */
 .rh-sidebar {
-  width: 224px;
-  flex: 0 0 224px;
+  width: 200px;
+  flex: 0 0 200px;
   display: flex;
   flex-direction: column;
   background: var(--rh-sidebar);
@@ -142,6 +145,51 @@
   font-size: 11px;
 }
 
+/* 同步职位(2026-09-08 甲方裁决):首页职位卡撤下后,同步动作收成客户块右侧的
+   刷新图标;状态与最近同步时间进 title。加 .rh-product-app 前缀是为压过全局
+   button 样式,与 .rh-nav-item 同款。 */
+.rh-product-app .rh-sidebar-sync {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--rh-border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--rh-muted);
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease, background-color 140ms ease;
+}
+
+.rh-product-app .rh-sidebar-sync:hover:not(:disabled) {
+  border-color: var(--rh-primary);
+  background: var(--rh-primary-soft);
+  color: var(--rh-primary);
+}
+
+.rh-product-app .rh-sidebar-sync:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.rh-sidebar-sync.is-syncing svg {
+  animation: rh-sidebar-sync-spin 900ms linear infinite;
+}
+
+@keyframes rh-sidebar-sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rh-sidebar-sync.is-syncing svg {
+    animation: none;
+  }
+}
+
 .rh-sidebar-nav {
   display: flex;
   flex: 1;
@@ -199,9 +247,7 @@
 }
 
 /* 只读阶段页的存量计数。刻意不给底色、不加粗:它跟上面的红色徽章必须一眼分得开,
-   否则红色就不再意味着"该你动手了"。tabular-nums 让几行数字右边缘对齐。
-   窄屏(900px)下它会被 .rh-nav-item > span:not(.rh-nav-badge) 那条规则一并隐藏,
-   这是要的效果——图标角上糊一串小灰字既读不出也挡图标。 */
+   否则红色就不再意味着"该你动手了"。tabular-nums 让几行数字右边缘对齐。 */
 .rh-nav-count {
   color: var(--rh-muted);
   font-size: 12px;
@@ -975,51 +1021,6 @@
   margin-top: 1px;
   color: var(--rh-muted);
   font-size: 10px;
-}
-
-.rh-job-strip {
-  min-height: 62px;
-  display: grid;
-  grid-template-columns: auto minmax(180px, auto) auto 1fr auto;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-  padding: 11px 14px;
-  border: 1px solid #dce5f5;
-  border-radius: var(--rh-radius);
-  background: #fff;
-  box-shadow: var(--rh-shadow);
-}
-
-.rh-job-mark {
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  background: var(--rh-primary-soft);
-  color: var(--rh-primary);
-}
-
-.rh-job-copy {
-  display: flex;
-  flex-direction: column;
-}
-
-.rh-job-copy span,
-.rh-job-meta {
-  color: var(--rh-muted);
-  font-size: 10px;
-}
-
-.rh-job-copy strong {
-  font-size: 13px;
-}
-
-.rh-job-meta {
-  display: flex;
-  justify-content: flex-end;
-  gap: 18px;
 }
 
 .rh-home-lower-grid {
@@ -2663,41 +2664,7 @@
 }
 
 @media (max-width: 900px) {
-  .rh-sidebar {
-    width: 76px;
-    flex-basis: 76px;
-  }
-
-  .rh-sidebar-customer {
-    justify-content: center;
-    padding: 14px 10px;
-  }
-
-  .rh-sidebar-customer-copy,
-  .rh-nav-item > span:not(.rh-nav-badge),
-  .rh-sidebar-search input,
-  .rh-diagnostics-link {
-    display: none !important;
-  }
-
-  .rh-sidebar-search {
-    justify-content: center;
-    padding: 0;
-    border: 0;
-    background: transparent;
-  }
-
-  .rh-product-app .rh-nav-item {
-    grid-template-columns: 1fr;
-    justify-items: center;
-    padding: 0;
-  }
-
-  .rh-nav-badge {
-    position: absolute;
-    margin: -23px 0 0 25px;
-  }
-
+  /* 侧栏在这一档不再折叠(2026-09-08 甲方裁决),只调主内容区。 */
   .rh-metric-grid {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -2791,52 +2758,9 @@
     margin-top: 34px;
   }
 
-  .rh-product-app {
-    display: block;
-    overflow: auto;
-  }
-
-  .rh-sidebar {
-    position: sticky;
-    top: 0;
-    width: 100%;
-    height: auto;
-    display: grid;
-    grid-template-columns: 58px 1fr;
-    border-right: 0;
-    border-bottom: 1px solid var(--rh-border);
-  }
-
-  .rh-sidebar-customer {
-    min-height: 58px;
-    border-bottom: 0;
-  }
-
-  .rh-sidebar-avatar {
-    width: 34px;
-    height: 34px;
-    flex-basis: 34px;
-  }
-
-  .rh-sidebar-nav {
-    min-width: 0;
-    display: flex;
-    flex-direction: row;
-    overflow-x: auto;
-    padding: 8px;
-  }
-
-  .rh-product-app .rh-nav-item {
-    width: 42px;
-    min-width: 42px;
-  }
-
-  .rh-sidebar-bottom {
-    display: none;
-  }
-
+  /* 侧栏在这一档不再变顶栏(2026-09-08 甲方裁决):壳仍是左栏 + 右侧滚动主区,
+     只把主内容区内边距收窄。 */
   .rh-product-main {
-    overflow: visible;
     padding: 18px 14px 32px;
   }
 
@@ -2862,15 +2786,6 @@
 
   .rh-business-window {
     width: 100%;
-  }
-
-  .rh-job-strip {
-    /* 窄屏隐藏 rh-job-meta，它不再占列；剩下 mark、copy、状态、同步按钮四列。 */
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-  }
-
-  .rh-job-meta {
-    display: none;
   }
 
   .rh-metric-grid,
