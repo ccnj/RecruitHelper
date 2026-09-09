@@ -16105,7 +16105,7 @@ test('全文档观察器只给能读登录态的站点装:BOSS 上一个都不�
   }
 })
 
-test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条加场景二三条加场景三一条加第二刀七条,其余显式拒绝', () => {
+test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条加场景二三条加场景三一条加第二刀七条加简历长图一条,其余显式拒绝', () => {
   assert.equal(bossAdapter.id, 'boss')
   assert.equal(bossAdapter.hostMatch, bossSite.match, '适配器与站点表必须是同一个"BOSS 是谁"')
   // MAIN 是 2026-08-28 取数通道裁决的直接后果:isolated world 拿不到 user$ 与消息数组。
@@ -16125,19 +16125,19 @@ test('BOSS 适配器:MAIN world + os 通道,三条探针加场景一七条加场
   // 加了七条:职位管理页一条、采集四条、招呼两条(readPublishedJobs / selectSourcingPosition / applySourcingFilters /
   // readSourcingWindow / readSourcingTargetResume / sendGreeting / readGreetingOutcome)。
   assert.deepEqual(declared, [
-    'acceptWechat', 'applySourcingFilters', 'captureThreadScreenshot', 'ensureSurface', 'identifyCurrentConversation', 'openConversation',
+    'acceptWechat', 'applySourcingFilters', 'captureResumeScreenshot', 'captureThreadScreenshot', 'ensureSurface', 'identifyCurrentConversation', 'openConversation',
     'osClick', 'osProbe', 'osScroll', 'osType', 'probePlatform',
     'readGreetingOutcome', 'readList', 'readPublishedJobs', 'readResume', 'readSourcingTargetResume', 'readSourcingWindow',
     'readThread', 'readUnreadTotal', 'readWechatExchangeOutcome',
     'selectSourcingPosition', 'sendGreeting', 'sendInviteCard', 'sendMessage', 'sendWechatInvite',
-  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口;邀面卡:2026-09-04 场景三出口;第二刀七条:2026-09-04 夜出口;ensureSurface:2026-09-07 首趟真机后甲方批)')
+  ], '适配器能力变了。这张名单每加一条都要先过出口(readResume:2026-09-03 甲方选 B;osScroll/osClick:2026-09-03 探针出口;换微信三条:2026-09-04 场景二出口;邀面卡:2026-09-04 场景三出口;第二刀七条:2026-09-04 夜出口;ensureSurface:2026-09-07 首趟真机后甲方批;captureResumeScreenshot:2026-09-09 甲方「顺便把简历截图也做了」)')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'readSourcingResume'), /未实现原语能力/, '一次读一位的旧采集原语,BOSS 走窗口 + 目标两条,不实现它')
   assert.throws(() => requireCapability(bossAdapter, 'readWechatSetting'), /未实现原语能力/, '开工闸按无能力跳过(脑侧 capabilityMissing)')
 })
 
-test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表恰为平台无关四条加探针五条加场景一七条加场景二三条加场景三一条加第二刀七条', async () => {
+test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表恰为平台无关四条加探针五条加场景一七条加场景二三条加场景三一条加第二刀七条加简历长图一条', async () => {
   // 原语的 capability 字段是与 handler 内 callPlatform 字面量并行的第二份声明;
   // 这两条断言把它钉住:漏填一条,BOSS 表会多出一条(第二条红);填错名字,
   // 智联表会少一条(第一条红)。
@@ -16162,7 +16162,7 @@ test('hello 平台能力表:智联表等于并集减 BOSS 专属三条,BOSS 表�
     assert.deepEqual(tables[0].caps, union.filter((c) => !bossOnly.includes(c)),
       '智联表应等于并集减 BOSS 专属三条')
     assert.deepEqual(tables[1].caps, [
-      'candidate.applySourcingFilters@1', 'candidate.readResume@1', 'candidate.readSourcingTargetResume@1',
+      'candidate.applySourcingFilters@1', 'candidate.captureResumeScreenshot@1', 'candidate.readResume@1', 'candidate.readSourcingTargetResume@1',
       'candidate.readSourcingWindow@1', 'candidate.selectSourcingPosition@1',
       'chat.acceptWechat@1', 'chat.captureThreadScreenshot@1', 'chat.identifyCurrentConversation@1', 'chat.openConversation@1',
       'chat.readGreetingOutcome@1', 'chat.readList@1', 'chat.readThread@1', 'chat.readUnreadTotal@1', 'chat.readWechatExchangeOutcome@1',
@@ -16748,6 +16748,29 @@ test('BOSS 截图逐帧上滚的要求量:按带高能装的整格数规划,实�
   assert.equal(bossCaptureScrollRequest(100, 2000), 100, '带矮于一格:只能按带高要,越过与否由回读裁')
   assert.equal(bossCaptureScrollRequest(1, 1), 1)
   assert.equal(bossCaptureScrollRequest(450, 0), 1, '下限 1,不给 0 让滚轮空转')
+})
+
+test('BOSS 拼接到头判定:底部锚定带顶碰起点或滚到 0,顶部锚定带底碰覆盖终点或滚到底;剩余量随之', () => {
+  const { bossCaptureCovered, bossCaptureRemaining } = bossTestHooks
+  // 聊天(底部锚定):内容 1946,露出带 280 从容器顶 0 起,预算覆盖全部 → 起点 0
+  const chat = (scrollTop) => ({ scrollTop, clientH: 280, bandOffset: 0, bandHeight: 280, totalScroll: 1946, startTop: 0, coveredCssH: 1946 })
+  assert.equal(bossCaptureCovered('bottom', chat(1666)), false)
+  assert.equal(bossCaptureRemaining('bottom', chat(1666)), 1666)
+  assert.equal(bossCaptureCovered('bottom', chat(0)), true, '滚到 0 即到头')
+  const partial = (scrollTop) => ({ scrollTop, clientH: 280, bandOffset: 0, bandHeight: 280, totalScroll: 1946, startTop: 1000, coveredCssH: 946 })
+  assert.equal(bossCaptureCovered('bottom', partial(1001)), true, '带顶碰到起点(±1)即到头')
+  assert.equal(bossCaptureRemaining('bottom', partial(1300)), 300)
+  // 简历(顶部锚定):内容 2906,可见 662 全露,预算覆盖全部
+  const resume = (scrollTop) => ({ scrollTop, clientH: 662, bandOffset: 0, bandHeight: 662, totalScroll: 2906, startTop: 0, coveredCssH: 2906 })
+  assert.equal(bossCaptureCovered('top', resume(0)), false)
+  assert.equal(bossCaptureRemaining('top', resume(0)), 2244)
+  assert.equal(bossCaptureCovered('top', resume(2244)), true, '滚到底即到头')
+  const capped = (scrollTop) => ({ scrollTop, clientH: 662, bandOffset: 0, bandHeight: 662, totalScroll: 2906, startTop: 0, coveredCssH: 1324 })
+  assert.equal(bossCaptureCovered('top', capped(600)), false)
+  assert.equal(bossCaptureRemaining('top', capped(600)), 62)
+  assert.equal(bossCaptureCovered('top', capped(662)), true, '带底碰到覆盖终点即到头')
+  // 露出带被顶部遮掉 50px:带顶 = scrollTop + 50
+  assert.equal(bossCaptureRemaining('bottom', { scrollTop: 100, clientH: 280, bandOffset: 50, bandHeight: 230, totalScroll: 1946, startTop: 0, coveredCssH: 1946 }), 150)
 })
 
 test('BOSS 列表行摘要:引用与候选人引用取自内存 id,职位名空则省略,秒级 lastTS 转毫秒', () => {
