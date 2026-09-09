@@ -688,38 +688,23 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 		messages[len(messages)-1].Seq < turn.InboundThroughSeq {
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
 	}
-	// 轮区间之后允许平台中性 system 行滞留（0727当日计划3）；出现新的
-	// 候选人消息或我方出站仍视为边界失效。唯一豁免:交换结果卡(259/出站)
-	// 是本轮接受动作的平台产物,不是我方新发言——形态 A 当轮定向重对账会
-	// 在承接 advice 前把它收进账本,不豁免则"接受链完成→承接"永不可达
-	// (与 reconstructCommunicationV4TurnBoundaryTx 的 lateOutbound 豁免同规则)。
-	for index := range messages {
-		message := messages[index]
-		if message.Seq <= turn.InboundThroughSeq {
-			continue
-		}
-		if message.Direction == "system" ||
-			(message.Direction == "in" && message.Kind == "system") {
-			continue
-		}
-		if message.Direction == "out" && message.Kind == "card" &&
-			message.CardType == "wechatExchange" && message.CardState == "accepted" {
-			continue
-		}
+	// 轮区间之后的账本行算不算"边界已变",只有一个事实来源:巡检层的
+	// communicationV4TurnBoundaryMoved(2026-08-27 停机点第二步口径——候选人
+	// 新输入、真人手发出站才是边界移动;本轮链内自产的 self 出站行与平台
+	// system 行不是)。2026-09-09 起材料装配不再自己另判一遍:此前这里保留着
+	// 0727 的老规则(任何我方出站都算失效、只特判交换结果卡),与巡检层判据
+	// 互相矛盾,"先发固定回执、回执正证后再让 AI 回一句"的轮在装配材料时被
+	// 自己刚发的回执行判成失效,每轮跳过、永不回复(2026-09-08 BOSS 真机)。
+	if communicationV4TurnBoundaryMoved(messages, turn.InboundThroughSeq) {
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
 	}
 	material := m5TurnMaterial{profile: *profile, revision: *revision, snapshot: *snapshot}
 	var currentBoundary []store.Message
 	for _, message := range messages {
-		if message.Seq > turn.InboundThroughSeq {
-			// 轮后唯一被容忍的非 system 行是接受动作产生的交换结果卡(见上
-			// 方边界豁免);它是承接的前情事实,必须进入对话历史渲染,否则
-			// 模型不知道微信已交换、会再建议换微信动作而撞前置裁决转人工。
-			if !(message.Direction == "out" && message.Kind == "card" &&
-				message.CardType == "wechatExchange" && message.CardState == "accepted") {
-				continue
-			}
-		}
+		// 轮区间之后被判据容忍的行(本轮已发的气泡/卡、回执、交换结果卡)
+		// 是本轮的前情事实,照实渲染进对话历史(throughTurn),模型才知道
+		// 回执已发、微信已交换,不会再建议同一动作;它们不属于本轮输入
+		// (current)也不属于冻结时的历史(history)。
 		if message.Seq >= turn.InboundFromSeq && message.Seq <= turn.InboundThroughSeq {
 			currentBoundary = append(currentBoundary, message)
 		}
