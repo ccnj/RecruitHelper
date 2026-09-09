@@ -862,6 +862,9 @@
         "type": "object",
         "fields": {
           "phone": { "type": "string", "optional": true, "minLength": 1, "maxLength": 32, "maxBytes": 64 },
+          "phoneKind": { "type": "string", "optional": true, "enumRef": "enums.peerPhoneKind" },
+          "virtualCaller": { "type": "string", "optional": true, "minLength": 1, "maxLength": 32, "maxBytes": 64 },
+          "virtualExpiresAt": { "type": "int64", "optional": true, "minimum": 0 },
           "panelName": { "type": "string", "optional": true, "minLength": 1, "maxLength": 128, "maxBytes": 512 },
           "masked": { "type": "boolean", "optional": true },
           "observedAt": { "type": "int64", "minimum": 0 }
@@ -1376,6 +1379,7 @@
     "acceptWechatEvidenceType": ["candidateWechatRequestAcceptedObserved"],
     "sendInviteCardEvidenceType": ["outboundInterviewInviteObserved"],
     "interviewMethod": ["wechatVideo", "onsite"],
+    "peerPhoneKind": ["real", "virtual"],
     "candidateContactState": ["unestablished", "established", "unknown"],
     "osProbeTarget": ["viewportSpread", "reversibleToggle"],
     "osProbeOutcome": ["landed", "clicked", "refusedByGate", "handServiceUnavailable"],

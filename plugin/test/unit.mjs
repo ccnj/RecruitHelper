@@ -14046,11 +14046,15 @@ test('平台阻塞弹窗:按钮缺失或禁用时诚实失败，不退而求其�
   }
 })
 
-// chat.readPeerPhone MAIN:四形态真机踩点回归(2026-08-06 三形态 + 08-07 遮挡)。
-// 真实号=复制按钮带 data-clipboard-text;无号=电话容器整段空缺;虚拟号=有显示
-// 文本但无复制按钮;遮挡=「查看电话」按钮在场(masked=true,完整号不在 DOM)。
-// 除真实号外都必须落 phone=null,显示文本永远不作数据源。
-function installPeerPhonePanelFixture(variant) {
+// chat.readPeerPhone MAIN:五形态回归(2026-08-06 三形态 + 08-07 遮挡 + 09-09 虚拟号读取)。
+// 真实号=复制按钮带 data-clipboard-text;无号=电话容器整段空缺;遮挡=「查看电话」按钮在场
+// (masked=true,完整号不在 DOM);虚拟号=虚拟号块在场 + 候选人电话文本容器里有号(2026-09-09
+// 甲方裁决改为读显示文本,随号带出招聘方主叫号与失效时间)。招聘方主叫号与候选人号同一个
+// 展示 class,夹具把它放在虚拟号块里、候选人电话文本容器外——选错容器就会把招聘方的号当
+// 候选人号。夹具只造生产代码真正用到的那点 DOM 能力,不引 jsdom;真实结构已在浏览器里
+// 用洗过的样本核过一遍(docs/智联虚拟号形态考古与裁决-2026-09-09.md)。
+const PEER_PHONE_VIRTUAL_NOTE = '该虚拟号归属地:上海将在2026.09.11 15:20后更新'
+function installPeerPhonePanelFixture(variant, options = {}) {
   const original = { document: globalThis.document }
   const copyNode = {
     getAttribute: (name) => (name === 'data-clipboard-text' ? '13801995730' : null),
@@ -14058,14 +14062,39 @@ function installPeerPhonePanelFixture(variant) {
   const nameNode = { textContent: ' 洪建辉 ' }
   const clicks = []
   const revealButton = { disabled: false, click: () => clicks.push('reveal') }
+  const virtualBlockPresent = variant === 'virtual' || options.virtualBlock === true
+  const virtualBlock = {
+    querySelector(selector) {
+      if (selector === '.virtual-number__text--phone') {
+        return options.noCaller ? null : { textContent: ' 139****0000 ' }
+      }
+      return null
+    },
+  }
+  const boxNode = {
+    querySelector(selector) {
+      if (selector === '.im-resume-basic__phone--copy') return variant === 'real' ? copyNode : null
+      if (selector === '.resume-button.get-phone') return variant === 'masked' ? {} : null
+      if (selector === '.new-resume-basic__contact--virtualnumber') {
+        return virtualBlockPresent ? virtualBlock : null
+      }
+      if (
+        selector ===
+        '.hover-resume-basic__phone--box span.im-resume-basic__phone--black:not(.virtual-number__text--phone)'
+      ) {
+        return virtualBlockPresent && !options.noNumber ? { textContent: '180 0000 0001' } : null
+      }
+      if (selector === '.hover-resume-basic__phone--box .im-resume-basic__phone') {
+        return virtualBlockPresent ? { textContent: options.note ?? PEER_PHONE_VIRTUAL_NOTE } : null
+      }
+      return null
+    },
+  }
   const panelRoot = {
     querySelector(selector) {
       if (selector === '.new-resume-basic__name-wrapper') return nameNode
-      if (selector === '.new-resume-basic__contact--phone--box .im-resume-basic__phone--copy') {
-        return variant === 'real' ? copyNode : null
-      }
-      if (selector === '.new-resume-basic__contact--phone--box .resume-button.get-phone') {
-        return variant === 'masked' ? {} : null
+      if (selector === '.new-resume-basic__contact--phone--box') {
+        return variant === 'noBox' ? null : boxNode
       }
       return null
     },
@@ -14091,21 +14120,108 @@ function installPeerPhonePanelFixture(variant) {
   }
 }
 
-test('chat.readPeerPhone MAIN 只认复制按钮 data 属性,遮挡形态只报 masked', () => {
-  for (const [variant, want] of [
-    ['real', { phone: '13801995730', panelName: '洪建辉', masked: false }],
-    // 无号(容器空)与虚拟号(有显示文本无复制按钮)在选择器层同构:都查不到复制按钮。
-    ['absentOrVirtual', { phone: null, panelName: '洪建辉', masked: false }],
-    ['masked', { phone: null, panelName: '洪建辉', masked: true }],
-    ['noPanel', { phone: null, panelName: null, masked: false }],
+const PEER_PHONE_EMPTY = {
+  phone: null,
+  phoneKind: null,
+  panelName: '洪建辉',
+  masked: false,
+  virtualCaller: null,
+  virtualExpiresAt: null,
+  virtualNote: null,
+}
+const PEER_PHONE_VIRTUAL_EXPIRES_AT = new Date(2026, 8, 11, 15, 20).getTime()
+
+test('chat.readPeerPhone MAIN 五形态按优先级判别:真实号只认复制按钮,遮挡只报 masked,虚拟号读显示文本', () => {
+  for (const [variant, options, want] of [
+    ['real', {}, { ...PEER_PHONE_EMPTY, phone: '13801995730', phoneKind: 'real' }],
+    // 无号:电话盒在但复制按钮、查看按钮、虚拟号块都没有。
+    ['absent', {}, PEER_PHONE_EMPTY],
+    ['noBox', {}, PEER_PHONE_EMPTY],
+    ['masked', {}, { ...PEER_PHONE_EMPTY, masked: true }],
+    ['noPanel', {}, { ...PEER_PHONE_EMPTY, panelName: null }],
+    [
+      'virtual',
+      {},
+      {
+        ...PEER_PHONE_EMPTY,
+        phone: '18000000001',
+        phoneKind: 'virtual',
+        virtualCaller: '139****0000',
+        virtualExpiresAt: PEER_PHONE_VIRTUAL_EXPIRES_AT,
+      },
+    ],
+    // 失效时间文案变了:号照读、时间为空、原文带回给扩展侧记日志。
+    [
+      'virtual',
+      { note: '该虚拟号归属地:上海' },
+      {
+        ...PEER_PHONE_EMPTY,
+        phone: '18000000001',
+        phoneKind: 'virtual',
+        virtualCaller: '139****0000',
+        virtualNote: '该虚拟号归属地:上海',
+      },
+    ],
+    // 主叫号缺席:号照读、主叫号为空。
+    [
+      'virtual',
+      { noCaller: true },
+      {
+        ...PEER_PHONE_EMPTY,
+        phone: '18000000001',
+        phoneKind: 'virtual',
+        virtualExpiresAt: PEER_PHONE_VIRTUAL_EXPIRES_AT,
+      },
+    ],
+    // 虚拟号块在、候选人电话文本容器里却没号:缺号,绝不去别处(比如主叫号)凑一个。
+    ['virtual', { noNumber: true }, PEER_PHONE_EMPTY],
+    // 优先级:复制按钮或查看按钮在场时,即使页面上残留虚拟号块也不走虚拟号分支。
+    ['real', { virtualBlock: true }, { ...PEER_PHONE_EMPTY, phone: '13801995730', phoneKind: 'real' }],
+    ['masked', { virtualBlock: true }, { ...PEER_PHONE_EMPTY, masked: true }],
   ]) {
-    const fixture = installPeerPhonePanelFixture(variant)
+    const fixture = installPeerPhonePanelFixture(variant, options)
     try {
-      assert.deepEqual(zhilianTestHooks.mainReadPeerPhone(), want)
+      assert.deepEqual(zhilianTestHooks.mainReadPeerPhone(), want, `${variant} ${JSON.stringify(options)}`)
     } finally {
       fixture.restore()
     }
   }
+})
+
+test('chat.readPeerPhone 契约 data:虚拟号附属事实只随号带出,masked 只在 read 侧带', () => {
+  const { peerPhoneDataFromPanel } = zhilianTestHooks
+  const virtual = {
+    ...PEER_PHONE_EMPTY,
+    phone: '18000000001',
+    phoneKind: 'virtual',
+    virtualCaller: '139****0000',
+    virtualExpiresAt: PEER_PHONE_VIRTUAL_EXPIRES_AT,
+  }
+  const data = peerPhoneDataFromPanel(virtual, true)
+  assert.equal(typeof data.observedAt, 'number')
+  delete data.observedAt
+  assert.deepEqual(data, {
+    phone: '18000000001',
+    phoneKind: 'virtual',
+    virtualCaller: '139****0000',
+    virtualExpiresAt: PEER_PHONE_VIRTUAL_EXPIRES_AT,
+    panelName: '洪建辉',
+  })
+  // 真实号:没有附属事实,phoneKind=real。
+  const real = peerPhoneDataFromPanel({ ...PEER_PHONE_EMPTY, phone: '13801995730', phoneKind: 'real' }, true)
+  delete real.observedAt
+  assert.deepEqual(real, { phone: '13801995730', phoneKind: 'real', panelName: '洪建辉' })
+  // 遮挡:read 侧带 masked,reveal 侧(揭示后)不带。
+  const maskedRead = peerPhoneDataFromPanel({ ...PEER_PHONE_EMPTY, masked: true }, true)
+  delete maskedRead.observedAt
+  assert.deepEqual(maskedRead, { panelName: '洪建辉', masked: true })
+  const maskedReveal = peerPhoneDataFromPanel({ ...PEER_PHONE_EMPTY, masked: true }, false)
+  delete maskedReveal.observedAt
+  assert.deepEqual(maskedReveal, { panelName: '洪建辉' })
+  // 缺号时即使夹具里残留了附属事实也一个不带。
+  const stray = peerPhoneDataFromPanel({ ...PEER_PHONE_EMPTY, virtualCaller: '139****0000' }, true)
+  delete stray.observedAt
+  assert.deepEqual(stray, { panelName: '洪建辉' })
 })
 
 test('chat.revealPeerPhone MAIN 点击步只在查看按钮在场时点一次', () => {

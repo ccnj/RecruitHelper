@@ -52,6 +52,57 @@ func fullSnapshot() *store.NotificationRenderSnapshot {
 	}
 }
 
+// 虚拟号(2026-09-09 甲方裁决):手机号行标「虚拟号」,附「仅 X 可呼叫」与失效时间;
+// 两项附属事实各自缺失只省略对应段;真实号那一行逐字不变,残留的附属事实也不渲染。
+func TestRenderVirtualPhoneLine(t *testing.T) {
+	expires := time.Date(2026, 9, 11, 15, 20, 0, 0, time.Local).UnixMilli()
+	virtual := func() *store.NotificationRenderSnapshot {
+		snapshot := fullSnapshot()
+		snapshot.PhoneNumber = "18000000001"
+		snapshot.PhoneKind = store.CandidatePhoneKindVirtual
+		snapshot.PhoneVirtualCaller = "139****0000"
+		snapshot.PhoneVirtualExpiresAtMs = expires
+		return snapshot
+	}
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*store.NotificationRenderSnapshot)
+		want   string
+	}{
+		{"齐全", func(*store.NotificationRenderSnapshot) {}, "手机号: 18000000001(虚拟号,仅139****0000可呼叫,09-11 15:20后失效)"},
+		{"缺主叫号", func(s *store.NotificationRenderSnapshot) { s.PhoneVirtualCaller = " " }, "手机号: 18000000001(虚拟号,09-11 15:20后失效)"},
+		{"缺失效时间", func(s *store.NotificationRenderSnapshot) { s.PhoneVirtualExpiresAtMs = 0 }, "手机号: 18000000001(虚拟号,仅139****0000可呼叫)"},
+		{"两项都缺", func(s *store.NotificationRenderSnapshot) {
+			s.PhoneVirtualCaller = ""
+			s.PhoneVirtualExpiresAtMs = 0
+		}, "手机号: 18000000001(虚拟号)"},
+	} {
+		snapshot := virtual()
+		testCase.mutate(snapshot)
+		for _, text := range []string{renderInterviewAccepted(snapshot, "客户甲"), renderWechatAdded(snapshot, "客户甲", false)} {
+			if !strings.Contains(text, testCase.want+"\n") {
+				t.Fatalf("%s: 虚拟号行应为 %q:\n%s", testCase.name, testCase.want, text)
+			}
+		}
+	}
+
+	real := fullSnapshot()
+	real.PhoneNumber = "13901234567"
+	real.PhoneKind = store.CandidatePhoneKindReal
+	real.PhoneVirtualCaller = "139****0000"
+	real.PhoneVirtualExpiresAtMs = expires
+	text := renderInterviewAccepted(real, "客户甲")
+	if !strings.Contains(text, "手机号: 13901234567\n") || strings.Contains(text, "虚拟号") {
+		t.Fatalf("真实号行不得带括注:\n%s", text)
+	}
+	// 存量快照没有种类(空串)按真实号处理。
+	legacy := fullSnapshot()
+	legacy.PhoneNumber = "13901234567"
+	if text := renderInterviewAccepted(legacy, ""); !strings.Contains(text, "手机号: 13901234567\n") {
+		t.Fatalf("无种类按真实号:\n%s", text)
+	}
+}
+
 func TestRenderInterviewAccepted(t *testing.T) {
 	// 联系方式 2026-08-06 起为两行、2026-08-07 修订:有号不再跟状态废话,
 	// 字段统一"字段: 值",面试时间下带方式行。

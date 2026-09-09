@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -192,5 +193,76 @@ func TestCaptureNotificationEvidenceSkipsPhoneWhenCapabilityMissing(t *testing.T
 				t.Fatalf("跳过必须留审计行: %+v", entries)
 			}
 		})
+	}
+}
+
+// 虚拟号形态(2026-09-09 甲方裁决):取证顺访读到 phoneKind=virtual 时收编为虚拟号观察
+// 行,招聘方主叫号与失效时刻随行,不派 reveal(虚拟号形态没有「查看电话」按钮,手也不
+// 报 masked);面板姓名首字核对同款适用;通知快照据此带出虚拟号附属事实。
+func TestCaptureNotificationEvidenceSavesVirtualPhone(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PendingInterviewTransition(t, h, "capture-vphone", "accepted")
+	conversation, err := h.db.ConversationByKey(store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef, ConversationRef: fixture.target.conversationRef,
+	})
+	if err != nil || conversation == nil || strings.TrimSpace(conversation.PeerDisplayName) == "" {
+		t.Fatalf("夹具会话缺对方展示名,首字核对无从谈起: %+v err=%v", conversation, err)
+	}
+	panelName := string([]rune(strings.TrimSpace(conversation.PeerDisplayName))[:1]) + "先生"
+	expires := h.clock.Now().Add(48 * time.Hour).UnixMilli()
+	phoneCalls := 0
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatCaptureThreadScreenshot, protocol.PrimCandidateCaptureResumeScreenshot:
+			return protocol.CaptureScreenshotData{
+				ImageBlobRef: "sha256:" + strings.Repeat("e", 64), ByteSize: 10, Truncated: false,
+				CapturedAt: h.clock.Now().UnixMilli(),
+			}, nil
+		case protocol.PrimChatReadPeerPhone:
+			phoneCalls++
+			return protocol.ChatReadPeerPhoneData{
+				Phone: "18000000001", PhoneKind: protocol.PeerPhoneKindVirtual,
+				VirtualCaller: "139****0000", VirtualExpiresAt: expires,
+				PanelName: panelName, ObservedAt: h.clock.Now().UnixMilli(),
+			}, nil
+		case protocol.PrimChatRevealPeerPhone:
+			t.Fatal("虚拟号形态不得派 chat.revealPeerPhone")
+			return nil, nil
+		default:
+			return defaultHandler(request)
+		}
+	}
+	before, err := h.db.CommunicationV4AggregateByProfile(fixture.target.profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.manager.mu.Lock()
+	err = fixture.actor.processCommunicationV4CardTransition(context.Background(), fixture.pending, fixture.profile, *before)
+	h.manager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.manager.mu.Lock()
+	err = fixture.actor.captureNotificationEvidence(context.Background(), fixture.target.profileID)
+	h.manager.mu.Unlock()
+	if err != nil {
+		t.Fatalf("取证不得失败: %v", err)
+	}
+	if phoneCalls != 1 {
+		t.Fatalf("readPeerPhone 只派一次: %d", phoneCalls)
+	}
+	row, err := h.db.LatestCandidatePhoneObservation(fixture.target.profileID)
+	if err != nil || row == nil || row.Phone != "18000000001" || row.Kind != store.CandidatePhoneKindVirtual ||
+		row.VirtualCaller != "139****0000" || row.VirtualExpiresAtMs != expires {
+		t.Fatalf("虚拟号观察行未按裁决落库: %+v err=%v", row, err)
+	}
+	snapshot, err := h.db.NotificationRenderSnapshotForProfile(fixture.target.profileID)
+	if err != nil || snapshot == nil || snapshot.PhoneNumber != "18000000001" ||
+		snapshot.PhoneKind != store.CandidatePhoneKindVirtual || snapshot.PhoneVirtualCaller != "139****0000" ||
+		snapshot.PhoneVirtualExpiresAtMs != expires {
+		t.Fatalf("通知快照未带虚拟号附属事实: %+v err=%v", snapshot, err)
+	}
+	if needing, _ := h.db.NotificationsNeedingCapture(fixture.target.profileID); len(needing) != 0 {
+		t.Fatalf("取证应照常完成: %+v", needing)
 	}
 }
