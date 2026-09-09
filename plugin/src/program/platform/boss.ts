@@ -46,7 +46,7 @@ import type {
   CandidateSelectSourcingPositionData,
   CandidateSourcingFilters,
   CaptureScreenshotData,
-  ChatCaptureThreadScreenshotArgs,
+  CandidateCaptureResumeScreenshotArgs, ChatCaptureThreadScreenshotArgs,
   ChatIdentifyCurrentConversationData,
   ChatOpenConversationArgs,
   ChatOpenConversationData,
@@ -2502,20 +2502,27 @@ export function describeBossThreadAlignment(
 async function scrollBossThreadPanel(
   tabId: number, ctx: PrimitiveContext, direction: 'up' | 'down', distancePx: number | null,
 ): Promise<OsScrollResult | { outcome: 'none'; detail: string }> {
-  const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [THREAD_SCROLL_CONTAINER, -1])
+  return scrollBossContainer(tabId, ctx, THREAD_SCROLL_CONTAINER, '消息面板', direction, distancePx)
+}
+
+/** 把任一滚动容器朝一个方向滚指定像素(经 OS 滚轮);消息面板与简历面板共用。 */
+async function scrollBossContainer(
+  tabId: number, ctx: PrimitiveContext, selector: string, label: string, direction: 'up' | 'down', distancePx: number | null,
+): Promise<OsScrollResult | { outcome: 'none'; detail: string }> {
+  const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [selector, -1])
   if (located.status !== 'ok') {
-    throw new PlatformError('ELEMENT_UNRESOLVED', `消息面板定位失败(${located.status}):${located.detail}`, 'afterRecovery', undefined, 'possible')
+    throw new PlatformError('ELEMENT_UNRESOLVED', `${label}定位失败(${located.status}):${located.detail}`, 'afterRecovery', undefined, 'possible')
   }
-  const metrics = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [THREAD_SCROLL_CONTAINER, located.index])
+  const metrics = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [selector, located.index])
   if (!metrics.found || metrics.scrollHeight <= metrics.clientHeight + 1) {
     return { outcome: 'none', detail: `没有可滚内容(scrollHeight ${metrics.scrollHeight} ≤ clientHeight ${metrics.clientHeight})` }
   }
   const target: ScrollTarget = {
-    label: `消息面板 ${located.signature}`,
+    label: `${label} ${located.signature}`,
     rect: located.clip,
-    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestIndexed, [THREAD_SCROLL_CONTAINER, located.index, x, y]),
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestIndexed, [selector, located.index, x, y]),
     readMetrics: async () => {
-      const m = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [THREAD_SCROLL_CONTAINER, located.index])
+      const m = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [selector, located.index])
       return m.found ? { scrollTop: m.scrollTop, scrollHeight: m.scrollHeight, clientHeight: m.clientHeight } : null
     },
   }
@@ -2525,10 +2532,10 @@ async function scrollBossThreadPanel(
   const distance = distancePx ?? (direction === 'up' ? metrics.scrollTop + 200 : metrics.scrollHeight + 200)
   const result = await runOsScroll(BOSS_INJECT, tabId, ctx, target, direction, Math.max(1, distance))
   if (result.outcome === 'handServiceUnavailable') {
-    throw new PlatformError('CTX_NOT_READY', `手服务不可用,消息面板未滚动(${result.detail ?? ''})`, 'afterRecovery', 'pageBroken')
+    throw new PlatformError('CTX_NOT_READY', `手服务不可用,${label}未滚动(${result.detail ?? ''})`, 'afterRecovery', 'pageBroken')
   }
   if (result.outcome === 'refusedByGate' || result.outcome === 'stuck') {
-    throw new PlatformError('ELEMENT_UNRESOLVED', `消息面板滚动失败(${result.outcome}):${(result.detail ?? '').slice(0, 200)}`, 'afterRecovery', undefined, 'possible')
+    throw new PlatformError('ELEMENT_UNRESOLVED', `${label}滚动失败(${result.outcome}):${(result.detail ?? '').slice(0, 200)}`, 'afterRecovery', undefined, 'possible')
   }
   return result
 }
@@ -4415,7 +4422,7 @@ async function sendBossInviteCard(
   return data
 }
 
-// ── chat.captureThreadScreenshot ────────────────────────────────────────────
+// ── chat.captureThreadScreenshot / candidate.captureResumeScreenshot ────────
 
 async function decodeFrame(dataUrl: string): Promise<ImageBitmap> {
   const response = await fetch(dataUrl)
@@ -4425,20 +4432,37 @@ async function decodeFrame(dataUrl: string): Promise<ImageBitmap> {
 /** 一次拼接至多几帧(智联同值);再多的历史 truncated=true 如实带出。 */
 const CAPTURE_MAX_FRAMES = 16
 /**
- * 拼接的软预算:契约 execBudgetMs=60s,OS 滚轮一帧 2 秒上下(节奏闸 ≥1s + 簇间停顿 + 截屏配额),
- * 超过这个时点不再往上翻,已拼的部分照发、truncated=true。
+ * 聊天截图的软预算:契约 execBudgetMs=60s,OS 滚轮一帧 5 秒上下(落点探针 + 节奏闸 ≥1s + 簇间停顿 +
+ * 截屏配额),超过这个时点不再往上翻,已拼的部分照发、truncated=true。
  */
-const CAPTURE_SOFT_BUDGET_MS = 48_000
+const CAPTURE_CHAT_SOFT_BUDGET_MS = 48_000
+/** 聊天截图收尾(复原简历摘要面板)的截止:再晚就来不及在 execBudget 内交图,面板留着不复原、只记日志。 */
+const CAPTURE_CHAT_RESTORE_DEADLINE_MS = 52_000
+/** 简历截图的软预算:契约 execBudgetMs=120s。 */
+const CAPTURE_RESUME_SOFT_BUDGET_MS = 90_000
 /** 一格滚轮的像素上限(Mac 120,Windows 100;runOsScroll 首簇后按实测自适应),只用来给步长留余量。 */
 const CAPTURE_WHEEL_NOTCH_PX = 120
 /** runOsScroll 首簇估格数用的 px/格(osscroll INITIAL_PX_PER_NOTCH),要求量按它的整数倍给才派得准。 */
 const CAPTURE_WHEEL_PLAN_PX = 100
+/** 打开候选人简历后的最短停留(2026-07-23 平台交互节奏裁决)。 */
+const RESUME_MIN_STAY_MS = 2_000
+
+// 简历摘要面板(平台事实 §十三/§十八):会话顶部的候选人信息区,「^」开关折叠工作经历那半。
+const INFO_PANEL_SELECTOR = '.base-info-single-container'
+const INFO_PANEL_CONTENT_SELECTOR = '.base-info-single-container .slide-content-click-content'
+const INFO_PANEL_TOGGLE_SELECTOR = '.base-info-single-container .slide-icon'
+// 「在线简历」面板(平台事实 §十三/§十八):外层抽屉 .resume-detail 滚,里面的同源 iframe 是内容层。
+const RESUME_OPEN_BUTTON_SELECTOR = '.resume-btn-content a.resume-btn-online'
+const RESUME_OPEN_BUTTON_TEXT = '在线简历'
+const RESUME_MODAL_SELECTOR = '.new-resume-online-main-ui'
+const RESUME_SCROLL_CONTAINER = '.resume-detail.iframe-resume-detail'
+const RESUME_CLOSE_BUTTON_SELECTOR = '.new-resume-online-main-ui > .close-btn'
 
 /** 页面一步的量测快照(isolated world,纯数值,DOM 细节不出页面)。 */
 interface DomCaptureMetrics {
   found: boolean
-  /** 目标行仍是当前选中行——会话没被切走。 */
-  selectedOk: boolean
+  /** 绑定仍成立——聊天:目标行仍是选中行;简历:面板仍开着。 */
+  boundOk: boolean
   visible: boolean
   clientH: number
   scrollHeight: number
@@ -4459,13 +4483,14 @@ interface DomCaptureMetrics {
  * 露出带探测移植自智联 mainChatCaptureStep:自容器裁剪矩形底边向上、顶边向下,用 elementFromPoint
  * 找命中点仍落在容器内的最外一行;视口外、祖先裁掉、悬浮元素(BOSS:「邀约对方面试」浮钮、
  * 「帮你问牛人」条)盖住的部分都扣掉——它才是一屏真正能截多少。必须自包含:序列化进页面。
+ * boundSelector 命中恰一个且(给了 boundClass 时)带该类,绑定才算成立。
  */
-function domReadBossCaptureMetrics(containerSelector: string, rowSelector: string, selectedClass: string): DomCaptureMetrics {
+function domReadBossCaptureMetrics(containerSelector: string, boundSelector: string, boundClass: string): DomCaptureMetrics {
   const el = document.querySelector<HTMLElement>(containerSelector)
-  const rows = document.querySelectorAll(rowSelector)
-  const selectedOk = rows.length === 1 && rows[0]!.classList.contains(selectedClass)
+  const bound = document.querySelectorAll(boundSelector)
+  const boundOk = bound.length === 1 && (boundClass === '' || bound[0]!.classList.contains(boundClass))
   const base = {
-    selectedOk, visible: document.visibilityState === 'visible', dpr: window.devicePixelRatio || 1,
+    boundOk, visible: document.visibilityState === 'visible', dpr: window.devicePixelRatio || 1,
     innerW: window.innerWidth, innerH: window.innerHeight,
   }
   if (!el) {
@@ -4510,8 +4535,43 @@ function domReadBossCaptureMetrics(containerSelector: string, rowSelector: strin
   }
 }
 
+interface DomElementRect {
+  found: boolean
+  visible: boolean
+  dpr: number
+  innerW: number
+  innerH: number
+  rect: DomRect4
+}
+
+/** 单个元素的视口矩形(裁前),给头图这类一帧就拍全的块用。 */
+function domReadBossElementRect(selector: string): DomElementRect {
+  const el = document.querySelector<HTMLElement>(selector)
+  const base = { visible: document.visibilityState === 'visible', dpr: window.devicePixelRatio || 1, innerW: window.innerWidth, innerH: window.innerHeight }
+  if (!el) return { found: false, ...base, rect: { x: 0, y: 0, w: 0, h: 0 } }
+  const r = el.getBoundingClientRect()
+  return { found: true, ...base, rect: { x: r.x, y: r.y, w: r.width, h: r.height } }
+}
+
+interface DomInfoPanelState {
+  found: boolean
+  expanded: boolean
+  toggleCount: number
+}
+
+/** 简历摘要面板的折叠态:内容块 display 不是 none 即展开(2026-09-09 真机)。 */
+function domReadBossInfoPanel(panelSelector: string, contentSelector: string, toggleSelector: string): DomInfoPanelState {
+  const panel = document.querySelector<HTMLElement>(panelSelector)
+  const content = document.querySelector<HTMLElement>(contentSelector)
+  return {
+    found: !!panel,
+    expanded: !!content && window.getComputedStyle(content).display !== 'none',
+    toggleCount: document.querySelectorAll(toggleSelector).length,
+  }
+}
+
 /**
- * 往上滚一帧该要多少像素(纯函数,单测钉住)。OS 滚轮只能按格走:runOsScroll 首簇按 100px/格
+ * 往一个方向滚一帧该要多少像素(纯函数,单测钉住)。OS 滚轮只能按格走:runOsScroll 首簇按 100px/格
  * 估格数(ceil(要求量/100)),之后按实测格距;Mac 实测一格 120px。所以按「整格」规划:带高
  * 里最多装几整格(按 120 算,留 10px),要求量就给 格数×100——两种格距下都恰好派这么多格,
  * 实际位移 ≤ 格数×120 ≤ 带高,帧与帧之间只重叠、不漏缝(2026-09-09 真机:带 224px 要 94
@@ -4524,6 +4584,35 @@ export function bossCaptureScrollRequest(stepCss: number, remainingCss: number, 
   return Math.max(1, Math.min(Math.floor(request), Math.floor(remainingCss)))
 }
 
+export interface BossCaptureFrameState {
+  scrollTop: number
+  clientH: number
+  bandOffset: number
+  bandHeight: number
+  totalScroll: number
+  startTop: number
+  coveredCssH: number
+}
+
+/**
+ * 这一帧拍完是否已覆盖到头(纯函数,单测钉住)。露出带对应的内容区间 = [scrollTop+bandOffset,
+ * +bandHeight);底部锚定从底往上,带顶碰到起点或 scrollTop 到 0 即到头;顶部锚定从顶往下,带底碰到
+ * 覆盖终点或滚到底即到头。
+ */
+export function bossCaptureCovered(anchor: 'top' | 'bottom', f: BossCaptureFrameState): boolean {
+  const bandTop = f.scrollTop + f.bandOffset
+  if (anchor === 'bottom') return bandTop <= f.startTop + 1 || f.scrollTop <= 0
+  const coverEnd = Math.min(f.totalScroll, f.startTop + f.coveredCssH)
+  return bandTop + f.bandHeight >= coverEnd - 1 || f.scrollTop + f.clientH >= f.totalScroll - 1
+}
+
+/** 到头之前还剩多少内容要走(纯函数):底部锚定是带顶到起点的距离,顶部锚定是带底到覆盖终点的距离。 */
+export function bossCaptureRemaining(anchor: 'top' | 'bottom', f: BossCaptureFrameState): number {
+  const bandTop = f.scrollTop + f.bandOffset
+  if (anchor === 'bottom') return Math.max(0, bandTop - f.startTop)
+  return Math.max(0, Math.min(f.totalScroll, f.startTop + f.coveredCssH) - (bandTop + f.bandHeight))
+}
+
 class BossCaptureDirty extends Error {
   constructor(kind: string) {
     super(`capture-stitch-dirty:${kind}`)
@@ -4531,12 +4620,20 @@ class BossCaptureDirty extends Error {
   }
 }
 
-interface BossStitchOutcome {
-  jpeg: Blob
+interface BossStitchCanvas {
+  canvas: OffscreenCanvas
   width: number
   height: number
   frames: number
   truncated: boolean
+}
+
+interface BossStitchOptions {
+  anchor: 'top' | 'bottom'
+  kind: 'chat' | 'resume'
+  label: string
+  startedAt: number
+  softBudgetMs: number
 }
 
 /**
@@ -4567,17 +4664,31 @@ async function drainBossHistoryForCapture(
   return metrics
 }
 
+/** 两次回读高度不变才算稳(prepend/新气泡/简历 iframe 渲染都会改高度)。 */
+async function waitBossCaptureStable(read: () => Promise<DomCaptureMetrics>): Promise<DomCaptureMetrics> {
+  let metrics = await read()
+  let stable = 0
+  let last = metrics.scrollHeight
+  for (let readIdx = 0; readIdx < 8 && stable < 2; readIdx += 1) {
+    await sleep(300)
+    metrics = await read()
+    stable = metrics.scrollHeight === last ? stable + 1 : 0
+    last = metrics.scrollHeight
+  }
+  return metrics
+}
+
 /**
- * 单次拼接(智联 stitchOnce 的 OS 滚轮版):底部锚定,从底往上一帧一帧滚。程序化 scrollTo 在 BOSS
- * 上不用(2026-09-03 甲方:页面上发生的滚动必须是真实滚轮),位置只能相对走,所以每帧按回读的
- * 真实 scrollTop 落画布,帧间允许重叠、不允许漏缝(步长见 bossCaptureScrollRequest)。
- * 冻结坐标系:开拍时的 scrollHeight 与露出带;任一帧高度变了、成像前后位移了、露出带变了,
- * 抛 BossCaptureDirty 由调用方整体重拍一次。超过软预算就停在当前帧,已拼部分照发。
+ * 单次拼接(智联 stitchOnce 的 OS 滚轮版)。程序化 scrollTo 在 BOSS 上不用(2026-09-03 甲方:页面上
+ * 发生的滚动必须是真实滚轮),位置只能相对走,所以每帧按回读的真实 scrollTop 落画布,帧间允许重叠、
+ * 不允许漏缝(步长见 bossCaptureScrollRequest)。底部锚定从底往上(聊天:最新消息永远在),顶部
+ * 锚定从顶往下(简历)。冻结坐标系:开拍时的 scrollHeight 与露出带;任一帧高度变了、成像前后位移
+ * 了、露出带变了,抛 BossCaptureDirty 由调用方整体重拍一次。超过软预算就停在当前帧,已拼部分照发。
  */
-async function stitchBossThreadOnce(
-  tab: chrome.tabs.Tab, ctx: PrimitiveContext, read: () => Promise<DomCaptureMetrics>,
-  settled: DomCaptureMetrics, startedAt: number, trace: string[],
-): Promise<BossStitchOutcome> {
+async function stitchBossPanelOnce(
+  tab: chrome.tabs.Tab, ctx: PrimitiveContext, containerSelector: string, containerLabel: string,
+  read: () => Promise<DomCaptureMetrics>, settled: DomCaptureMetrics, options: BossStitchOptions, trace: string[],
+): Promise<BossStitchCanvas> {
   const dpr = settled.dpr
   const clientH = settled.clientH
   const totalScroll = Math.max(settled.scrollHeight, clientH)
@@ -4585,18 +4696,18 @@ async function stitchBossThreadOnce(
   const bandBottom = Math.max(bandTop, settled.visibleBottom)
   const bandHeight = bandBottom - bandTop
   const bandOffset = bandTop - settled.rectTop
-  if (bandHeight < 1) throw new PlatformError('CTX_NOT_READY', '截图容器在屏幕上没有露出', 'afterRecovery')
+  if (bandHeight < 1) throw new PlatformError('CTX_NOT_READY', `${options.label}容器在屏幕上没有露出`, 'afterRecovery')
   const stepCss = Math.max(1, Math.min(clientH, Math.floor(bandHeight)))
   if (settled.visibleProbe !== 'ok' || stepCss < clientH - 2) {
-    reportHandLog('warn', 'captureVisibleBandShort.chat',
-      `BOSS 截图容器露出带短于 clientHeight,按露出带步进(probe=${settled.visibleProbe})`,
+    reportHandLog('warn', `captureVisibleBandShort.${options.kind}`,
+      `BOSS ${options.label}容器露出带短于 clientHeight,按露出带步进(probe=${settled.visibleProbe})`,
       `clientH=${clientH} band=${bandHeight} offset=${bandOffset.toFixed(1)} step=${stepCss} innerH=${settled.innerH} dpr=${dpr}`)
   }
   const framesForContent = Math.max(1, Math.ceil(totalScroll / stepCss))
   const framesByCanvas = Math.max(1, Math.floor(CAPTURE_MAX_SIDE / Math.max(1, Math.round(stepCss * dpr))))
   const budget = Math.min(CAPTURE_MAX_FRAMES, framesForContent, framesByCanvas)
   const coveredCssH = Math.min(totalScroll, budget * stepCss)
-  const startTop = Math.max(0, totalScroll - coveredCssH)
+  const startTop = options.anchor === 'bottom' ? Math.max(0, totalScroll - coveredCssH) : 0
 
   const cropCssLeft = Math.max(0, settled.rectLeft)
   const cropCssRight = Math.min(settled.innerW, settled.rectRight)
@@ -4608,6 +4719,7 @@ async function stitchBossThreadOnce(
   draw.fillStyle = '#ffffff'
   draw.fillRect(0, 0, outW, outH)
 
+  const direction: 'up' | 'down' = options.anchor === 'bottom' ? 'up' : 'down'
   let frames = 0
   let drawnTop = Number.POSITIVE_INFINITY
   let drawnBottom = 0
@@ -4616,7 +4728,7 @@ async function stitchBossThreadOnce(
     ctx.checkpoint()
     const before = await read()
     if (!before.found || !before.visible) break
-    if (!before.selectedOk) throw new PlatformError('CTX_LOST_DURING_EXEC', '截图期间当前会话被切走', 'manualOnly')
+    if (!before.boundOk) throw new PlatformError('CTX_LOST_DURING_EXEC', `${options.label}截图期间目标不再是当前对象`, 'manualOnly')
     if (Math.abs(before.scrollHeight - totalScroll) > 4) throw new BossCaptureDirty('height-changed')
 
     let frame: ImageBitmap
@@ -4646,7 +4758,6 @@ async function stitchBossThreadOnce(
     const sy = Math.min(Math.max(0, Math.round(afterBandTop * dpr)), Math.max(0, frame.height - 1))
     const sw = Math.max(1, Math.min(frame.width - sx, outW))
     const sh = Math.max(1, Math.min(frame.height - sy, Math.round(afterBandHeight * dpr)))
-    // 露出带对应的内容 = [scrollTop + bandOffset, +bandHeight):落画布按内容坐标减 startTop。
     let destY = Math.round((before.scrollTop + bandOffset - startTop) * dpr)
     let srcSkip = 0
     if (destY < 0) { srcSkip = -destY; destY = 0 }
@@ -4658,43 +4769,135 @@ async function stitchBossThreadOnce(
     }
     frame.close()
     frames += 1
-    ctx.progress(`聊天截图 ${frames}/${budget}`, Math.min(90, 20 + Math.round((frames / budget) * 65)))
-    // 内容顶到 startTop 即覆盖完;带的顶边对应 scrollTop+bandOffset。
-    if (before.scrollTop + bandOffset <= startTop + 1 || before.scrollTop <= 0) break
+    ctx.progress(`${options.label} ${frames}/${budget}`, Math.min(90, 20 + Math.round((frames / budget) * 65)))
+    const state: BossCaptureFrameState = { scrollTop: before.scrollTop, clientH, bandOffset, bandHeight, totalScroll, startTop, coveredCssH }
+    if (bossCaptureCovered(options.anchor, state)) break
     if (frames >= budget) break
-    if (Date.now() - startedAt > CAPTURE_SOFT_BUDGET_MS) { timeTruncated = true; trace.push(`第 ${frames} 帧后超软预算停拍`); break }
-    const remaining = before.scrollTop + bandOffset - startTop
-    const request = bossCaptureScrollRequest(stepCss, remaining)
-    const scrolled = await scrollBossThreadPanel(tab.id!, ctx, 'up', request)
+    if (Date.now() - options.startedAt > options.softBudgetMs) { timeTruncated = true; trace.push(`第 ${frames} 帧后超软预算停拍`); break }
+    const request = bossCaptureScrollRequest(stepCss, bossCaptureRemaining(options.anchor, state))
+    const scrolled = await scrollBossContainer(tab.id!, ctx, containerSelector, containerLabel, direction, request)
     if (scrolled.outcome === 'none') break
-    const moved = before.scrollTop - scrolled.scrollTopAfter
-    trace.push(`帧#${frames} 上滚要 ${request} 实 ${moved}`)
+    const moved = Math.abs(scrolled.scrollTopAfter - before.scrollTop)
+    trace.push(`帧#${frames} ${direction === 'up' ? '上' : '下'}滚要 ${request} 实 ${moved}`)
     if (moved <= 0) break
     if (moved > stepCss) throw new BossCaptureDirty('scroll-overshoot')
   }
-  if (frames === 0 || drawnBottom === 0) throw new PlatformError('ELEMENT_UNRESOLVED', '截图一帧未成,放弃取证', 'manualOnly')
-  // 顶部没拼到的空白(超软预算提前停)裁掉,只发真正拼上的那段;底部锚定,最新消息永远在。
+  if (frames === 0 || drawnBottom === 0) throw new PlatformError('ELEMENT_UNRESOLVED', `${options.label}一帧未成,放弃取证`, 'manualOnly')
+  // 没拼到的空白裁掉(超软预算提前停:底部锚定空在顶、顶部锚定空在底),只发真正拼上的那段。
+  const top = Math.max(0, Math.min(outH - 1, drawnTop))
+  const height = Math.max(1, Math.min(outH, drawnBottom) - top)
   let finalCanvas = canvas
-  let finalH = outH
-  if (drawnTop > Math.round(2 * dpr)) {
-    finalH = Math.max(1, outH - drawnTop)
-    const cropped = new OffscreenCanvas(outW, finalH)
+  if (top > Math.round(2 * dpr) || height < outH - Math.round(2 * dpr)) {
+    const cropped = new OffscreenCanvas(outW, height)
     const croppedDraw = cropped.getContext('2d')
     if (!croppedDraw) throw new PlatformError('CTX_NOT_READY', '截图画布不可用', 'afterRecovery')
-    croppedDraw.drawImage(canvas, 0, drawnTop, outW, finalH, 0, 0, outW, finalH)
+    croppedDraw.drawImage(canvas, 0, top, outW, height, 0, 0, outW, height)
     finalCanvas = cropped
   }
-  const encoded = await encodeStitchedJpeg(finalCanvas, outW, finalH)
-  if (!encoded) throw new PlatformError('PAYLOAD_LIMIT', '截图压缩后仍超过发送上限', 'manualOnly')
   return {
-    jpeg: encoded.jpeg, width: encoded.width, height: encoded.height, frames,
-    truncated: timeTruncated || coveredCssH < totalScroll - 1 || drawnTop > Math.round(2 * dpr),
+    canvas: finalCanvas, width: outW, height: finalCanvas.height, frames,
+    truncated: timeTruncated || coveredCssH < totalScroll - 1 || finalCanvas.height < outH - Math.round(2 * dpr),
   }
 }
 
+/** 一帧拍全一个块(简历摘要面板这种固定在顶上的),裁到视口内;拍不到返回 null。 */
+async function captureBossElementCrop(tab: chrome.tabs.Tab, tabId: number, selector: string): Promise<OffscreenCanvas | null> {
+  const area = await runInPage(BOSS_DOM, tabId, domReadBossElementRect, [selector])
+  if (!area.found || !area.visible) return null
+  const left = Math.max(0, area.rect.x)
+  const top = Math.max(0, area.rect.y)
+  const right = Math.min(area.innerW, area.rect.x + area.rect.w)
+  const bottom = Math.min(area.innerH, area.rect.y + area.rect.h)
+  if (right - left < 8 || bottom - top < 8) return null
+  const frame = await decodeFrame(await captureVisibleTabJpegDataUrl(tab.windowId!, CAPTURE_FRAME_QUALITY))
+  const dpr = area.dpr
+  const sx = Math.min(Math.round(left * dpr), Math.max(0, frame.width - 1))
+  const sy = Math.min(Math.round(top * dpr), Math.max(0, frame.height - 1))
+  const sw = Math.max(1, Math.min(frame.width - sx, Math.round((right - left) * dpr)))
+  const sh = Math.max(1, Math.min(frame.height - sy, Math.round((bottom - top) * dpr)))
+  const canvas = new OffscreenCanvas(sw, sh)
+  const draw = canvas.getContext('2d')
+  if (!draw) { frame.close(); return null }
+  draw.drawImage(frame, sx, sy, sw, sh, 0, 0, sw, sh)
+  frame.close()
+  return canvas
+}
+
 /**
- * 聊天区长图(底部锚定):排干等稳 → 滚到底 → 从底往上逐帧滚轮拼接;坐标系中途失效整体重拍一次。
- * 2026-09-09 之前 BOSS 只拍当前可见一帧,企微收到的聊天记录只有最后两三句。
+ * 把简历摘要面板折到目标态(OS 点「^」)。回读确认不了、点不到都只返回 false,由调用方按当前状态
+ * 继续,不因为一个开关让截图失败;停机类错误照抛。
+ */
+async function setBossInfoPanelExpanded(tabId: number, ctx: PrimitiveContext, expanded: boolean, trace: string[]): Promise<boolean> {
+  const readState = (): Promise<DomInfoPanelState> =>
+    runInPage(BOSS_DOM, tabId, domReadBossInfoPanel, [INFO_PANEL_SELECTOR, INFO_PANEL_CONTENT_SELECTOR, INFO_PANEL_TOGGLE_SELECTOR])
+  const state = await readState()
+  if (!state.found || state.toggleCount !== 1) { trace.push(`摘要面板开关不可用(found=${state.found} toggles=${state.toggleCount})`); return false }
+  if (state.expanded === expanded) return true
+  const what = expanded ? '展开简历摘要' : '收起简历摘要'
+  try {
+    const plan = await selectorClickPlan(tabId, INFO_PANEL_TOGGLE_SELECTOR, -1, null, what)
+    ctx.checkpoint()
+    await paceBeforeClick()
+    await osClickOnce(tabId, ctx, plan, what)
+  } catch (error) {
+    if (isStopExecution(error)) throw error
+    trace.push(`${what}未点成:${describeError(error).slice(0, 80)}`)
+    return false
+  }
+  const settled = await pollUntil(ctx, readState, (s) => s.found && s.expanded === expanded, 5_000)
+  trace.push(`${what}${settled.satisfied ? '已生效' : '未确认'}`)
+  return settled.satisfied
+}
+
+async function uploadBossCapture(canvas: OffscreenCanvas, truncated: boolean): Promise<CaptureScreenshotData> {
+  const encoded = await encodeStitchedJpeg(canvas, canvas.width, canvas.height)
+  if (!encoded) throw new PlatformError('PAYLOAD_LIMIT', '截图压缩后仍超过发送上限', 'manualOnly')
+  let put: BlobPutOutcome
+  try {
+    put = await putSessionBlob(await encoded.jpeg.arrayBuffer())
+  } catch (error) {
+    if (error instanceof BlobChannelError) {
+      throw new PlatformError(error.permanent ? 'PAYLOAD_LIMIT' : 'CTX_NOT_READY',
+        `截图 blob 上行失败:${error.message}`, error.permanent ? 'manualOnly' : 'afterRecovery')
+    }
+    throw error
+  }
+  return { imageBlobRef: put.ref, byteSize: put.byteSize, truncated, capturedAt: Date.now() }
+}
+
+/** 拼接入口:等稳 → 单次拼接;坐标系中途失效(BossCaptureDirty)整体重拍一次。 */
+async function stitchBossPanel(
+  tab: chrome.tabs.Tab, ctx: PrimitiveContext, containerSelector: string, containerLabel: string,
+  read: () => Promise<DomCaptureMetrics>, prepare: () => Promise<void>, options: BossStitchOptions, trace: string[],
+): Promise<BossStitchCanvas> {
+  for (let attempt = 1; ; attempt += 1) {
+    ctx.checkpoint()
+    await prepare()
+    const settled = await waitBossCaptureStable(read)
+    if (!settled.found) throw new PlatformError('ELEMENT_UNRESOLVED', `${options.label}容器无法解析`, 'manualOnly')
+    if (!settled.visible) throw new PlatformError('CTX_NOT_READY', '目标标签页不在前台,放弃截图', 'afterRecovery')
+    try {
+      return await stitchBossPanelOnce(tab, ctx, containerSelector, containerLabel, read, settled, options, trace)
+    } catch (error) {
+      if (!(error instanceof BossCaptureDirty)) throw error
+      trace.push(`重拍(${error.message})`)
+      if (attempt >= 2) throw new PlatformError('CTX_LOST_DURING_EXEC', `截图期间页面持续变动(${error.message})`, 'manualOnly')
+    }
+  }
+}
+
+function bossCaptureTabChecks(tab: chrome.tabs.Tab): number {
+  if (tab.id === undefined || tab.windowId === undefined || tab.status !== 'complete') {
+    throw new PlatformError('CTX_NOT_READY', '目标 BOSS 页面尚未就绪', 'afterRecovery', 'pageBroken')
+  }
+  if (!tab.active) throw new PlatformError('CTX_NOT_READY', '目标标签页不在前台,放弃截图', 'afterRecovery')
+  return tab.id
+}
+
+/**
+ * 聊天区长图(2026-09-09 甲方定的形态):顶上是简历摘要面板(展开态一帧拍全),下面是聊天长图。
+ * 拍聊天前把摘要面板收起,消息区露出带能从 170px 涨到 280px 以上,一帧多走一两格;拍完复原到
+ * 进来时的折叠态。面板本来收着的先展开拍头图再收。任何一步失败都只降级成「少一段」,不动业务状态。
  */
 async function captureBossThreadScreenshot(
   args: ChatCaptureThreadScreenshotArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
@@ -4708,11 +4911,7 @@ async function captureBossThreadScreenshot(
   const parsed = parseBossConversationRef(args.conversationRef)
   if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
   const tab = await verifiedBossChatTab(fingerprint)
-  if (tab.id === undefined || tab.windowId === undefined || tab.status !== 'complete') {
-    throw new PlatformError('CTX_NOT_READY', '目标 BOSS 页面尚未就绪', 'afterRecovery', 'pageBroken')
-  }
-  if (!tab.active) throw new PlatformError('CTX_NOT_READY', '目标标签页不在前台,放弃截图', 'afterRecovery')
-  const tabId = tab.id
+  const tabId = bossCaptureTabChecks(tab)
   const row = await locateRow(tabId, args.conversationRef)
   if (!(row.count === 1 && row.selected)) {
     throw new PlatformError('CTX_LOST_DURING_EXEC', '截图目标不是当前打开的会话', 'manualOnly')
@@ -4723,53 +4922,163 @@ async function captureBossThreadScreenshot(
   const startedAt = Date.now()
   const trace: string[] = []
   ctx.progress('聊天截图准备', 10)
-  let outcome: BossStitchOutcome | null = null
-  for (let attempt = 1; attempt <= 2 && outcome === null; attempt += 1) {
-    ctx.checkpoint()
-    let metrics = await read()
-    if (!metrics.found) throw new PlatformError('ELEMENT_UNRESOLVED', '聊天区容器无法解析', 'manualOnly')
-    if (!metrics.visible) throw new PlatformError('CTX_NOT_READY', '页面不可见,放弃截图', 'afterRecovery')
-    const stepGuess = Math.max(1, Math.floor(Math.max(metrics.visibleBottom - metrics.visibleTop, 1)))
-    metrics = await drainBossHistoryForCapture(tabId, ctx, parsed.uid, parsed.friendSource, read, (CAPTURE_MAX_FRAMES + 1) * stepGuess, trace)
-    if (metrics.scrollHeight > metrics.clientH + 1) {
-      const toBottom = await scrollBossThreadPanel(tabId, ctx, 'down', null)
-      trace.push(`锚底 ${toBottom.outcome}`)
-    }
-    // 等稳:两次回读高度不变才开拍(prepend/新气泡都会改高度)。
-    let stable = 0
-    let last = -1
-    for (let readIdx = 0; readIdx < 8 && stable < 2; readIdx += 1) {
-      await sleep(300)
-      metrics = await read()
-      stable = metrics.scrollHeight === last ? stable + 1 : 0
-      last = metrics.scrollHeight
-    }
-    if (!metrics.visible) throw new PlatformError('CTX_NOT_READY', '目标标签页不在前台,放弃截图', 'afterRecovery')
+
+  // 头图:摘要面板展开态一帧拍全。本来收着的先展开;展不开就没有头图,不影响聊天长图。
+  const initial = await runInPage(BOSS_DOM, tabId, domReadBossInfoPanel, [INFO_PANEL_SELECTOR, INFO_PANEL_CONTENT_SELECTOR, INFO_PANEL_TOGGLE_SELECTOR])
+  let header: OffscreenCanvas | null = null
+  if (initial.found && (initial.expanded || await setBossInfoPanelExpanded(tabId, ctx, true, trace))) {
     try {
-      outcome = await stitchBossThreadOnce(tab, ctx, read, metrics, startedAt, trace)
+      header = await captureBossElementCrop(tab, tabId, INFO_PANEL_SELECTOR)
+      trace.push(header ? `头图 ${header.width}x${header.height}` : '头图拍不到')
     } catch (error) {
-      if (!(error instanceof BossCaptureDirty)) throw error
-      trace.push(`重拍(${error.message})`)
-      if (attempt >= 2) throw new PlatformError('CTX_LOST_DURING_EXEC', `截图期间页面持续变动(${error.message})`, 'manualOnly')
+      if (isStopExecution(error)) throw error
+      trace.push(`头图失败:${describeError(error).slice(0, 80)}`)
     }
   }
-  if (outcome === null) throw new PlatformError('CTX_LOST_DURING_EXEC', '截图期间页面持续变动', 'manualOnly')
-  reportHandLog('warn', 'threadCaptureStitched',
-    `BOSS 聊天截图拼接 ${outcome.frames} 帧 ${outcome.width}x${outcome.height} truncated=${outcome.truncated} 用时 ${Date.now() - startedAt}ms`,
-    trace.join(' | ').slice(0, 600))
-  let put: BlobPutOutcome
+  // 收起面板让消息区露出更多;收不起就按当前露出带拍。
+  await setBossInfoPanelExpanded(tabId, ctx, false, trace)
+
+  let chat: BossStitchCanvas
   try {
-    put = await putSessionBlob(await outcome.jpeg.arrayBuffer())
-  } catch (error) {
-    if (error instanceof BlobChannelError) {
-      throw new PlatformError(error.permanent ? 'PAYLOAD_LIMIT' : 'CTX_NOT_READY',
-        `截图 blob 上行失败:${error.message}`, error.permanent ? 'manualOnly' : 'afterRecovery')
+    chat = await stitchBossPanel(tab, ctx, THREAD_SCROLL_CONTAINER, '消息面板', read, async () => {
+      let metrics = await read()
+      if (!metrics.found) throw new PlatformError('ELEMENT_UNRESOLVED', '聊天区容器无法解析', 'manualOnly')
+      const stepGuess = Math.max(1, Math.floor(Math.max(metrics.visibleBottom - metrics.visibleTop, 1)))
+      metrics = await drainBossHistoryForCapture(tabId, ctx, parsed.uid, parsed.friendSource, read, (CAPTURE_MAX_FRAMES + 1) * stepGuess, trace)
+      if (metrics.scrollHeight > metrics.clientH + 1) {
+        const toBottom = await scrollBossThreadPanel(tabId, ctx, 'down', null)
+        trace.push(`锚底 ${toBottom.outcome}`)
+      }
+    }, { anchor: 'bottom', kind: 'chat', label: '聊天截图', startedAt, softBudgetMs: CAPTURE_CHAT_SOFT_BUDGET_MS }, trace)
+  } finally {
+    // 复原折叠态:进来展开的就展开回去。来不及就留着,只记日志,不吃掉主结果。
+    if (initial.found && initial.expanded) {
+      if (Date.now() - startedAt < CAPTURE_CHAT_RESTORE_DEADLINE_MS) {
+        try { await setBossInfoPanelExpanded(tabId, ctx, true, trace) } catch (error) { if (isStopExecution(error)) throw error; trace.push('复原面板失败') }
+      } else {
+        trace.push('超时未复原面板')
+      }
     }
-    throw error
   }
+
+  // 合成:头图在上、聊天在下,左右按各自裁剪宽度对齐到较宽者。
+  let composed = chat.canvas
+  if (header) {
+    const width = Math.max(header.width, chat.width)
+    const height = header.height + chat.height
+    const canvas = new OffscreenCanvas(width, height)
+    const draw = canvas.getContext('2d')
+    if (draw) {
+      draw.fillStyle = '#ffffff'
+      draw.fillRect(0, 0, width, height)
+      draw.drawImage(header, 0, 0)
+      draw.drawImage(chat.canvas, 0, header.height)
+      composed = canvas
+    }
+  }
+  reportHandLog('warn', 'threadCaptureStitched',
+    `BOSS 聊天截图拼接 ${chat.frames} 帧 ${composed.width}x${composed.height}(头图${header ? '有' : '无'}) truncated=${chat.truncated} 用时 ${Date.now() - startedAt}ms`,
+    trace.join(' | ').slice(0, 700))
+  const data = await uploadBossCapture(composed, chat.truncated)
   await verifiedBossChatTab(fingerprint)
   ctx.progress('聊天截图完成', 100)
-  return { imageBlobRef: put.ref, byteSize: put.byteSize, truncated: outcome.truncated, capturedAt: Date.now() }
+  return data
+}
+
+/** 简历面板关闭(OS 点右上「×」),回读确认;关不掉只记日志——面板盖着会让后续动作被闸拦下,人来关。 */
+async function closeBossResumePanelBestEffort(tabId: number, ctx: PrimitiveContext, openedAt: number, trace: string[]): Promise<void> {
+  const stayUntil = openedAt + RESUME_MIN_STAY_MS + Math.floor(Math.random() * 501)
+  if (Date.now() < stayUntil) await sleep(stayUntil - Date.now())
+  const readOpen = (): Promise<DomElementRect> => runInPage(BOSS_DOM, tabId, domReadBossElementRect, [RESUME_MODAL_SELECTOR])
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    if (!(await readOpen()).found) { trace.push('面板已关'); return }
+    try {
+      const plan = await selectorClickPlan(tabId, RESUME_CLOSE_BUTTON_SELECTOR, -1, null, '简历面板关闭钮')
+      ctx.checkpoint()
+      await paceBeforeClick()
+      await osClickOnce(tabId, ctx, plan, '关简历面板')
+    } catch (error) {
+      if (isStopExecution(error)) throw error
+      trace.push(`关面板#${attempt}未点成:${describeError(error).slice(0, 80)}`)
+      continue
+    }
+    const gone = await pollUntil(ctx, readOpen, (r) => !r.found, 8_000)
+    if (gone.satisfied) { trace.push(`面板已关(第 ${attempt} 次)`); return }
+    trace.push(`关面板#${attempt}后仍开着`)
+  }
+  reportHandLog('warn', 'resumePanelStuckOpen', 'BOSS 简历面板关不掉,留给人关', trace.join(' | ').slice(0, 300))
+}
+
+/**
+ * candidate.captureResumeScreenshot@1(BOSS,2026-09-09):OS 点「在线简历」打开面板,顶部锚定逐帧滚拼
+ * 外层抽屉(iframe 里的 canvas 只是内容层,真实像素由 captureVisibleTab 拍),满足最短停留后 OS 点「×」
+ * 关掉并确认。任何失败只缺图;关不掉留日志。
+ */
+async function captureBossResumeScreenshot(
+  args: CandidateCaptureResumeScreenshotArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
+): Promise<CaptureScreenshotData> {
+  if (!args || typeof args.conversationRef !== 'string' || !args.conversationRef ||
+      typeof args.platformUserRef !== 'string' || !args.platformUserRef) {
+    throw new PlatformError('GUARD_FAILED', '简历截图缺少目标会话或候选人引用', 'manualOnly')
+  }
+  if (!sessionBlobParams()) {
+    throw new PlatformError('PAYLOAD_LIMIT', '当前会话未协商 blob 通道,禁止内联图像', 'manualOnly')
+  }
+  const parsed = parseBossConversationRef(args.conversationRef)
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
+  if (String(parsed.uid) !== args.platformUserRef) {
+    throw new PlatformError('GUARD_FAILED', '候选人引用与会话引用不是同一个人', 'manualOnly')
+  }
+  const tab = await verifiedBossChatTab(fingerprint)
+  const tabId = bossCaptureTabChecks(tab)
+  const row = await locateRow(tabId, args.conversationRef)
+  if (!(row.count === 1 && row.selected)) {
+    throw new PlatformError('CTX_LOST_DURING_EXEC', '截图目标不是当前打开的会话', 'manualOnly')
+  }
+  const startedAt = Date.now()
+  const trace: string[] = []
+  ctx.progress('简历截图准备', 10)
+  const readOpen = (): Promise<DomElementRect> => runInPage(BOSS_DOM, tabId, domReadBossElementRect, [RESUME_MODAL_SELECTOR])
+  if ((await readOpen()).found) {
+    throw new PlatformError('CTX_NOT_READY', '简历面板已经开着,不知是谁开的,不动', 'afterRecovery')
+  }
+  const plan = await selectorClickPlan(tabId, RESUME_OPEN_BUTTON_SELECTOR, -1, RESUME_OPEN_BUTTON_TEXT, '在线简历钮')
+  ctx.checkpoint()
+  await paceBeforeClick()
+  await osClickOnce(tabId, ctx, plan, '打开在线简历')
+  const openedAt = Date.now()
+  const read = (): Promise<DomCaptureMetrics> =>
+    runInPage(BOSS_DOM, tabId, domReadBossCaptureMetrics, [RESUME_SCROLL_CONTAINER, RESUME_MODAL_SELECTOR, ''])
+  // 面板出来、抽屉量到高度(iframe 渲染完 canvas 才撑起来)才算开好。
+  const opened = await pollUntil(ctx, read, (m) => m.found && m.boundOk && m.scrollHeight > m.clientH + 1)
+  if (!opened.value.found || !opened.value.boundOk) {
+    await closeBossResumePanelBestEffort(tabId, ctx, openedAt, trace)
+    throw new PlatformError('ELEMENT_UNRESOLVED', '在线简历面板没有打开', 'afterRecovery', undefined, 'possible')
+  }
+  let stitched: BossStitchCanvas
+  try {
+    stitched = await stitchBossPanel(tab, ctx, RESUME_SCROLL_CONTAINER, '简历面板', read, async () => {
+      const metrics = await read()
+      if (metrics.scrollTop > 1) {
+        const toTop = await scrollBossContainer(tabId, ctx, RESUME_SCROLL_CONTAINER, '简历面板', 'up', null)
+        trace.push(`锚顶 ${toTop.outcome}`)
+      }
+    }, { anchor: 'top', kind: 'resume', label: '简历截图', startedAt, softBudgetMs: CAPTURE_RESUME_SOFT_BUDGET_MS }, trace)
+  } catch (error) {
+    await closeBossResumePanelBestEffort(tabId, ctx, openedAt, trace)
+    throw error
+  }
+  await closeBossResumePanelBestEffort(tabId, ctx, openedAt, trace)
+  reportHandLog('warn', 'resumeCaptureStitched',
+    `BOSS 简历截图拼接 ${stitched.frames} 帧 ${stitched.width}x${stitched.height} truncated=${stitched.truncated} 用时 ${Date.now() - startedAt}ms`,
+    trace.join(' | ').slice(0, 700))
+  const data = await uploadBossCapture(stitched.canvas, stitched.truncated)
+  if (validatePrimitiveData(PrimitiveName.CandidateCaptureResumeScreenshot, 1, data).length !== 0) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '截图结果不符合当前契约', 'manualOnly')
+  }
+  await verifiedBossChatTab(fingerprint)
+  ctx.progress('简历截图完成', 100)
+  return data
 }
 
 
@@ -6643,6 +6952,8 @@ export const bossTestHooks = Object.freeze({
   bossHistoryLoadOutcome,
   describeBossThreadAlignment,
   bossCaptureScrollRequest,
+  bossCaptureCovered,
+  bossCaptureRemaining,
   domReadBossOverlays,
   domHitTestOverlayCloser,
   domHitTestIndexed,
@@ -6748,6 +7059,8 @@ export const bossAdapter = {
   // 场景三的一条(2026-09-04 出口):邀面卡,表单驱动的多步 OS 点击。
   sendInviteCard: ({ args, guards, ctx, fingerprint }) => sendBossInviteCard(args, guards, ctx, fingerprint),
   captureThreadScreenshot: ({ args, ctx, fingerprint }) => captureBossThreadScreenshot(args, ctx, fingerprint),
+  // 简历长图(2026-09-09):OS 点「在线简历」、顶部锚定滚拼外层抽屉、点「×」关。
+  captureResumeScreenshot: ({ args, ctx, fingerprint }) => captureBossResumeScreenshot(args, ctx, fingerprint),
   // 建档后的简历补采(2026-09-03 甲方选 B):摘要级、零点击,见 readBossResume。
   readResume: ({ args, ctx, fingerprint }) => readBossResume(args, ctx, fingerprint),
   // 第二刀的七条(2026-09-05 开工,出口 docs/boss/第二刀出口-采集与打招呼-2026-09-04.md):推荐页采集 + 打招呼。
