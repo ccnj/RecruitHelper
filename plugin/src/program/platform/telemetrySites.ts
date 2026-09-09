@@ -96,7 +96,10 @@ const AEGIS_ENDPOINT = /\/actionLog\/fe\/ie\/common\.json/
 /** 行为通道里的良性码。 */
 // 470000 是 C 端每次点击都发的基线码(action `web-event-click-geek`),与 B 端 click 的
 // p2=0 同位,不是命中 —— 2026-09-02 三次导出里它每次回首页都在。
-const ROUTINE_BEHAVIOR = new Set(['0', '30004', '30005', '30006', '470000'])
+// 30001/30002/30003 与 30004/30005 同族:zpAegis `getInputCode` 对每次编辑器输入打的分类
+// (EMOJI/PHRASE/PASTE/TYPING/ENTER),WASM 侧只把 TYPING/ENTER 滤掉、其余累进 input_count,
+// 都不是探测命中。2026-09-09 本机 10:08 真人手打一句带表情的话,30001 被面板报成「新东西」。
+const ROUTINE_BEHAVIOR = new Set(['0', '30001', '30002', '30003', '30004', '30005', '30006', '470000'])
 
 /** 设备指纹上报本身——每次页面加载无条件发,跟检测到什么无关。 */
 const FINGERPRINT = new Set(['800001', '800003', '800009'])
@@ -146,6 +149,11 @@ export interface BossCodeMeaning {
  */
 const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code' | 'known'>> = {
   '0': { label: '无异常' },
+  // 输入分类一族(sec-entry `EMOJI=30001, PHRASE=30002, PASTE=30003, TYPING=30004, ENTER=30005`)。
+  // 点表情按钮那一下走的是 click 的 p3(`CLICK_EMOJI=20010`),不经 p2 判读路径,不在本表。
+  '30001': { label: 'EMOJI·插入表情分类(2026-09-09 本机真人手打命中)' },
+  '30002': { label: 'PHRASE·常用语分类;本机未见' },
+  '30003': { label: 'PASTE·粘贴分类;本机未见' },
   '30004': { label: 'TYPING·正常打字分类' },
   '30005': { label: 'ENTER·回车分类' },
   '30006': { label: 'SDK 版本自报' },

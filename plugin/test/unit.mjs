@@ -15935,6 +15935,19 @@ test('BOSS 判读:指纹上报算例行,其余码算命中,全局名差集单独
   })
   assert.deepEqual(geek.routine.map((r) => r.code), ['470000'])
   assert.deepEqual(geek.hits.map((h) => h.code), ['470001'], 'isTrusted 为假那条仍是命中')
+  // 输入分类一族与打字/回车同源,不是命中。2026-09-09 本机真人手打一句带表情的话,
+  // 30001(EMOJI)被面板报成「新东西」,补进例行。
+  const inputKinds = classifyBossEntry(aegis, {
+    items: [
+      { action: 'web-event-input', p2: '30001' },
+      { action: 'web-event-input', p2: '30002' },
+      { action: 'web-event-input', p2: '30003' },
+      { action: 'web-event-input', p2: '30004' },
+    ],
+  })
+  assert.deepEqual(inputKinds.routine.map((r) => r.code), ['30001', '30002', '30003', '30004'])
+  assert.deepEqual(inputKinds.hits, [])
+  assert.match(bossCodeMeaning('30001').label, /EMOJI/)
 })
 
 test('BOSS 高风险码:补进码表不等于从结论区消失,「踩雷」那行只看 severe', () => {
