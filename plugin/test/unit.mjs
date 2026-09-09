@@ -16734,6 +16734,19 @@ test('BOSS 对不齐的判定现场只带方向、种类与 hash 前 8 位,不�
   assert.equal(describeBossThreadAlignment(long, []).split(',').length, 6, '页面尾只带最后 6 行')
 })
 
+test('BOSS 截图逐帧上滚的要求量:步长减一格余量,实际位移至多多走一格也不越过带高;剩余不足按剩余', () => {
+  const { bossCaptureScrollRequest } = bossTestHooks
+  // 2026-09-09 真机:简历面板展开时露出带 170px;收起后约 450px
+  assert.equal(bossCaptureScrollRequest(450, 2000), 320)
+  assert.ok(320 + 120 <= 450, '要求量加一格不越过带高')
+  assert.equal(bossCaptureScrollRequest(170, 2000), 40)
+  assert.ok(40 + 120 <= 170)
+  assert.equal(bossCaptureScrollRequest(450, 100), 100, '剩余不足一步只要剩余')
+  assert.equal(bossCaptureScrollRequest(100, 2000), 100, '带矮于一格加余量:只能按带高要,越过与否由回读裁')
+  assert.equal(bossCaptureScrollRequest(1, 1), 1)
+  assert.equal(bossCaptureScrollRequest(450, 0), 1, '下限 1,不给 0 让滚轮空转')
+})
+
 test('BOSS 列表行摘要:引用与候选人引用取自内存 id,职位名空则省略,秒级 lastTS 转毫秒', () => {
   const { summarizeBossListRow } = bossTestHooks
   const row = { uid: 650166511, friendSource: 0, name: ' 宋先生 ', jobName: '销售经理', newMsgCount: 1, lastTS: 1788402198000, lastText: '您好,对贵公司很感兴趣', lastIsSelf: false }
