@@ -16773,6 +16773,23 @@ test('BOSS 拼接到头判定:底部锚定带顶碰起点或滚到 0,顶部锚�
   assert.equal(bossCaptureRemaining('bottom', { scrollTop: 100, clientH: 280, bandOffset: 50, bandHeight: 230, totalScroll: 1946, startTop: 0, coveredCssH: 1946 }), 150)
 })
 
+test('BOSS 拼接帧预算:按每帧真实前进量(滚轮要求量)算帧数,不按带高;画布高同口径', () => {
+  const { bossCaptureFrameBudget } = bossTestHooks
+  // 2026-09-09 第二场彩排:带 334、内容 1946,每帧要 200 走 240;旧算法 ceil(1946/334)=6 帧就停
+  const chat = bossCaptureFrameBudget(334, 1946, 16, 2)
+  assert.equal(chat.advanceCss, 200)
+  assert.equal(chat.budget, 10, '1 + ceil((1946-334)/200)')
+  assert.equal(chat.coveredCssH, 1946)
+  // 简历:带 662、内容 2906,要 500 走 600 → 预算 6,实拍 5 帧到底
+  const resume = bossCaptureFrameBudget(662, 2906, 16, 2)
+  assert.deepEqual([resume.advanceCss, resume.budget, resume.coveredCssH], [500, 6, 2906])
+  // 帧数封顶时画布只到能拼到的高度
+  const capped = bossCaptureFrameBudget(280, 5000, 4, 2)
+  assert.deepEqual([capped.budget, capped.coveredCssH], [4, 280 + 3 * 200])
+  // 一屏装下:1 帧
+  assert.deepEqual(bossCaptureFrameBudget(662, 500, 16, 2).budget, 1)
+})
+
 test('BOSS 列表行摘要:引用与候选人引用取自内存 id,职位名空则省略,秒级 lastTS 转毫秒', () => {
   const { summarizeBossListRow } = bossTestHooks
   const row = { uid: 650166511, friendSource: 0, name: ' 宋先生 ', jobName: '销售经理', newMsgCount: 1, lastTS: 1788402198000, lastText: '您好,对贵公司很感兴趣', lastIsSelf: false }
