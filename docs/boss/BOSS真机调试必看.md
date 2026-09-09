@@ -62,7 +62,7 @@ curl -s -X POST -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/
 '{"platform":"boss","accountRef":"<accountRef>","selector":".user-list","direction":"down","distancePx":600}' \
 http://127.0.0.1:17872/admin/osscroll
 ```
-`scrolled` 滚够；`edge` 到顶/到底或没有可滚内容；`stuck` 纹丝不动或方向反了（如实报，不换方向）。已钉的容器：会话列表 `.user-list`，消息区 `.chat-message-list`（到顶带 `is-to-top` 类）。Mac 一格 120px。
+`scrolled` 滚够；`edge` 到顶/到底或没有可滚内容；`stuck` 纹丝不动或方向反了（如实报，不换方向）。已钉的容器：会话列表 `.user-list`，消息区 `.conversation-message`（2026-09-09 更正：它才是滚动容器；`.chat-message-list` 是内容层不滚，到顶时带 `is-to-top` 类）。Mac 一格 120px。
 
 **osType：把一句中文打进输入框然后停手。** `POST /admin/ostype {"platform","accountRef","text"}`，不点发送；框里已有内容先以真实按键全选删除再打。
 

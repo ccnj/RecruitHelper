@@ -16707,6 +16707,33 @@ test('BOSS 锚尾匹配:唯一命中才给起点,零命中与重复命中都不�
   assert.deepEqual(matchAnchorTail(messages.slice(0, 1), [{ direction: 'in', contentHash: h('a') }, { direction: 'out', contentHash: h('b') }]), { count: 0, start: null }, '锚比窗口还长不算命中')
 })
 
+test('BOSS 历史翻页收场:数组长了是拉到上一页,没长但 isToTop 翻真是到顶,都没有是没读完', () => {
+  const { bossHistoryLoadOutcome } = bossTestHooks
+  const rows = (n) => Array.from({ length: n }, (_, i) => ({ mid: String(i) }))
+  // 2026-09-09 真机:第 1 页 19 条 isToTop=false,滚到顶拉回 3 条变 22 条、isToTop 翻 true
+  assert.equal(bossHistoryLoadOutcome({ rows: rows(19) }, { rows: rows(22), isToTop: true }), 'grew')
+  assert.equal(bossHistoryLoadOutcome({ rows: rows(19) }, { rows: rows(22), isToTop: false }), 'grew')
+  assert.equal(bossHistoryLoadOutcome({ rows: rows(22) }, { rows: rows(22), isToTop: true }), 'top', '页面自己翻真才算到顶')
+  assert.equal(bossHistoryLoadOutcome({ rows: rows(19) }, { rows: rows(19), isToTop: false }), 'stalled', '网卡:没长也没翻真,绝不当到顶')
+  assert.equal(bossHistoryLoadOutcome({ rows: rows(5) }, { rows: rows(5), isToTop: false }), 'stalled', '少于一页也不按条数猜到顶')
+})
+
+test('BOSS 对不齐的判定现场只带方向、种类与 hash 前 8 位,不带正文', () => {
+  const { describeBossThreadAlignment } = bossTestHooks
+  const h = (c) => c.repeat(64)
+  const projected = [
+    { direction: 'out', kind: 'card', contentHash: h('5'), text: '请求交换微信已发送' },
+    { direction: 'in', kind: 'text', contentHash: h('3'), text: '好的' },
+    { direction: 'out', kind: 'text', contentHash: h('b'), text: '好了～晚点加你' },
+  ]
+  const anchors = [{ direction: 'out', contentHash: h('5') }, { direction: 'in', contentHash: h('3') }]
+  const detail = describeBossThreadAlignment(projected, anchors)
+  assert.equal(detail, `锚尾=[out:${'5'.repeat(8)},in:${'3'.repeat(8)}] 页面尾=[out:card:${'5'.repeat(8)},in:text:${'3'.repeat(8)},out:text:${'b'.repeat(8)}]`)
+  assert.ok(!detail.includes('好的') && !detail.includes('微信'), '判定现场不得带正文')
+  const long = Array.from({ length: 10 }, (_, i) => ({ direction: 'in', kind: 'text', contentHash: h(String(i)) }))
+  assert.equal(describeBossThreadAlignment(long, []).split(',').length, 6, '页面尾只带最后 6 行')
+})
+
 test('BOSS 列表行摘要:引用与候选人引用取自内存 id,职位名空则省略,秒级 lastTS 转毫秒', () => {
   const { summarizeBossListRow } = bossTestHooks
   const row = { uid: 650166511, friendSource: 0, name: ' 宋先生 ', jobName: '销售经理', newMsgCount: 1, lastTS: 1788402198000, lastText: '您好,对贵公司很感兴趣', lastIsSelf: false }

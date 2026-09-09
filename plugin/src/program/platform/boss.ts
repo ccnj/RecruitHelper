@@ -795,6 +795,18 @@ async function bossOsType(
 const RESULT_DATA_BUDGET = 60 * 1024
 const LIST_WINDOW_MAX = 32
 const THREAD_WINDOW_MAX = 64
+/**
+ * 消息面板的滚动容器(2026-09-09 真机,平台事实 §十八):message-list 组件 ref scrollContainer;
+ * `.chat-message-list` 只是内容层(overflow visible,不滚),到顶时它带 `is-to-top` 类。
+ */
+const THREAD_SCROLL_CONTAINER = '.conversation-message'
+/** 一条 readThread 里至多滚几次让页面拉上一页;每页 20 条,64 条窗口之外再翻也交不出去。 */
+const THREAD_HISTORY_PAGE_MAX = 6
+/**
+ * 滚到顶后等页面自己拉历史的上限。等满仍没长、isToTop 也没翻真(网卡、接口失败),按本轮没读完报,
+ * 绝不判成到顶(2026-09-09 甲方:网卡不得当到顶;脑侧不会因为页面少了行去删账本,所以少读只是晚一轮)。
+ */
+const THREAD_HISTORY_LOAD_WAIT_MS = 10_000
 /** 条件等待上限(AGENTS「平台交互节奏与条件等待」2026-08-26 放宽到 20 秒,是封顶不是必须用满)。 */
 const READY_WAIT_MS = 20_000
 /** 全选删除之后等输入框回读为空的封顶。三次按键之后页面一帧就该空,给 5 秒是宽裕。 */
@@ -1390,7 +1402,7 @@ export interface BossRawMessage {
 }
 
 type BossThreadRead =
-  | { status: 'ready'; rows: BossRawMessage[]; isToTop: boolean; peerName: string }
+  | { status: 'ready'; rows: BossRawMessage[]; isToTop: boolean; loading: boolean; peerName: string }
   | { status: 'missing' }
   | { status: 'binding_mismatch'; detail: string }
   | { status: 'identity_missing' }
@@ -1494,6 +1506,8 @@ function mainReadBossThread(uid: number, friendSource: number): BossThreadRead {
     status: 'ready',
     rows,
     isToTop: holder.isToTop === true,
+    // 组件自有 data:页面正在拉历史时为 true(2026-09-09 真机)。
+    loading: holder.loading === true,
     peerName: String(bound.name ?? bound.geekName ?? ''),
   }
 }
@@ -2462,13 +2476,16 @@ async function readBossThreadRows(
     () => runInPage(BOSS_INJECT, tab.id!, mainReadBossThread, [uid, friendSource]),
     bossThreadReadSettled)
   const read = settled.value
-  if (read.status === 'ready') {
-    if (!settled.satisfied) {
-      reportHandLog('warn', 'threadListEmptyAfterWait',
-        `BOSS 消息数组等到封顶仍为空,照实交出 0 行(isToTop=${read.isToTop})`)
-    }
-    return read
+  if (read.status === 'ready' && !settled.satisfied) {
+    reportHandLog('warn', 'threadListEmptyAfterWait',
+      `BOSS 消息数组等到封顶仍为空,照实交出 0 行(isToTop=${read.isToTop})`)
   }
+  return settleBossThreadRead(read)
+}
+
+/** 非 ready 的读法只有三种收场,首读与翻页后的重读共用。 */
+function settleBossThreadRead(read: BossThreadRead): Extract<BossThreadRead, { status: 'ready' }> {
+  if (read.status === 'ready') return read
   if (read.status === 'identity_missing') {
     throw new PlatformError('CTX_NOT_READY', '页面上读不到我方账号身份,无法判定消息方向', 'afterRecovery', 'identityUnverified')
   }
@@ -2476,6 +2493,73 @@ async function readBossThreadRows(
     throw new PlatformError('CTX_LOST_DURING_EXEC', `消息列表绑定的不是目标会话(${read.detail})`, 'afterRecovery')
   }
   throw new PlatformError('ELEMENT_UNRESOLVED', '目标会话的消息列表尚未就绪', 'afterRecovery')
+}
+
+function orderBossRows(rows: readonly BossRawMessage[]): BossRawMessage[] {
+  return [...rows].sort((a, b) => (Number(a.mid) < Number(b.mid) ? -1 : Number(a.mid) > Number(b.mid) ? 1 : 0))
+}
+
+export type BossHistoryLoadOutcome = 'grew' | 'top' | 'stalled'
+
+/**
+ * 滚到顶、等过一轮之后页面的收场(纯函数,单测钉住):数组长了就是拉到了上一页;没长但 isToTop 翻真
+ * 就是到顶;都没有就是没读完(网卡、接口失败、或页面根本没触发)。到顶只认页面自己的标志翻转与
+ * 「等满没长」的组合,不按「返回少于一页」猜——2026-09-09 真机:第 1 页 19 条 isToTop 仍是 false,
+ * 第 2 页拉回 3 条才翻真。
+ */
+export function bossHistoryLoadOutcome(
+  before: { rows: readonly unknown[] }, after: { rows: readonly unknown[]; isToTop: boolean },
+): BossHistoryLoadOutcome {
+  if (after.rows.length > before.rows.length) return 'grew'
+  if (after.isToTop) return 'top'
+  return 'stalled'
+}
+
+/** 对不齐时的判定现场(留痕条款):锚尾与页面尾各是什么,只带方向、种类与 hash 前 8 位,不带正文。 */
+export function describeBossThreadAlignment(
+  projected: ReadonlyArray<{ direction: string; kind: string; contentHash: string }>,
+  anchors: ReadonlyArray<MessageAnchor>,
+): string {
+  const tail = projected.slice(-6).map((m) => `${m.direction}:${m.kind}:${m.contentHash.slice(0, 8)}`).join(',')
+  const wanted = anchors.map((a) => `${a.direction}:${a.contentHash.slice(0, 8)}`).join(',')
+  return `锚尾=[${wanted}] 页面尾=[${tail}]`
+}
+
+/**
+ * 把消息面板滚到顶,让页面自己拉上一页(经 OS 滚轮,与会话列表、推荐列表同一内核)。容器没有可滚
+ * 内容时不动、如实返回 none:页面对装不满一屏的会话本该自己补拉,滚不出来只能按没读完报。
+ */
+async function scrollBossThreadToTop(
+  tabId: number, ctx: PrimitiveContext,
+): Promise<OsScrollResult | { outcome: 'none'; detail: string }> {
+  const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [THREAD_SCROLL_CONTAINER, -1])
+  if (located.status !== 'ok') {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `消息面板定位失败(${located.status}):${located.detail}`, 'afterRecovery', undefined, 'possible')
+  }
+  const metrics = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [THREAD_SCROLL_CONTAINER, located.index])
+  if (!metrics.found || metrics.scrollHeight <= metrics.clientHeight + 1) {
+    return { outcome: 'none', detail: `没有可滚内容(scrollHeight ${metrics.scrollHeight} ≤ clientHeight ${metrics.clientHeight})` }
+  }
+  const target: ScrollTarget = {
+    label: `消息面板 ${located.signature}`,
+    rect: located.clip,
+    hitTest: (x, y) => runInPage(BOSS_DOM, tabId, domHitTestIndexed, [THREAD_SCROLL_CONTAINER, located.index, x, y]),
+    readMetrics: async () => {
+      const m = await runInPage(BOSS_DOM, tabId, domReadScrollMetrics, [THREAD_SCROLL_CONTAINER, located.index])
+      return m.found ? { scrollTop: m.scrollTop, scrollHeight: m.scrollHeight, clientHeight: m.clientHeight } : null
+    },
+  }
+  ctx.checkpoint()
+  await paceBeforeClick()
+  // 多要 200px:到顶由 edge 收场,页面拉完上一页会把 scrollTop 顶回去保住视口,下一轮再滚一次。
+  const result = await runOsScroll(BOSS_INJECT, tabId, ctx, target, 'up', metrics.scrollTop + 200)
+  if (result.outcome === 'handServiceUnavailable') {
+    throw new PlatformError('CTX_NOT_READY', `手服务不可用,消息面板未滚动(${result.detail ?? ''})`, 'afterRecovery', 'pageBroken')
+  }
+  if (result.outcome === 'refusedByGate' || result.outcome === 'stuck') {
+    throw new PlatformError('ELEMENT_UNRESOLVED', `消息面板滚动失败(${result.outcome}):${(result.detail ?? '').slice(0, 200)}`, 'afterRecovery', undefined, 'possible')
+  }
+  return result
 }
 
 async function assertBossCurrent(tab: chrome.tabs.Tab, conversationRef: string, sideEffect: 'none' | 'possible'): Promise<void> {
@@ -2516,13 +2600,51 @@ async function readBossThread(
     platformReadStarted = true
   }
   ctx.progress('读取 BOSS 会话消息', 20)
-  const read = await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)
+  let read = await readBossThreadRows(tab, ctx, parsed.uid, parsed.friendSource)
   if (requireCurrent) await assertBossCurrent(tab, args.conversationRef, 'possible')
-  const ordered = [...read.rows].sort((a, b) => (Number(a.mid) < Number(b.mid) ? -1 : Number(a.mid) > Number(b.mid) ? 1 : 0))
-  const truncated = ordered.length > maxMessages
-  const window = truncated ? ordered.slice(ordered.length - maxMessages) : ordered
-  const projected = await projectBossThread(window)
-  const anchor = matchAnchorTail(projected, anchors)
+  let ordered = orderBossRows(read.rows)
+  let truncated = ordered.length > maxMessages
+  let window = truncated ? ordered.slice(ordered.length - maxMessages) : ordered
+  let projected = await projectBossThread(window)
+  let anchor = matchAnchorTail(projected, anchors)
+  // 历史翻页(2026-09-09):锚尾对不上、页面也没说到顶,就把面板滚到顶让页面自己拉上一页(智联往前翻
+  // 历史的同款语义,只是翻页发生在手内、一条命令交完),直到锚尾对上或 isToTop 翻真。首屏的
+  // isToTop=false 只说明第 2 页没拉过,不说明还有历史;等满没长且没翻真就是没读完,不伪造到顶。
+  const trace: string[] = []
+  let pages = 0
+  while (anchor.count === 0 && !(read.isToTop && !truncated)) {
+    if (pages >= THREAD_HISTORY_PAGE_MAX) {
+      trace.push(`翻页到上限 ${THREAD_HISTORY_PAGE_MAX}`)
+      break
+    }
+    const before = read
+    const scrolled = await scrollBossThreadToTop(tab.id!, ctx)
+    if (scrolled.outcome === 'none') {
+      trace.push(`滚#${pages + 1} ${scrolled.detail}`)
+      break
+    }
+    trace.push(`滚#${pages + 1} ${scrolled.outcome}(${scrolled.scrollTopBefore}→${scrolled.scrollTopAfter})`)
+    ctx.progress(`等页面拉上一页(第 ${pages + 1} 次)`, 40)
+    const settled = await pollUntil(ctx,
+      () => runInPage(BOSS_INJECT, tab.id!, mainReadBossThread, [parsed.uid, parsed.friendSource]),
+      (r) => r.status === 'ready' && !r.loading && (r.rows.length > before.rows.length || r.isToTop),
+      THREAD_HISTORY_LOAD_WAIT_MS)
+    read = settleBossThreadRead(settled.value)
+    pages += 1
+    const outcome = bossHistoryLoadOutcome(before, read)
+    trace.push(`${outcome}(${before.rows.length}→${read.rows.length} isToTop=${read.isToTop} loading=${read.loading})`)
+    if (requireCurrent) await assertBossCurrent(tab, args.conversationRef, 'possible')
+    ordered = orderBossRows(read.rows)
+    truncated = ordered.length > maxMessages
+    window = truncated ? ordered.slice(ordered.length - maxMessages) : ordered
+    projected = await projectBossThread(window)
+    anchor = matchAnchorTail(projected, anchors)
+    if (outcome === 'stalled') break
+  }
+  if (pages > 0) {
+    reportHandLog('warn', 'threadHistoryPaged',
+      `BOSS 会话历史翻页 ${pages} 次:${trace.join(' | ')};锚尾${anchor.count > 0 ? '已对上' : '未对上'} isToTop=${read.isToTop}`)
+  }
   const selected = anchor.start !== null ? projected.slice(anchor.start) : projected
   const messages: ThreadMessage[] = selected.map((message, idx) => ({ ...message, idx }))
   for (const message of messages) {
@@ -2534,10 +2656,10 @@ async function readBossThread(
   const anchorMatched = anchor.count > 0
   const complete = reachedTop || anchorMatched
   if (!complete) {
-    // 更老的历史要滚动消息面板才会加载,BOSS 上尚无滚轮注入;不伪造 complete、不造游标。
-    throw new PlatformError('ELEMENT_UNRESOLVED',
-      `已加载的 ${ordered.length} 条消息既未到顶(isToTop=${read.isToTop})也未对齐账本锚尾,BOSS 尚无滚动加载`,
-      'afterRecovery', undefined, 'possible')
+    // 翻不动、翻满、或等满没长:不伪造 complete、不造游标;判定现场全部带出(留痕条款)。
+    const why = `已加载 ${ordered.length} 条既未到顶(isToTop=${read.isToTop} loading=${read.loading} truncated=${truncated})也未对齐账本锚尾;` +
+      `翻页 ${pages} 次[${trace.join(' | ')}];${describeBossThreadAlignment(projected, anchors)}`
+    throw new PlatformError('ELEMENT_UNRESOLVED', Array.from(why).slice(0, 480).join(''), 'afterRecovery', undefined, 'possible')
   }
   const peer: PeerSummary = {
     displayName: normalizeBossMessageText(read.peerName) || '未命名',
@@ -6270,6 +6392,8 @@ async function readBossGreetingOutcome(
 /** 只为 Node 单测导出纯函数与页面函数;生产 bundle 无引用时被 tree-shake。 */
 export const bossTestHooks = Object.freeze({
   bossThreadReadSettled,
+  bossHistoryLoadOutcome,
+  describeBossThreadAlignment,
   domReadBossOverlays,
   domHitTestOverlayCloser,
   domHitTestIndexed,
