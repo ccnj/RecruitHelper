@@ -19,6 +19,7 @@ import { tabNavigationGeneration } from '../../base/tabGeneration'
 import { composeClearKeys, isHandServiceDown, osClickContractData, osProbeContractData, playKeys, playTypePlan, readHandOS, runOsProbe, seedFrom } from './osinput'
 import { planType } from '../osengine/plan'
 import { osScrollContractData, runOsScroll } from './osscroll'
+import { CAPTURE_FRAME_QUALITY, CAPTURE_MAX_SIDE, encodeStitchedJpeg } from './capturestitch'
 import type { OsScrollResult, ScrollTarget } from './osscroll'
 import type { ClickObservation, ClickPlan, RetreatPlan, TypePlayResult } from './osinput'
 import { PlatformError } from './types'
@@ -830,7 +831,6 @@ const SUB_TAB_SELECTOR = '.chat-message-filter-left span'
 const SUB_TAB_ACTIVE_CLASS = 'active'
 const JOB_LABEL_SELECTOR = '.chat-select-job'
 const SEND_BUTTON_SELECTOR = '.submit-content .submit'
-const CHAT_LIST_SELECTOR = '.chat-message-list'
 const LABEL_ALL = '全部'
 const SUB_TAB_ALL = '全部'
 const SUB_TAB_UNREAD = '未读'
@@ -1227,37 +1227,6 @@ function domReadBossSendButton(selector: string): { found: boolean; count: numbe
   if (!el || nodes.length !== 1) return { found: false, count: nodes.length, text: '', rect: { x: 0, y: 0, w: 0, h: 0 } }
   const r = el.getBoundingClientRect()
   return { found: true, count: 1, text: (el.textContent ?? '').trim(), rect: { x: r.x, y: r.y, w: r.width, h: r.height } }
-}
-
-interface DomChatRect {
-  found: boolean
-  rect: DomRect4
-  scrollHeight: number
-  clientHeight: number
-  dpr: number
-  innerW: number
-  innerH: number
-  visible: boolean
-}
-
-function domReadBossChatRect(selector: string): DomChatRect {
-  const el = document.querySelector<HTMLElement>(selector)
-  if (!el) {
-    return { found: false, rect: { x: 0, y: 0, w: 0, h: 0 }, scrollHeight: 0, clientHeight: 0,
-      dpr: window.devicePixelRatio || 1, innerW: window.innerWidth, innerH: window.innerHeight,
-      visible: document.visibilityState === 'visible' }
-  }
-  const r = el.getBoundingClientRect()
-  return {
-    found: true,
-    rect: { x: r.x, y: r.y, w: r.width, h: r.height },
-    scrollHeight: el.scrollHeight,
-    clientHeight: el.clientHeight,
-    dpr: window.devicePixelRatio || 1,
-    innerW: window.innerWidth,
-    innerH: window.innerHeight,
-    visible: document.visibilityState === 'visible',
-  }
 }
 
 // ── MAIN world:内存读 ────────────────────────────────────────────────────────
@@ -2526,11 +2495,12 @@ export function describeBossThreadAlignment(
 }
 
 /**
- * 把消息面板滚到顶,让页面自己拉上一页(经 OS 滚轮,与会话列表、推荐列表同一内核)。容器没有可滚
- * 内容时不动、如实返回 none:页面对装不满一屏的会话本该自己补拉,滚不出来只能按没读完报。
+ * 把消息面板朝一个方向滚指定像素(经 OS 滚轮,与会话列表、推荐列表同一内核)。容器没有可滚
+ * 内容时不动、如实返回 none。distancePx 给 null 表示「滚到边」:上就是 scrollTop+200,下就是
+ * 整个 scrollHeight,由 edge 收场。
  */
-async function scrollBossThreadToTop(
-  tabId: number, ctx: PrimitiveContext,
+async function scrollBossThreadPanel(
+  tabId: number, ctx: PrimitiveContext, direction: 'up' | 'down', distancePx: number | null,
 ): Promise<OsScrollResult | { outcome: 'none'; detail: string }> {
   const located = await runInPage(BOSS_DOM, tabId, domLocateBySelector, [THREAD_SCROLL_CONTAINER, -1])
   if (located.status !== 'ok') {
@@ -2551,8 +2521,9 @@ async function scrollBossThreadToTop(
   }
   ctx.checkpoint()
   await paceBeforeClick()
-  // 多要 200px:到顶由 edge 收场,页面拉完上一页会把 scrollTop 顶回去保住视口,下一轮再滚一次。
-  const result = await runOsScroll(BOSS_INJECT, tabId, ctx, target, 'up', metrics.scrollTop + 200)
+  // 滚到边时多要 200px:由 edge 收场;页面拉完上一页会把 scrollTop 顶回去保住视口,下一轮再滚一次。
+  const distance = distancePx ?? (direction === 'up' ? metrics.scrollTop + 200 : metrics.scrollHeight + 200)
+  const result = await runOsScroll(BOSS_INJECT, tabId, ctx, target, direction, Math.max(1, distance))
   if (result.outcome === 'handServiceUnavailable') {
     throw new PlatformError('CTX_NOT_READY', `手服务不可用,消息面板未滚动(${result.detail ?? ''})`, 'afterRecovery', 'pageBroken')
   }
@@ -2618,7 +2589,7 @@ async function readBossThread(
       break
     }
     const before = read
-    const scrolled = await scrollBossThreadToTop(tab.id!, ctx)
+    const scrolled = await scrollBossThreadPanel(tab.id!, ctx, 'up', null)
     if (scrolled.outcome === 'none') {
       trace.push(`滚#${pages + 1} ${scrolled.detail}`)
       break
@@ -4451,9 +4422,275 @@ async function decodeFrame(dataUrl: string): Promise<ImageBitmap> {
   return await createImageBitmap(await response.blob())
 }
 
+/** 一次拼接至多几帧(智联同值);再多的历史 truncated=true 如实带出。 */
+const CAPTURE_MAX_FRAMES = 16
 /**
- * 单帧截图:只拍当前可见的聊天区,不滚动。BOSS 上程序化滚动会产生没有滚轮事件的
- * scroll(留痕形态未验),滚轮注入尚未实现;历史超出一屏时 truncated=true 如实带出。
+ * 拼接的软预算:契约 execBudgetMs=60s,OS 滚轮一帧 2 秒上下(节奏闸 ≥1s + 簇间停顿 + 截屏配额),
+ * 超过这个时点不再往上翻,已拼的部分照发、truncated=true。
+ */
+const CAPTURE_SOFT_BUDGET_MS = 42_000
+/** 一格滚轮的像素上限(Mac 120,Windows 100;runOsScroll 首簇后按实测自适应),只用来给步长留余量。 */
+const CAPTURE_WHEEL_NOTCH_PX = 120
+
+/** 页面一步的量测快照(isolated world,纯数值,DOM 细节不出页面)。 */
+interface DomCaptureMetrics {
+  found: boolean
+  /** 目标行仍是当前选中行——会话没被切走。 */
+  selectedOk: boolean
+  visible: boolean
+  clientH: number
+  scrollHeight: number
+  scrollTop: number
+  dpr: number
+  innerW: number
+  innerH: number
+  rectTop: number
+  rectBottom: number
+  rectLeft: number
+  rectRight: number
+  visibleTop: number
+  visibleBottom: number
+  visibleProbe: 'ok' | 'fallback' | 'unavailable'
+}
+
+/**
+ * 露出带探测移植自智联 mainChatCaptureStep:自容器裁剪矩形底边向上、顶边向下,用 elementFromPoint
+ * 找命中点仍落在容器内的最外一行;视口外、祖先裁掉、悬浮元素(BOSS:「邀约对方面试」浮钮、
+ * 「帮你问牛人」条)盖住的部分都扣掉——它才是一屏真正能截多少。必须自包含:序列化进页面。
+ */
+function domReadBossCaptureMetrics(containerSelector: string, rowSelector: string, selectedClass: string): DomCaptureMetrics {
+  const el = document.querySelector<HTMLElement>(containerSelector)
+  const rows = document.querySelectorAll(rowSelector)
+  const selectedOk = rows.length === 1 && rows[0]!.classList.contains(selectedClass)
+  const base = {
+    selectedOk, visible: document.visibilityState === 'visible', dpr: window.devicePixelRatio || 1,
+    innerW: window.innerWidth, innerH: window.innerHeight,
+  }
+  if (!el) {
+    return { found: false, ...base, clientH: 0, scrollHeight: 0, scrollTop: 0, rectTop: 0, rectBottom: 0, rectLeft: 0, rectRight: 0,
+      visibleTop: 0, visibleBottom: 0, visibleProbe: 'unavailable' }
+  }
+  const rect = el.getBoundingClientRect()
+  const clipTop = Math.max(0, rect.top)
+  const clipBottom = Math.min(window.innerHeight, rect.bottom)
+  const clipLeft = Math.max(0, rect.left)
+  const clipRight = Math.min(window.innerWidth, rect.right)
+  let band: { top: number; bottom: number; probe: DomCaptureMetrics['visibleProbe'] } = { top: clipTop, bottom: clipBottom, probe: 'unavailable' }
+  if (clipBottom - clipTop >= 1 && clipRight - clipLeft >= 1 && typeof document.elementFromPoint === 'function') {
+    const x = Math.min(window.innerWidth - 1, Math.floor((clipLeft + clipRight) / 2))
+    const inside = (y: number): boolean => {
+      const hit = document.elementFromPoint(x, y)
+      return hit !== null && (hit === el || el.contains(hit))
+    }
+    const limit = Math.max(1, Math.floor((clipBottom - clipTop) * 0.4))
+    let bottom = Math.ceil(clipBottom) - 1
+    let top = Math.floor(clipTop)
+    let ok = true
+    for (let n = 0; !inside(bottom); n += 1) {
+      bottom -= 1
+      if (n >= limit || bottom <= clipTop) { ok = false; break }
+    }
+    if (ok) {
+      for (let n = 0; !inside(top); n += 1) {
+        top += 1
+        if (n >= limit || top >= bottom) { ok = false; break }
+      }
+    }
+    band = ok ? { top, bottom: bottom + 1, probe: 'ok' } : { top: clipTop, bottom: clipBottom, probe: 'fallback' }
+  }
+  return {
+    found: true, ...base,
+    clientH: Math.max(1, el.clientHeight),
+    scrollHeight: Math.max(el.scrollHeight, Math.max(1, el.clientHeight)),
+    scrollTop: el.scrollTop,
+    rectTop: rect.top, rectBottom: rect.bottom, rectLeft: rect.left, rectRight: rect.right,
+    visibleTop: band.top, visibleBottom: band.bottom, visibleProbe: band.probe,
+  }
+}
+
+/**
+ * 往上滚一帧该要多少像素(纯函数,单测钉住)。OS 滚轮只能按格走,runOsScroll 滚够即停、至多再
+ * 多走一格,所以要求量 = 步长 - 一格余量,实际位移落在 [要求量, 要求量+一格] ⊂ (0, 步长],
+ * 帧与帧之间只会重叠、不会漏缝。露出带矮于一格加余量时只能按剩余量要,一格就可能越过带高,
+ * 越过即缝,由调用方按 scroll-overshoot 判脏重拍。
+ */
+export function bossCaptureScrollRequest(stepCss: number, remainingCss: number, notchPx = CAPTURE_WHEEL_NOTCH_PX): number {
+  const margin = notchPx + 10
+  const request = stepCss - margin >= 40 ? stepCss - margin : Math.min(stepCss, remainingCss)
+  return Math.max(1, Math.min(Math.floor(request), Math.floor(remainingCss)))
+}
+
+class BossCaptureDirty extends Error {
+  constructor(kind: string) {
+    super(`capture-stitch-dirty:${kind}`)
+    this.name = 'BossCaptureDirty'
+  }
+}
+
+interface BossStitchOutcome {
+  jpeg: Blob
+  width: number
+  height: number
+  frames: number
+  truncated: boolean
+}
+
+/**
+ * 排干等稳(智联 settleForCapture 的 BOSS 版):滚到顶会让页面 prepend 上一页并顶开 scrollTop,
+ * 开拍前先把要拍的范围内的历史拉齐(高度 ≥ 帧预算像素即停),否则坐标系中途平移必出坏图。
+ * 每次滚顶后按翻页同款等法:等 loading 归零且(长了或 isToTop 翻真)。
+ */
+async function drainBossHistoryForCapture(
+  tabId: number, ctx: PrimitiveContext, uid: number, friendSource: number,
+  read: () => Promise<DomCaptureMetrics>, budgetPx: number, trace: string[],
+): Promise<DomCaptureMetrics> {
+  let metrics = await read()
+  for (let round = 0; round < THREAD_HISTORY_PAGE_MAX && metrics.scrollHeight < budgetPx; round += 1) {
+    const before = await runInPage(BOSS_INJECT, tabId, mainReadBossThread, [uid, friendSource])
+    if (before.status !== 'ready' || before.isToTop) break
+    const scrolled = await scrollBossThreadPanel(tabId, ctx, 'up', null)
+    if (scrolled.outcome === 'none') { trace.push(`排干#${round + 1} ${scrolled.detail}`); break }
+    const settled = await pollUntil(ctx,
+      () => runInPage(BOSS_INJECT, tabId, mainReadBossThread, [uid, friendSource]),
+      (r) => r.status === 'ready' && !r.loading && (r.rows.length > before.rows.length || r.isToTop),
+      THREAD_HISTORY_LOAD_WAIT_MS)
+    const after = settleBossThreadRead(settled.value)
+    const outcome = bossHistoryLoadOutcome(before, after)
+    trace.push(`排干#${round + 1} ${outcome}(${before.rows.length}→${after.rows.length})`)
+    metrics = await read()
+    if (outcome !== 'grew') break
+  }
+  return metrics
+}
+
+/**
+ * 单次拼接(智联 stitchOnce 的 OS 滚轮版):底部锚定,从底往上一帧一帧滚。程序化 scrollTo 在 BOSS
+ * 上不用(2026-09-03 甲方:页面上发生的滚动必须是真实滚轮),位置只能相对走,所以每帧按回读的
+ * 真实 scrollTop 落画布,帧间允许重叠、不允许漏缝(步长见 bossCaptureScrollRequest)。
+ * 冻结坐标系:开拍时的 scrollHeight 与露出带;任一帧高度变了、成像前后位移了、露出带变了,
+ * 抛 BossCaptureDirty 由调用方整体重拍一次。超过软预算就停在当前帧,已拼部分照发。
+ */
+async function stitchBossThreadOnce(
+  tab: chrome.tabs.Tab, ctx: PrimitiveContext, read: () => Promise<DomCaptureMetrics>,
+  settled: DomCaptureMetrics, startedAt: number, trace: string[],
+): Promise<BossStitchOutcome> {
+  const dpr = settled.dpr
+  const clientH = settled.clientH
+  const totalScroll = Math.max(settled.scrollHeight, clientH)
+  const bandTop = settled.visibleTop
+  const bandBottom = Math.max(bandTop, settled.visibleBottom)
+  const bandHeight = bandBottom - bandTop
+  const bandOffset = bandTop - settled.rectTop
+  if (bandHeight < 1) throw new PlatformError('CTX_NOT_READY', '截图容器在屏幕上没有露出', 'afterRecovery')
+  const stepCss = Math.max(1, Math.min(clientH, Math.floor(bandHeight)))
+  if (settled.visibleProbe !== 'ok' || stepCss < clientH - 2) {
+    reportHandLog('warn', 'captureVisibleBandShort.chat',
+      `BOSS 截图容器露出带短于 clientHeight,按露出带步进(probe=${settled.visibleProbe})`,
+      `clientH=${clientH} band=${bandHeight} offset=${bandOffset.toFixed(1)} step=${stepCss} innerH=${settled.innerH} dpr=${dpr}`)
+  }
+  const framesForContent = Math.max(1, Math.ceil(totalScroll / stepCss))
+  const framesByCanvas = Math.max(1, Math.floor(CAPTURE_MAX_SIDE / Math.max(1, Math.round(stepCss * dpr))))
+  const budget = Math.min(CAPTURE_MAX_FRAMES, framesForContent, framesByCanvas)
+  const coveredCssH = Math.min(totalScroll, budget * stepCss)
+  const startTop = Math.max(0, totalScroll - coveredCssH)
+
+  const cropCssLeft = Math.max(0, settled.rectLeft)
+  const cropCssRight = Math.min(settled.innerW, settled.rectRight)
+  const outW = Math.max(1, Math.min(CAPTURE_MAX_SIDE, Math.round(Math.max(1, cropCssRight - cropCssLeft) * dpr)))
+  const outH = Math.max(1, Math.min(CAPTURE_MAX_SIDE, Math.round(coveredCssH * dpr)))
+  const canvas = new OffscreenCanvas(outW, outH)
+  const draw = canvas.getContext('2d')
+  if (!draw) throw new PlatformError('CTX_NOT_READY', '截图画布不可用', 'afterRecovery')
+  draw.fillStyle = '#ffffff'
+  draw.fillRect(0, 0, outW, outH)
+
+  let frames = 0
+  let drawnTop = Number.POSITIVE_INFINITY
+  let drawnBottom = 0
+  let timeTruncated = false
+  for (;;) {
+    ctx.checkpoint()
+    const before = await read()
+    if (!before.found || !before.visible) break
+    if (!before.selectedOk) throw new PlatformError('CTX_LOST_DURING_EXEC', '截图期间当前会话被切走', 'manualOnly')
+    if (Math.abs(before.scrollHeight - totalScroll) > 4) throw new BossCaptureDirty('height-changed')
+
+    let frame: ImageBitmap
+    try {
+      frame = await decodeFrame(await captureVisibleTabJpegDataUrl(tab.windowId!, CAPTURE_FRAME_QUALITY))
+    } catch {
+      await sleep(1_200)
+      try {
+        frame = await decodeFrame(await captureVisibleTabJpegDataUrl(tab.windowId!, CAPTURE_FRAME_QUALITY))
+      } catch (secondError) {
+        if (frames === 0) throw new PlatformError('CTX_NOT_READY', `截屏一帧未得:${describeError(secondError).slice(0, 200)}`, 'afterRecovery')
+        break
+      }
+    }
+    const after = await read()
+    if (Math.abs(after.scrollTop - before.scrollTop) > 4 || Math.abs(after.scrollHeight - totalScroll) > 4) {
+      frame.close()
+      throw new BossCaptureDirty('frame-moved')
+    }
+    const afterBandTop = after.visibleTop
+    const afterBandHeight = Math.max(afterBandTop, after.visibleBottom) - afterBandTop
+    if (Math.abs((afterBandTop - after.rectTop) - bandOffset) > 4 || Math.abs(afterBandHeight - bandHeight) > 4) {
+      frame.close()
+      throw new BossCaptureDirty('visible-band-changed')
+    }
+    const sx = Math.min(Math.max(0, Math.round(cropCssLeft * dpr)), Math.max(0, frame.width - 1))
+    const sy = Math.min(Math.max(0, Math.round(afterBandTop * dpr)), Math.max(0, frame.height - 1))
+    const sw = Math.max(1, Math.min(frame.width - sx, outW))
+    const sh = Math.max(1, Math.min(frame.height - sy, Math.round(afterBandHeight * dpr)))
+    // 露出带对应的内容 = [scrollTop + bandOffset, +bandHeight):落画布按内容坐标减 startTop。
+    let destY = Math.round((before.scrollTop + bandOffset - startTop) * dpr)
+    let srcSkip = 0
+    if (destY < 0) { srcSkip = -destY; destY = 0 }
+    if (destY < outH && sh > srcSkip) {
+      const drawH = Math.min(sh - srcSkip, outH - destY)
+      draw.drawImage(frame, sx, sy + srcSkip, sw, drawH, 0, destY, sw, drawH)
+      drawnTop = Math.min(drawnTop, destY)
+      drawnBottom = Math.max(drawnBottom, destY + drawH)
+    }
+    frame.close()
+    frames += 1
+    ctx.progress(`聊天截图 ${frames}/${budget}`, Math.min(90, 20 + Math.round((frames / budget) * 65)))
+    // 内容顶到 startTop 即覆盖完;带的顶边对应 scrollTop+bandOffset。
+    if (before.scrollTop + bandOffset <= startTop + 1 || before.scrollTop <= 0) break
+    if (frames >= budget) break
+    if (Date.now() - startedAt > CAPTURE_SOFT_BUDGET_MS) { timeTruncated = true; trace.push(`第 ${frames} 帧后超软预算停拍`); break }
+    const remaining = before.scrollTop + bandOffset - startTop
+    const request = bossCaptureScrollRequest(stepCss, remaining)
+    const scrolled = await scrollBossThreadPanel(tab.id!, ctx, 'up', request)
+    if (scrolled.outcome === 'none') break
+    const moved = before.scrollTop - scrolled.scrollTopAfter
+    trace.push(`帧#${frames} 上滚要 ${request} 实 ${moved}`)
+    if (moved <= 0) break
+    if (moved > stepCss) throw new BossCaptureDirty('scroll-overshoot')
+  }
+  if (frames === 0 || drawnBottom === 0) throw new PlatformError('ELEMENT_UNRESOLVED', '截图一帧未成,放弃取证', 'manualOnly')
+  // 顶部没拼到的空白(超软预算提前停)裁掉,只发真正拼上的那段;底部锚定,最新消息永远在。
+  let finalCanvas = canvas
+  let finalH = outH
+  if (drawnTop > Math.round(2 * dpr)) {
+    finalH = Math.max(1, outH - drawnTop)
+    const cropped = new OffscreenCanvas(outW, finalH)
+    const croppedDraw = cropped.getContext('2d')
+    if (!croppedDraw) throw new PlatformError('CTX_NOT_READY', '截图画布不可用', 'afterRecovery')
+    croppedDraw.drawImage(canvas, 0, drawnTop, outW, finalH, 0, 0, outW, finalH)
+    finalCanvas = cropped
+  }
+  const encoded = await encodeStitchedJpeg(finalCanvas, outW, finalH)
+  if (!encoded) throw new PlatformError('PAYLOAD_LIMIT', '截图压缩后仍超过发送上限', 'manualOnly')
+  return {
+    jpeg: encoded.jpeg, width: encoded.width, height: encoded.height, frames,
+    truncated: timeTruncated || coveredCssH < totalScroll - 1 || drawnTop > Math.round(2 * dpr),
+  }
+}
+
+/**
+ * 聊天区长图(底部锚定):排干等稳 → 滚到底 → 从底往上逐帧滚轮拼接;坐标系中途失效整体重拍一次。
+ * 2026-09-09 之前 BOSS 只拍当前可见一帧,企微收到的聊天记录只有最后两三句。
  */
 async function captureBossThreadScreenshot(
   args: ChatCaptureThreadScreenshotArgs, ctx: PrimitiveContext, fingerprint: string | undefined,
@@ -4464,49 +4701,61 @@ async function captureBossThreadScreenshot(
   if (!sessionBlobParams()) {
     throw new PlatformError('PAYLOAD_LIMIT', '当前会话未协商 blob 通道,禁止内联图像', 'manualOnly')
   }
+  const parsed = parseBossConversationRef(args.conversationRef)
+  if (!parsed) throw new PlatformError('GUARD_FAILED', '会话引用不是本平台形态', 'manualOnly')
   const tab = await verifiedBossChatTab(fingerprint)
   if (tab.id === undefined || tab.windowId === undefined || tab.status !== 'complete') {
     throw new PlatformError('CTX_NOT_READY', '目标 BOSS 页面尚未就绪', 'afterRecovery', 'pageBroken')
   }
   if (!tab.active) throw new PlatformError('CTX_NOT_READY', '目标标签页不在前台,放弃截图', 'afterRecovery')
-  const row = await locateRow(tab.id, args.conversationRef)
+  const tabId = tab.id
+  const row = await locateRow(tabId, args.conversationRef)
   if (!(row.count === 1 && row.selected)) {
     throw new PlatformError('CTX_LOST_DURING_EXEC', '截图目标不是当前打开的会话', 'manualOnly')
   }
-  ctx.checkpoint()
-  const area = await runInPage(BOSS_DOM, tab.id, domReadBossChatRect, [CHAT_LIST_SELECTOR])
-  if (!area.found) throw new PlatformError('ELEMENT_UNRESOLVED', '聊天区容器无法解析', 'manualOnly')
-  if (!area.visible) throw new PlatformError('CTX_NOT_READY', '页面不可见,放弃截图', 'afterRecovery')
-  const left = Math.max(0, area.rect.x)
-  const top = Math.max(0, area.rect.y)
-  const right = Math.min(area.innerW, area.rect.x + area.rect.w)
-  const bottom = Math.min(area.innerH, area.rect.y + area.rect.h)
-  if (right - left < 8 || bottom - top < 8) {
-    throw new PlatformError('ELEMENT_UNRESOLVED', '聊天区不在视口内,无有效像素', 'manualOnly')
+  const rowSelector = `${ROW_SELECTOR}[data-id="${args.conversationRef}"]`
+  const read = (): Promise<DomCaptureMetrics> =>
+    runInPage(BOSS_DOM, tabId, domReadBossCaptureMetrics, [THREAD_SCROLL_CONTAINER, rowSelector, ROW_SELECTED_CLASS])
+  const startedAt = Date.now()
+  const trace: string[] = []
+  ctx.progress('聊天截图准备', 10)
+  let outcome: BossStitchOutcome | null = null
+  for (let attempt = 1; attempt <= 2 && outcome === null; attempt += 1) {
+    ctx.checkpoint()
+    let metrics = await read()
+    if (!metrics.found) throw new PlatformError('ELEMENT_UNRESOLVED', '聊天区容器无法解析', 'manualOnly')
+    if (!metrics.visible) throw new PlatformError('CTX_NOT_READY', '页面不可见,放弃截图', 'afterRecovery')
+    const stepGuess = Math.max(1, Math.floor(Math.max(metrics.visibleBottom - metrics.visibleTop, 1)))
+    metrics = await drainBossHistoryForCapture(tabId, ctx, parsed.uid, parsed.friendSource, read, (CAPTURE_MAX_FRAMES + 1) * stepGuess, trace)
+    if (metrics.scrollHeight > metrics.clientH + 1) {
+      const toBottom = await scrollBossThreadPanel(tabId, ctx, 'down', null)
+      trace.push(`锚底 ${toBottom.outcome}`)
+    }
+    // 等稳:两次回读高度不变才开拍(prepend/新气泡都会改高度)。
+    let stable = 0
+    let last = -1
+    for (let readIdx = 0; readIdx < 8 && stable < 2; readIdx += 1) {
+      await sleep(300)
+      metrics = await read()
+      stable = metrics.scrollHeight === last ? stable + 1 : 0
+      last = metrics.scrollHeight
+    }
+    if (!metrics.visible) throw new PlatformError('CTX_NOT_READY', '目标标签页不在前台,放弃截图', 'afterRecovery')
+    try {
+      outcome = await stitchBossThreadOnce(tab, ctx, read, metrics, startedAt, trace)
+    } catch (error) {
+      if (!(error instanceof BossCaptureDirty)) throw error
+      trace.push(`重拍(${error.message})`)
+      if (attempt >= 2) throw new PlatformError('CTX_LOST_DURING_EXEC', `截图期间页面持续变动(${error.message})`, 'manualOnly')
+    }
   }
-  let frame: ImageBitmap
-  try {
-    frame = await decodeFrame(await captureVisibleTabJpegDataUrl(tab.windowId, 92))
-  } catch (error) {
-    throw new PlatformError('CTX_NOT_READY', `截屏一帧未得:${describeError(error).slice(0, 200)}`, 'afterRecovery')
-  }
-  const dpr = area.dpr
-  const sx = Math.min(Math.round(left * dpr), Math.max(0, frame.width - 1))
-  const sy = Math.min(Math.round(top * dpr), Math.max(0, frame.height - 1))
-  const sw = Math.max(1, Math.min(frame.width - sx, Math.round((right - left) * dpr)))
-  const sh = Math.max(1, Math.min(frame.height - sy, Math.round((bottom - top) * dpr)))
-  const canvas = new OffscreenCanvas(sw, sh)
-  const draw = canvas.getContext('2d')
-  if (!draw) { frame.close(); throw new PlatformError('CTX_NOT_READY', '截图画布不可用', 'afterRecovery') }
-  draw.fillStyle = '#ffffff'
-  draw.fillRect(0, 0, sw, sh)
-  draw.drawImage(frame, sx, sy, sw, sh, 0, 0, sw, sh)
-  frame.close()
-  let jpeg = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.92 })
-  if (jpeg.size > 1_900_000) jpeg = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.7 })
+  if (outcome === null) throw new PlatformError('CTX_LOST_DURING_EXEC', '截图期间页面持续变动', 'manualOnly')
+  reportHandLog('warn', 'threadCaptureStitched',
+    `BOSS 聊天截图拼接 ${outcome.frames} 帧 ${outcome.width}x${outcome.height} truncated=${outcome.truncated} 用时 ${Date.now() - startedAt}ms`,
+    trace.join(' | ').slice(0, 600))
   let put: BlobPutOutcome
   try {
-    put = await putSessionBlob(await jpeg.arrayBuffer())
+    put = await putSessionBlob(await outcome.jpeg.arrayBuffer())
   } catch (error) {
     if (error instanceof BlobChannelError) {
       throw new PlatformError(error.permanent ? 'PAYLOAD_LIMIT' : 'CTX_NOT_READY',
@@ -4516,12 +4765,7 @@ async function captureBossThreadScreenshot(
   }
   await verifiedBossChatTab(fingerprint)
   ctx.progress('聊天截图完成', 100)
-  return {
-    imageBlobRef: put.ref,
-    byteSize: put.byteSize,
-    truncated: area.scrollHeight > area.clientHeight + 4,
-    capturedAt: Date.now(),
-  }
+  return { imageBlobRef: put.ref, byteSize: put.byteSize, truncated: outcome.truncated, capturedAt: Date.now() }
 }
 
 
@@ -6394,6 +6638,7 @@ export const bossTestHooks = Object.freeze({
   bossThreadReadSettled,
   bossHistoryLoadOutcome,
   describeBossThreadAlignment,
+  bossCaptureScrollRequest,
   domReadBossOverlays,
   domHitTestOverlayCloser,
   domHitTestIndexed,
