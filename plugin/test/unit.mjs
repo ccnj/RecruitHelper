@@ -16734,15 +16734,18 @@ test('BOSS 对不齐的判定现场只带方向、种类与 hash 前 8 位,不�
   assert.equal(describeBossThreadAlignment(long, []).split(',').length, 6, '页面尾只带最后 6 行')
 })
 
-test('BOSS 截图逐帧上滚的要求量:步长减一格余量,实际位移至多多走一格也不越过带高;剩余不足按剩余', () => {
+test('BOSS 截图逐帧上滚的要求量:按带高能装的整格数规划,实际位移不越过带高;剩余不足按剩余', () => {
   const { bossCaptureScrollRequest } = bossTestHooks
-  // 2026-09-09 真机:简历面板展开时露出带 170px;收起后约 450px
-  assert.equal(bossCaptureScrollRequest(450, 2000), 320)
-  assert.ok(320 + 120 <= 450, '要求量加一格不越过带高')
-  assert.equal(bossCaptureScrollRequest(170, 2000), 40)
-  assert.ok(40 + 120 <= 170)
-  assert.equal(bossCaptureScrollRequest(450, 100), 100, '剩余不足一步只要剩余')
-  assert.equal(bossCaptureScrollRequest(100, 2000), 100, '带矮于一格加余量:只能按带高要,越过与否由回读裁')
+  const ticks = (request) => Math.ceil(request / 100) // runOsScroll 首簇的估格法
+  // 2026-09-09 真机:简历面板展开时露出带 224px,要 100 走 1 格 120;收起后约 450px
+  assert.equal(bossCaptureScrollRequest(224, 2000), 100)
+  assert.ok(ticks(100) * 120 <= 224)
+  assert.equal(bossCaptureScrollRequest(450, 2000), 300)
+  assert.ok(ticks(300) * 120 <= 450, '3 格 360 不越过 450;旧算法要 320 会派 4 格 480 越过')
+  assert.equal(bossCaptureScrollRequest(130, 2000), 100, '刚好装一格(留 10px)')
+  assert.equal(bossCaptureScrollRequest(129, 2000), 129, '差 1px 装不下整格:按带高要')
+  assert.equal(bossCaptureScrollRequest(450, 80), 80, '剩余不足一步只要剩余')
+  assert.equal(bossCaptureScrollRequest(100, 2000), 100, '带矮于一格:只能按带高要,越过与否由回读裁')
   assert.equal(bossCaptureScrollRequest(1, 1), 1)
   assert.equal(bossCaptureScrollRequest(450, 0), 1, '下限 1,不给 0 让滚轮空转')
 })
