@@ -26,7 +26,9 @@ import (
 // notify.Runner——彩排复用它的 webhook 地址、http client 与客户名闭包,
 // 不另建第二个出站配置面。
 type NotifyProbeDeps struct {
-	Blobs  interface{ ReadFile(ref string) ([]byte, error) }
+	Blobs interface {
+		ReadFile(ref string) ([]byte, error)
+	}
 	Sender interface {
 		SendProbe(notify.ProbeRequest) (notify.ProbeOutcome, error)
 	}
@@ -46,7 +48,8 @@ type notifyProbeBody struct {
 }
 
 // 两张长图各有 60s 手侧预算,加派发排队与企微上行余量。
-const notifyProbeTimeout = 240 * time.Second
+// 两张图各自的契约执行预算都是 120s(2026-09-09 聊天截图放大),串行拍完再发,留一分钟余量。
+const notifyProbeTimeout = 360 * time.Second
 
 func (a *API) notifyProbeSend(w http.ResponseWriter, r *http.Request) {
 	if a.notifyProbe.Sender == nil || a.notifyProbe.Blobs == nil {

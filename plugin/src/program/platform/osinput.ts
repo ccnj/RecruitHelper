@@ -488,6 +488,21 @@ async function pace(): Promise<void> {
  * 一上来就盯着一个固定靶子移动,样本挤成一团,标定会一直停在冷启动直到把重试用完
  * (2026-08-28 真机踩过)。
  */
+/** 光标是否已经停在靶子矩形里(往内缩 insetPx,贴边不算——贴边的滚轮可能落到相邻元素上)。纯函数,单测钉住。 */
+export function cursorRestsInRect(
+  cursor: { x: number | null; y: number | null },
+  rect: { x: number; y: number; w: number; h: number },
+  insetPx: number,
+): boolean {
+  if (cursor.x === null || cursor.y === null) return false
+  const inset = Math.min(insetPx, Math.floor(Math.min(rect.w, rect.h) / 2))
+  return cursor.x >= rect.x + inset && cursor.x <= rect.x + rect.w - inset &&
+    cursor.y >= rect.y + inset && cursor.y <= rect.y + rect.h - inset
+}
+
+/** 原地判定往内缩的像素:靶子可见部分的边上几像素不算「在靶上」。 */
+const REST_ON_TARGET_INSET_PX = 4
+
 export async function runOsProbe(
   inject: InjectOptions,
   tabId: number,
@@ -595,6 +610,32 @@ export async function runOsProbe(
   let previousDrift = Number.POSITIVE_INFINITY
   let detail: string | undefined
   try {
+    // **原地路径(2026-09-09):只落不点、且光标已经停在靶子上,就一步不动。**
+    //
+    // 滚轮拼接每帧滚一次,光标从第一次落上容器起就没离开过;此前每帧都重新瞄一遍、走一趟
+    // 靠近轨迹再停 1~1.8 秒,一帧 5 秒里两秒花在这上面。真人翻聊天记录时手是不动的——
+    // 「每滚一次都重新瞄一下」反而是机器才有的动作。
+    //
+    // 一道闸都没少:副屏拒绝、Chrome 在最前面、标签激活在上面已经过了;这里再要三样——
+    // 标定已就绪(热路径同款前提)、手服务报的光标位置在靶子矩形往内缩 4px 之内、页面命中
+    // 测试说那一点上就是靶子或其后代(遮挡物照旧拦下)。真人碰过鼠标、手服务的位置不再是
+    // 真实位置时,/scroll 与 /click 播放前的光标核对会拒(409),失效方向仍是不动。
+    if (click && click.action === 'land') {
+      const here = await callHand<HandState>('/state', { hint })
+      if (here.calibrated && cursorRestsInRect({ x: here.cursorCssX, y: here.cursorCssY }, click.rect, REST_ON_TARGET_INSET_PX)) {
+        const x = here.cursorCssX!
+        const y = here.cursorCssY!
+        const hit = await click.hitTest(x, y)
+        if (hit.onTarget) {
+          return {
+            outcome: 'landed', attempts: 0, calibStatus: '就绪(原地)', planMs: 0,
+            unreachableFrames: 0, elapsedMs: Date.now() - started, lagMaxUs: 0,
+            detail: `光标已在靶「${click.label}」上(${Math.round(x)},${Math.round(y)}),不重落 | 移动前 ${frontSummary}`,
+          }
+        }
+        trace.push(`原地(${Math.round(x)},${Math.round(y)})命中的不是靶子(${hit.found.slice(0, 60)}),照常落点`)
+      }
+    }
     // **热路径:标定已就绪就直接去真靶子,不为点亮闸再白走一趟散开。**
     //
     // 散开存在的理由是**学 scale**:解它要两个样本在两轴各张开 200 CSS px。标定

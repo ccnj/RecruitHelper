@@ -16790,6 +16790,19 @@ test('BOSS 拼接帧预算:按每帧真实前进量(滚轮要求量)算帧数,�
   assert.deepEqual(bossCaptureFrameBudget(662, 500, 16, 2).budget, 1)
 })
 
+test('OS 探针原地判定:光标在靶子矩形内缩 4px 之内才算在靶上,贴边与靶外不算,位置未知不算', async () => {
+  const { cursorRestsInRect } = await import(unitBundleURL)
+  const rect = { x: 579, y: 167, w: 810, h: 280 } // 2026-09-09 真机:收起面板后的消息容器
+  assert.equal(cursorRestsInRect({ x: 984, y: 300 }, rect, 4), true, '容器中央')
+  assert.equal(cursorRestsInRect({ x: 583, y: 171 }, rect, 4), true, '恰在内缩边上')
+  assert.equal(cursorRestsInRect({ x: 580, y: 300 }, rect, 4), false, '贴左边 1px 不算')
+  assert.equal(cursorRestsInRect({ x: 984, y: 446 }, rect, 4), false, '贴底边不算')
+  assert.equal(cursorRestsInRect({ x: 200, y: 300 }, rect, 4), false, '靶外')
+  assert.equal(cursorRestsInRect({ x: null, y: 300 }, rect, 4), false, '位置未知')
+  assert.equal(cursorRestsInRect({ x: 3, y: 3 }, { x: 0, y: 0, w: 6, h: 6 }, 4), true, '靶子比内缩还小时内缩封顶到一半:只剩正中一点')
+  assert.equal(cursorRestsInRect({ x: 5, y: 5 }, { x: 0, y: 0, w: 6, h: 6 }, 4), false)
+})
+
 test('BOSS 列表行摘要:引用与候选人引用取自内存 id,职位名空则省略,秒级 lastTS 转毫秒', () => {
   const { summarizeBossListRow } = bossTestHooks
   const row = { uid: 650166511, friendSource: 0, name: ' 宋先生 ', jobName: '销售经理', newMsgCount: 1, lastTS: 1788402198000, lastText: '您好,对贵公司很感兴趣', lastIsSelf: false }
@@ -16967,8 +16980,10 @@ test('滚轮排版器:一簇 3~8 格同向、首格在 0、间隔在量程内且
 })
 
 /** 一个假滚动容器:每格 pxPerNotch 像素,钳在 [0, max];flip 为真时方向反着动(模拟注入器符号不符)。 */
-function fakeScrollBox({ top = 0, scrollHeight = 5000, clientHeight = 700, pxPerNotch = 100, flip = false } = {}) {
+function fakeScrollBox({ top = 0, scrollHeight = 5000, clientHeight = 700, pxPerNotch = 100, flip = false, cursorInside = false } = {}) {
   const box = { top, scrollHeight, clientHeight }
+  // 假手报的光标固定在 (700,300):默认把容器放在它右边,让落点线真的走一遍;cursorInside 时容器盖住它,走原地路径。
+  const rect = cursorInside ? { x: 600, y: 120, w: 500, h: 600 } : { x: 800, y: 120, w: 500, h: 600 }
   const max = scrollHeight - clientHeight
   return {
     box,
@@ -16981,7 +16996,7 @@ function fakeScrollBox({ top = 0, scrollHeight = 5000, clientHeight = 700, pxPer
     },
     target: {
       label: '假容器',
-      rect: { x: 600, y: 120, w: 500, h: 600 },
+      rect,
       async hitTest() { return { onTarget: true, found: '靶子(div)' } },
       async readMetrics() { return { scrollTop: box.top, scrollHeight, clientHeight } },
     },
@@ -17074,6 +17089,35 @@ test('滚轮闭环:落点闸没过就一格不滚;手服务拒绝(光标被动�
     assert.equal(out.outcome, 'refusedByGate')
     assert.match(out.detail, /手服务拒绝滚轮/)
     assert.equal(hand.scrolls(), 1)
+  } finally { hand.restore() }
+})
+
+test('滚轮闭环:光标已经停在容器上就不重落——不走鼠标线,直接滚;停在容器边上或靶外仍照常落点', async () => {
+  const resting = fakeScrollBox({ cursorInside: true })
+  let hand = osClickHarness({ calibrated: true, onScroll: resting.onScroll })
+  try {
+    const out = await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), resting.target, 'down', 300)
+    assert.equal(out.outcome, 'scrolled', out.detail)
+    assert.equal(hand.plays(), 0, '光标已在靶上,一步不动')
+    assert.ok(hand.scrolls() >= 1)
+    assert.match(out.detail, /不重落/)
+    assert.equal(out.attempts, 0)
+  } finally { hand.restore() }
+  // 标定没就绪时不走原地路径(热路径同款前提):照常散开落点
+  hand = osClickHarness({ calibrated: false, onScroll: resting.onScroll })
+  try {
+    await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), resting.target, 'down', 300)
+    assert.ok(hand.plays() >= 1, '冷启动仍要先落点')
+  } finally { hand.restore() }
+  // 命中测试说那一点上不是靶子(被盖住):照常落点
+  const covered = fakeScrollBox({ cursorInside: true })
+  let hits = 0
+  covered.target.hitTest = async () => { hits += 1; return hits === 1 ? { onTarget: false, found: '遮挡物(div.popup)' } : { onTarget: true, found: '靶子(div)' } }
+  hand = osClickHarness({ calibrated: true, onScroll: covered.onScroll })
+  try {
+    const out = await runOsScroll({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(), covered.target, 'down', 300)
+    assert.ok(hand.plays() >= 1, '原地命中不是靶子就照常落点')
+    assert.equal(out.outcome, 'scrolled', out.detail)
   } finally { hand.restore() }
 })
 
