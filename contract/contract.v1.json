@@ -1794,7 +1794,7 @@
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
       "argsSchema": "ChatCaptureThreadScreenshotArgs", "dataSchema": "CaptureScreenshotData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet", "blob/1"],
-      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "execBudgetMs": 120000, "deadlineMs": 240000, "leaseMs": 30000,
       "note": "只对当前 tracked 且公开路由精确匹配的会话,截取聊天区真实渲染像素并按底部锚定滚动拼接为单张 JPEG;逐帧滚动间隔遵守平台交互节奏下限与截图配额。图像原始字节必须先经 blob/1 PUT 成功,data 只携带 imageBlobRef 引用与元数据;帧预算内截断须 truncated=true。未协商 blob、标签非前台可见、滚动容器无法归一、无有效像素或任何拼接/上传异常均响亮失败,不返回部分图像、不静默截断。不定位其他会话、不点击、不发送,消息正文不进 data"
     },
     "candidate.captureResumeScreenshot": {
