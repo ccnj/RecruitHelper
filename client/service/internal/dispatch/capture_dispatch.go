@@ -78,32 +78,86 @@ func (d *Dispatcher) ProbeCaptureScreenshot(
 	return data, state, err
 }
 
+// ProbePeerPhoneRequest 是彩排的侧栏电话读取派发请求(AGENTS.md「运营通知 webhook」
+// 彩排段 2026-09-09 甲方裁决增补)。
+type ProbePeerPhoneRequest struct {
+	Platform        string
+	AccountRef      string
+	ConversationRef string
+}
+
+// ProbeReadPeerPhone 派发一次 chat.readPeerPhone 并等待终局。readonly 原语,只借账号
+// 串行域;**不派 chat.revealPeerPhone**——揭示消耗平台查看权益,每候选人终身一次的
+// 标记先行归巡检管,彩排不碰。返回的 data 是手侧原样读数,收编判定由调用方按线上
+// 同款做;调用方不得据此落电话观察事实行。
+func (d *Dispatcher) ProbeReadPeerPhone(
+	ctx context.Context,
+	req ProbePeerPhoneRequest,
+) (protocol.ChatReadPeerPhoneData, *store.LogicalDispatchState, error) {
+	var zero protocol.ChatReadPeerPhoneData
+	req.Platform = strings.TrimSpace(req.Platform)
+	req.AccountRef = strings.TrimSpace(req.AccountRef)
+	req.ConversationRef = strings.TrimSpace(req.ConversationRef)
+	if req.Platform == "" || req.AccountRef == "" || req.ConversationRef == "" {
+		return zero, nil, errors.New("缺少有效的账号/会话标识")
+	}
+	name := protocol.PrimChatReadPeerPhone
+	meta := protocol.Primitives[name]
+	argsRaw, err := protocol.Encode(protocol.ChatReadPeerPhoneArgs{ConversationRef: req.ConversationRef})
+	if err != nil {
+		return zero, nil, err
+	}
+	if err := protocol.ValidatePrimitiveArgs(name, meta.Ver, argsRaw); err != nil {
+		return zero, nil, err
+	}
+	bound, err := d.currentBoundHand(req.Platform, req.AccountRef)
+	if err != nil {
+		return zero, nil, err
+	}
+	state, err := d.Run(ctx, bound.request(name, argsRaw))
+	if err != nil {
+		return zero, state, err
+	}
+	data, err := probeLeafData[protocol.ChatReadPeerPhoneData](name, meta.Ver, state, "电话读取")
+	return data, state, err
+}
+
 // captureData 从终局叶命令里抽出截图数据并按契约校验。
 func captureData(
 	name string,
 	ver int,
 	logical *store.LogicalDispatchState,
 ) (protocol.CaptureScreenshotData, error) {
-	var zero protocol.CaptureScreenshotData
+	return probeLeafData[protocol.CaptureScreenshotData](name, ver, logical, "截图")
+}
+
+// probeLeafData 从终局叶命令里抽出成功 data 并按契约校验;what 只用于给人看的错误文案。
+func probeLeafData[T any](
+	name string,
+	ver int,
+	logical *store.LogicalDispatchState,
+	what string,
+) (T, error) {
+	var zero T
 	if logical == nil || !logical.Settled {
-		return zero, errors.New("截图命令未终局")
+		return zero, errors.New(what + "命令未终局")
 	}
 	leaf := logical.Leaf
 	if leaf.Name != name || leaf.Status != store.CmdOk || leaf.ResultBody == "" {
-		return zero, errors.New("截图未取得成功终局")
+		return zero, errors.New(what + "未取得成功终局")
 	}
 	resultRaw := json.RawMessage(leaf.ResultBody)
 	if err := protocol.ValidatePrimitiveResult(name, ver, resultRaw); err != nil {
-		return zero, errors.New("截图结果不符合契约")
+		return zero, errors.New(what + "结果不符合契约")
 	}
 	var result protocol.ResultBody
 	if err := json.Unmarshal(resultRaw, &result); err != nil ||
 		result.Ref != leaf.MsgID || result.Status != protocol.ResultStatusOk {
-		return zero, errors.New("截图结果关联无效")
+		return zero, errors.New(what + "结果关联无效")
 	}
-	var data protocol.CaptureScreenshotData
+	var data T
 	if err := json.Unmarshal(result.Data, &data); err != nil {
-		return zero, errors.New("截图数据无法解析")
+		return zero, errors.New(what + "数据无法解析")
 	}
 	return data, nil
 }

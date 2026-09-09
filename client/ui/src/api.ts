@@ -432,6 +432,8 @@ export interface NotifyProbeResult {
   /** 截图没拍成或被截断时的人话原因；空串表示这一张一切正常。 */
   chatNote?: string
   resumeNote?: string
+  /** 侧栏电话现场读取的结局(2026-09-09 增补):读到并用于正文、沿用库内事实、或失败原因。 */
+  phoneNote?: string
 }
 
 /** `/admin/osprobe` 与 `/admin/ostype` 的共同回执形状:两个端点都把手侧回来的

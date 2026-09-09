@@ -494,6 +494,8 @@ function NotifyProbe({ account, conversations, conversationsLoading, conversatio
               <dd><ImageOutcome image={result.chat} note={result.chatNote} /></dd>
               <dt>简历截图</dt>
               <dd><ImageOutcome image={result.resume} note={result.resumeNote} /></dd>
+              <dt>侧栏电话</dt>
+              <dd><span className="mono">{result.phoneNote || '未读'}</span></dd>
             </dl>
           </>
         ) : null}
