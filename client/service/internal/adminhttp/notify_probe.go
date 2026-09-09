@@ -20,6 +20,7 @@ import (
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/notify"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/contract/gen/go/protocol"
 )
 
 // NotifyProbeDeps 是彩排所需的两件外部零件:读图与发送。发送方就是常驻的
@@ -47,8 +48,8 @@ type notifyProbeBody struct {
 	NotifyType string `json:"notifyType"`
 }
 
-// 两张长图各有 60s 手侧预算,加派发排队与企微上行余量。
-// 两张图各自的契约执行预算都是 120s(2026-09-09 聊天截图放大),串行拍完再发,留一分钟余量。
+// 两张图各自的契约执行预算都是 120s(2026-09-09 聊天截图放大),前面再加一次 30s 的
+// 侧栏电话读取(2026-09-09 增补),串行做完再发,仍留一分钟以上余量。
 const notifyProbeTimeout = 360 * time.Second
 
 func (a *API) notifyProbeSend(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +102,10 @@ func (a *API) notifyProbeSend(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), notifyProbeTimeout)
 	defer cancel()
 
+	// 先读侧栏电话(2026-09-09 甲方裁决增补):用的是页面初始状态,截图会滚动会话、
+	// 开关简历弹窗。只读、不揭示;读数只用于本次正文,收编判定在下面按线上同款做。
+	phoneRead, phoneNote := a.probePeerPhone(ctx, body)
+
 	// 两张图各自尽力而为:任何一张失败都只是"缺图",与线上 15 分钟兜底同款
 	// 降级,正文照发。失败原因回显给操作者判断,不写日志正文。
 	chatImage, chatNote := a.probeCapture(ctx, dispatch.ProbeCaptureRequest{
@@ -124,6 +129,9 @@ func (a *API) notifyProbeSend(w http.ResponseWriter, r *http.Request) {
 	if snapshot == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "候选人档案已不可读"})
 		return
+	}
+	if phoneRead != nil {
+		phoneNote = a.applyProbePeerPhone(snapshot, body, *phoneRead)
 	}
 	outcome, err := a.notifyProbe.Sender.SendProbe(notify.ProbeRequest{
 		NotifyType:  notifyType,
@@ -150,7 +158,63 @@ func (a *API) notifyProbeSend(w http.ResponseWriter, r *http.Request) {
 		"resume":     outcome.Resume,
 		"chatNote":   chatNote,
 		"resumeNote": resumeNote,
+		"phoneNote":  phoneNote,
 	})
+}
+
+// probePeerPhone 现场读一次侧栏电话。任何失败只回一句给人看的原因,正文沿用库内
+// 事实;返回 nil 表示本次没有可用读数。不派揭示、不落库、不记号码。
+func (a *API) probePeerPhone(ctx context.Context, body notifyProbeBody) (*protocol.ChatReadPeerPhoneData, string) {
+	data, state, err := a.disp.ProbeReadPeerPhone(ctx, dispatch.ProbePeerPhoneRequest{
+		Platform:        body.Platform,
+		AccountRef:      body.AccountRef,
+		ConversationRef: body.ConversationRef,
+	})
+	if err != nil {
+		return nil, "现场读号失败(" + captureFailureNote(state, err) + "),正文沿用库内事实"
+	}
+	if strings.TrimSpace(data.Phone) == "" {
+		if data.Masked {
+			return nil, "侧栏是遮挡形态,彩排不揭示;正文沿用库内事实"
+		}
+		return nil, "侧栏未读到号(无号,或虚拟号块缺失);正文沿用库内事实"
+	}
+	return &data, ""
+}
+
+// applyProbePeerPhone 按线上同款收编判定(号码格式、面板姓名与会话对方首字核对)
+// 决定现场读数能否用于本次正文;通过就覆盖快照里的电话四项,只改内存不落行。
+func (a *API) applyProbePeerPhone(
+	snapshot *store.NotificationRenderSnapshot,
+	body notifyProbeBody,
+	data protocol.ChatReadPeerPhoneData,
+) string {
+	peerDisplayName := ""
+	conversation, err := a.st.ConversationByKey(store.ConversationKey{
+		Platform:        body.Platform,
+		AccountRef:      body.AccountRef,
+		ConversationRef: body.ConversationRef,
+	})
+	if err != nil {
+		return "读会话对方展示名失败(" + err.Error() + "),正文沿用库内事实"
+	}
+	if conversation != nil {
+		peerDisplayName = conversation.PeerDisplayName
+	}
+	if !store.AcceptCandidatePhoneObservation(data.Phone, data.PanelName, peerDisplayName) {
+		return "现场读到号但未通过收编判定(格式或姓名首字不符),正文沿用库内事实"
+	}
+	snapshot.PhoneNumber = strings.TrimSpace(data.Phone)
+	snapshot.PhoneKind = store.CandidatePhoneKindReal
+	snapshot.PhoneVirtualCaller = ""
+	snapshot.PhoneVirtualExpiresAtMs = 0
+	if data.PhoneKind == protocol.PeerPhoneKindVirtual {
+		snapshot.PhoneKind = store.CandidatePhoneKindVirtual
+		snapshot.PhoneVirtualCaller = strings.TrimSpace(data.VirtualCaller)
+		snapshot.PhoneVirtualExpiresAtMs = data.VirtualExpiresAt
+		return "现场读到虚拟号,已用于本次正文(不落库)"
+	}
+	return "现场读到真实号,已用于本次正文(不落库)"
 }
 
 // probeCapture 拍一张并读回字节;失败返回空字节与一句给人看的原因。
