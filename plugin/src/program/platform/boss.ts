@@ -4584,6 +4584,23 @@ export function bossCaptureScrollRequest(stepCss: number, remainingCss: number, 
   return Math.max(1, Math.min(Math.floor(request), Math.floor(remainingCss)))
 }
 
+/**
+ * 帧预算(纯函数,单测钉住):第一帧拍整个露出带,之后每帧只前进一次滚轮要求量(整格规划,实际位移
+ * ≥ 要求量),所以要拍完 totalScroll 需要 1 + ceil((total - 带高) / 要求量) 帧,不是 total / 带高——
+ * 2026-09-09 第二场彩排:带 334 每帧只进 240,按 total/带高 算 6 帧就停,漏了顶上 412px。
+ * 画布高按同一口径:带高 + (帧数-1) × 要求量,封顶 totalScroll。
+ */
+export function bossCaptureFrameBudget(
+  stepCss: number, totalScroll: number, maxFrames: number, dpr: number,
+): { budget: number; coveredCssH: number; advanceCss: number } {
+  const advanceCss = Math.max(1, bossCaptureScrollRequest(stepCss, Number.MAX_SAFE_INTEGER))
+  const framesForContent = 1 + Math.ceil(Math.max(0, totalScroll - stepCss) / advanceCss)
+  const framesByCanvas = Math.max(1, Math.floor((CAPTURE_MAX_SIDE / Math.max(1, dpr) - stepCss) / advanceCss) + 1)
+  const budget = Math.max(1, Math.min(maxFrames, framesForContent, framesByCanvas))
+  const coveredCssH = Math.min(totalScroll, stepCss + (budget - 1) * advanceCss)
+  return { budget, coveredCssH, advanceCss }
+}
+
 export interface BossCaptureFrameState {
   scrollTop: number
   clientH: number
@@ -4703,10 +4720,7 @@ async function stitchBossPanelOnce(
       `BOSS ${options.label}容器露出带短于 clientHeight,按露出带步进(probe=${settled.visibleProbe})`,
       `clientH=${clientH} band=${bandHeight} offset=${bandOffset.toFixed(1)} step=${stepCss} innerH=${settled.innerH} dpr=${dpr}`)
   }
-  const framesForContent = Math.max(1, Math.ceil(totalScroll / stepCss))
-  const framesByCanvas = Math.max(1, Math.floor(CAPTURE_MAX_SIDE / Math.max(1, Math.round(stepCss * dpr))))
-  const budget = Math.min(CAPTURE_MAX_FRAMES, framesForContent, framesByCanvas)
-  const coveredCssH = Math.min(totalScroll, budget * stepCss)
+  const { budget, coveredCssH } = bossCaptureFrameBudget(stepCss, totalScroll, CAPTURE_MAX_FRAMES, dpr)
   const startTop = options.anchor === 'bottom' ? Math.max(0, totalScroll - coveredCssH) : 0
 
   const cropCssLeft = Math.max(0, settled.rectLeft)
@@ -6954,6 +6968,7 @@ export const bossTestHooks = Object.freeze({
   bossCaptureScrollRequest,
   bossCaptureCovered,
   bossCaptureRemaining,
+  bossCaptureFrameBudget,
   domReadBossOverlays,
   domHitTestOverlayCloser,
   domHitTestIndexed,
