@@ -14746,27 +14746,101 @@ export async function readZhilianWechatExchangeOutcome(
 
 interface MainPeerPhonePanelResult {
   phone: string | null
+  phoneKind: 'real' | 'virtual' | null
   panelName: string | null
   masked: boolean
+  // 虚拟号形态的两项附属事实(2026-09-09 甲方裁决):招聘方主叫号按平台遮挡形态原样,
+  // 失效时刻按客户机本地时区解析成毫秒;解析不出时 virtualNote 带回原文,只供扩展侧
+  // 记一条手侧日志,不进契约。
+  virtualCaller: string | null
+  virtualExpiresAt: number | null
+  virtualNote: string | null
 }
 
 // chat.readPeerPhone@1 的页面读取:右侧简历侧栏的候选人电话与面板姓名。
-// 只认「复制」按钮的 data-clipboard-text 标准属性——虚拟号形态有号无复制按钮、
-// 无号形态整段空缺,都自然落到 phone=null(2026-08-06 生产页面三形态直读)。
-// masked 是第四形态观察信号(2026-08-07 真机):中四位遮挡 + 「查看电话」按钮,
-// 完整号不在 DOM 中,只能经 chat.revealPeerPhone 点击揭示。
+// 判别按固定优先级(协议规格 2026-09-09 增量):复制按钮的 data-clipboard-text 标准
+// 属性 → real;「查看电话」按钮在场 → masked(2026-08-07 真机第四形态,完整号不在
+// DOM,只能经 chat.revealPeerPhone 揭示);虚拟号块在场且候选人电话文本可读 → virtual
+// (2026-09-09 起读显示文本,撤销 08-06「虚拟号视同无号」);三者皆无 → 缺号。
+// 虚拟号形态的坑:招聘方自己绑定的主叫号(「仅限 X 呼叫」)与候选人号用同一个展示
+// class,候选人号只从电话文本容器 .hover-resume-basic__phone--box 里取——把招聘方的
+// 号当候选人号发到运营群是错靶。
 function mainReadPeerPhone(): MainPeerPhonePanelResult {
+  const empty: MainPeerPhonePanelResult = {
+    phone: null,
+    phoneKind: null,
+    panelName: null,
+    masked: false,
+    virtualCaller: null,
+    virtualExpiresAt: null,
+    virtualNote: null,
+  }
   const root = document.querySelector('.new-resume-basic')
-  if (!root) return { phone: null, panelName: null, masked: false }
-  const nameText = root.querySelector('.new-resume-basic__name-wrapper')?.textContent?.trim()
-  const copyNode = root.querySelector(
-    '.new-resume-basic__contact--phone--box .im-resume-basic__phone--copy',
-  )
-  const raw = copyNode?.getAttribute('data-clipboard-text')?.trim()
-  const masked = !!root.querySelector(
-    '.new-resume-basic__contact--phone--box .resume-button.get-phone',
-  )
-  return { phone: raw || null, panelName: nameText || null, masked }
+  if (!root) return empty
+  const panelName = root.querySelector('.new-resume-basic__name-wrapper')?.textContent?.trim() || null
+  const box = root.querySelector('.new-resume-basic__contact--phone--box')
+  if (!box) return { ...empty, panelName }
+  const raw = box
+    .querySelector('.im-resume-basic__phone--copy')
+    ?.getAttribute('data-clipboard-text')
+    ?.trim()
+  if (raw) return { ...empty, phone: raw, phoneKind: 'real', panelName }
+  if (box.querySelector('.resume-button.get-phone')) return { ...empty, panelName, masked: true }
+  const virtualBlock = box.querySelector('.new-resume-basic__contact--virtualnumber')
+  if (!virtualBlock) return { ...empty, panelName }
+  const numberText = box
+    .querySelector(
+      '.hover-resume-basic__phone--box span.im-resume-basic__phone--black:not(.virtual-number__text--phone)',
+    )
+    ?.textContent?.replace(/\s+/g, '')
+  if (!numberText) return { ...empty, panelName }
+  const virtualCaller =
+    virtualBlock.querySelector('.virtual-number__text--phone')?.textContent?.trim() || null
+  const note =
+    box.querySelector('.hover-resume-basic__phone--box .im-resume-basic__phone')?.textContent?.trim() ??
+    ''
+  const match = /(\d{4})\.(\d{1,2})\.(\d{1,2})\s*(\d{1,2}):(\d{2})/.exec(note)
+  let virtualExpiresAt: number | null = null
+  if (match) {
+    const at = new Date(+match[1], +match[2] - 1, +match[3], +match[4], +match[5]).getTime()
+    if (Number.isFinite(at) && at > 0) virtualExpiresAt = at
+  }
+  return {
+    phone: numberText,
+    phoneKind: 'virtual',
+    panelName,
+    masked: false,
+    virtualCaller,
+    virtualExpiresAt,
+    virtualNote: virtualExpiresAt === null ? note || null : null,
+  }
+}
+
+// 面板读取结果 → 契约 data(read 与 reveal 共用)。虚拟号的两项附属事实只在有号时
+// 带出;失效时间解析不出只记一条手侧日志,原文不进契约(2026-09-09 增量)。
+function peerPhoneDataFromPanel(
+  observed: MainPeerPhonePanelResult,
+  includeMasked: boolean,
+): ZhilianReadPeerPhoneData {
+  if (observed.phone && observed.phoneKind === 'virtual' && observed.virtualExpiresAt === null) {
+    reportHandLog(
+      'warn',
+      'peer_phone_virtual_expiry_unparsed',
+      '虚拟号失效时间解析失败,通知省略该段',
+      observed.virtualNote ?? '',
+    )
+  }
+  return {
+    ...(observed.phone ? { phone: observed.phone } : {}),
+    ...(observed.phone && observed.phoneKind ? { phoneKind: observed.phoneKind } : {}),
+    ...(observed.phone && observed.virtualCaller ? { virtualCaller: observed.virtualCaller } : {}),
+    ...(observed.phone && observed.virtualExpiresAt
+      ? { virtualExpiresAt: observed.virtualExpiresAt }
+      : {}),
+    ...(observed.panelName ? { panelName: observed.panelName } : {}),
+    ...(includeMasked && observed.masked ? { masked: true } : {}),
+    observedAt: Date.now(),
+  }
 }
 
 // chat.revealPeerPhone@1 的点击步:找到侧栏「查看电话」按钮并点一次。
@@ -14809,16 +14883,18 @@ export async function readZhilianPeerPhone(
     expectedPrincipalFingerprint,
     'none',
   )
-  const data: ZhilianReadPeerPhoneData = {
-    ...(observed.phone ? { phone: observed.phone } : {}),
-    ...(observed.panelName ? { panelName: observed.panelName } : {}),
-    ...(observed.masked ? { masked: true } : {}),
-    observedAt: Date.now(),
-  }
+  const data = peerPhoneDataFromPanel(observed, true)
   if (validatePrimitiveData(PrimitiveName.ChatReadPeerPhone, 1, data).length !== 0) {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '电话侧栏读取结果不符合当前契约', 'manualOnly')
   }
-  await ctx.progress(data.phone ? '已读取候选人电话' : '本轮未读到候选人电话', 100)
+  await ctx.progress(
+    data.phone
+      ? data.phoneKind === 'virtual'
+        ? '已读取候选人虚拟号'
+        : '已读取候选人电话'
+      : '本轮未读到候选人电话',
+    100,
+  )
   return data
 }
 
@@ -14847,11 +14923,7 @@ export async function revealZhilianPeerPhone(
   ): Promise<ZhilianReadPeerPhoneData> => {
     ctx.checkpoint()
     await assertCurrentThreadRoute(tabId, args.conversationRef, expectedPrincipalFingerprint, 'none')
-    const data: ZhilianReadPeerPhoneData = {
-      ...(observed.phone ? { phone: observed.phone } : {}),
-      ...(observed.panelName ? { panelName: observed.panelName } : {}),
-      observedAt: Date.now(),
-    }
+    const data = peerPhoneDataFromPanel(observed, false)
     if (validatePrimitiveData(PrimitiveName.ChatRevealPeerPhone, 1, data).length !== 0) {
       throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '电话揭示结果不符合当前契约', 'manualOnly')
     }
@@ -16341,6 +16413,7 @@ export const zhilianTestHooks = Object.freeze({
   mainReadWechatExchangeOutcome,
   mainReadPeerPhone,
   mainClickRevealPeerPhone,
+  peerPhoneDataFromPanel,
   mainPrepareInterviewEditor,
   mainCloseInterviewSuccessModal,
   mainReadThreadPage,
