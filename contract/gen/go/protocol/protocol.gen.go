@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:2107f4cc57ed9c09d6deeb83c901f93d345f6789fc420ca32a1fbfa16b8681f0"
+	ContractHash       = "sha256:6ea5452a8f865615df2f3cbf5631753a82bd5bec910dcd75ee085a20ed2edcfb"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -417,6 +417,18 @@ var PageKindValues = []PageKind{
 	PageKindRecommend,
 	PageKindOther,
 	PageKindNone,
+}
+
+type PeerPhoneKind string
+
+const (
+	PeerPhoneKindReal    PeerPhoneKind = "real"
+	PeerPhoneKindVirtual PeerPhoneKind = "virtual"
+)
+
+var PeerPhoneKindValues = []PeerPhoneKind{
+	PeerPhoneKindReal,
+	PeerPhoneKindVirtual,
 }
 
 type PublishDraftEvidenceType string
