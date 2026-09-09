@@ -4432,12 +4432,13 @@ async function decodeFrame(dataUrl: string): Promise<ImageBitmap> {
 /** 一次拼接至多几帧(智联同值);再多的历史 truncated=true 如实带出。 */
 const CAPTURE_MAX_FRAMES = 16
 /**
- * 聊天截图的软预算:契约 execBudgetMs=60s,OS 滚轮一帧 5 秒上下(落点探针 + 节奏闸 ≥1s + 簇间停顿 +
- * 截屏配额),超过这个时点不再往上翻,已拼的部分照发、truncated=true。
+ * 聊天截图的软预算:契约 execBudgetMs=120s(2026-09-09 甲方裁决自 60s 放大),OS 滚轮一帧 2~5 秒
+ * (节奏闸 ≥1s + 簇间停顿 + 截屏配额;光标已在容器上时不重落),超过这个时点不再往上翻,已拼的
+ * 部分照发、truncated=true。
  */
-const CAPTURE_CHAT_SOFT_BUDGET_MS = 48_000
+const CAPTURE_CHAT_SOFT_BUDGET_MS = 96_000
 /** 聊天截图收尾(复原简历摘要面板)的截止:再晚就来不及在 execBudget 内交图,面板留着不复原、只记日志。 */
-const CAPTURE_CHAT_RESTORE_DEADLINE_MS = 52_000
+const CAPTURE_CHAT_RESTORE_DEADLINE_MS = 104_000
 /** 简历截图的软预算:契约 execBudgetMs=120s。 */
 const CAPTURE_RESUME_SOFT_BUDGET_MS = 90_000
 /** 一格滚轮的像素上限(Mac 120,Windows 100;runOsScroll 首簇后按实测自适应),只用来给步长留余量。 */
