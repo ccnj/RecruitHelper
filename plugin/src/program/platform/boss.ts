@@ -4428,9 +4428,11 @@ const CAPTURE_MAX_FRAMES = 16
  * 拼接的软预算:契约 execBudgetMs=60s,OS 滚轮一帧 2 秒上下(节奏闸 ≥1s + 簇间停顿 + 截屏配额),
  * 超过这个时点不再往上翻,已拼的部分照发、truncated=true。
  */
-const CAPTURE_SOFT_BUDGET_MS = 42_000
+const CAPTURE_SOFT_BUDGET_MS = 48_000
 /** 一格滚轮的像素上限(Mac 120,Windows 100;runOsScroll 首簇后按实测自适应),只用来给步长留余量。 */
 const CAPTURE_WHEEL_NOTCH_PX = 120
+/** runOsScroll 首簇估格数用的 px/格(osscroll INITIAL_PX_PER_NOTCH),要求量按它的整数倍给才派得准。 */
+const CAPTURE_WHEEL_PLAN_PX = 100
 
 /** 页面一步的量测快照(isolated world,纯数值,DOM 细节不出页面)。 */
 interface DomCaptureMetrics {
@@ -4509,14 +4511,16 @@ function domReadBossCaptureMetrics(containerSelector: string, rowSelector: strin
 }
 
 /**
- * 往上滚一帧该要多少像素(纯函数,单测钉住)。OS 滚轮只能按格走,runOsScroll 滚够即停、至多再
- * 多走一格,所以要求量 = 步长 - 一格余量,实际位移落在 [要求量, 要求量+一格] ⊂ (0, 步长],
- * 帧与帧之间只会重叠、不会漏缝。露出带矮于一格加余量时只能按剩余量要,一格就可能越过带高,
- * 越过即缝,由调用方按 scroll-overshoot 判脏重拍。
+ * 往上滚一帧该要多少像素(纯函数,单测钉住)。OS 滚轮只能按格走:runOsScroll 首簇按 100px/格
+ * 估格数(ceil(要求量/100)),之后按实测格距;Mac 实测一格 120px。所以按「整格」规划:带高
+ * 里最多装几整格(按 120 算,留 10px),要求量就给 格数×100——两种格距下都恰好派这么多格,
+ * 实际位移 ≤ 格数×120 ≤ 带高,帧与帧之间只重叠、不漏缝(2026-09-09 真机:带 224px 要 94
+ * 走 120,原「步长减一格余量」在 450px 带上会派 4 格走 480px 越过带高)。带高装不下一整格
+ * 时只能按剩余量要,一格就可能越过带高,越过即缝,由调用方按 scroll-overshoot 判脏重拍。
  */
 export function bossCaptureScrollRequest(stepCss: number, remainingCss: number, notchPx = CAPTURE_WHEEL_NOTCH_PX): number {
-  const margin = notchPx + 10
-  const request = stepCss - margin >= 40 ? stepCss - margin : Math.min(stepCss, remainingCss)
+  const notches = Math.floor((stepCss - 10) / notchPx)
+  const request = notches >= 1 ? notches * CAPTURE_WHEEL_PLAN_PX : Math.min(stepCss, remainingCss)
   return Math.max(1, Math.min(Math.floor(request), Math.floor(remainingCss)))
 }
 
