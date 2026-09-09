@@ -164,9 +164,20 @@ func (a *roundActor) collectPeerPhoneObservation(
 		slog.Info("电话观察未通过收编判定,按缺号处理", "profileId", profile.ProfileID)
 		return nil
 	}
+	input := store.CandidatePhoneObservationInput{
+		Phone: strings.TrimSpace(phoneData.Phone),
+		Kind:  store.CandidatePhoneKindReal,
+	}
+	if phoneData.PhoneKind == protocol.PeerPhoneKindVirtual {
+		// 虚拟号(2026-09-09 裁决):随号落两项附属事实;附属事实缺失只是少一段,
+		// 不影响收编。真实号优先由 LatestCandidatePhoneObservation 保证,这里只追加。
+		input.Kind = store.CandidatePhoneKindVirtual
+		input.VirtualCaller = strings.TrimSpace(phoneData.VirtualCaller)
+		input.VirtualExpiresAtMs = phoneData.VirtualExpiresAt
+	}
 	return a.manager.store.SaveCandidatePhoneObservation(
 		profile.ProfileID,
-		strings.TrimSpace(phoneData.Phone),
+		input,
 		phoneData.ObservedAt,
 		a.manager.now(),
 	)

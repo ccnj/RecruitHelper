@@ -569,12 +569,28 @@ type SuspectSceneShot struct {
 // 不物理删除。Phone 去处比照微信号收口:只进运营通知 webhook 正文与 /admin
 // 诊断面,json:"-" 防止被投影误序列化;不进普通日志、审计 detail、AI 请求。
 type CandidatePhoneObservation struct {
-	ID           uint64 `gorm:"primaryKey;autoIncrement"`
-	ProfileID    string `gorm:"not null;index"`
-	Phone        string `json:"-" gorm:"not null"`
-	ObservedAtMs int64  `gorm:"not null"`
-	CreatedAt    time.Time
+	ID        uint64 `gorm:"primaryKey;autoIncrement"`
+	ProfileID string `gorm:"not null;index"`
+	Phone     string `json:"-" gorm:"not null"`
+	// Kind 是号码种类(契约枚举 peerPhoneKind:real|virtual,2026-09-09 甲方裁决虚拟号
+	// 也采);存量行无此列,按 real 解释。消费方真实号优先于虚拟号。
+	Kind CandidatePhoneKind `gorm:"not null;default:real;index"`
+	// 虚拟号的两项附属事实:招聘方主叫号(平台「仅限 X 呼叫」遮挡形态原样)与失效时刻;
+	// 去处与 Phone 同款收口,主叫号同样 json:"-"。真实号行两者为零值。
+	VirtualCaller      string `json:"-" gorm:"not null;default:''"`
+	VirtualExpiresAtMs int64  `gorm:"not null;default:0"`
+	ObservedAtMs       int64  `gorm:"not null"`
+	CreatedAt          time.Time
 }
+
+// CandidatePhoneKind 与契约枚举 enums.peerPhoneKind 同值;store 不引契约包,
+// 值由巡检层映射。
+type CandidatePhoneKind string
+
+const (
+	CandidatePhoneKindReal    CandidatePhoneKind = "real"
+	CandidatePhoneKindVirtual CandidatePhoneKind = "virtual"
+)
 
 // PhoneRevealAttempt 是「查看电话」揭示的标记先行事实行(2026-08-07 甲方裁决):
 // 派发 chat.revealPeerPhone 前先落行,ProfileID 唯一索引保证每候选人终身至多

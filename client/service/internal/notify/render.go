@@ -64,9 +64,28 @@ func contactLines(snapshot *store.NotificationRenderSnapshot) []string {
 	}
 	lines := []string{wechatLine}
 	if phone := strings.TrimSpace(snapshot.PhoneNumber); phone != "" {
-		lines = append(lines, "手机号: "+phone)
+		lines = append(lines, "手机号: "+phone+virtualPhoneSuffix(snapshot))
 	}
 	return lines
+}
+
+// virtualPhoneSuffix 渲染虚拟号的括注(2026-09-09 甲方裁决):标「虚拟号」,附
+// 「仅 X 可呼叫」(X 为招聘方主叫号,平台遮挡形态原样)与失效时间;两项附属事实
+// 各自缺失只省略对应段。真实号返回空串,那一行与改前逐字相同。过期的虚拟号照常
+// 展示,失效时间自己说明问题。
+func virtualPhoneSuffix(snapshot *store.NotificationRenderSnapshot) string {
+	if snapshot.PhoneKind != store.CandidatePhoneKindVirtual {
+		return ""
+	}
+	parts := []string{"虚拟号"}
+	if caller := strings.TrimSpace(snapshot.PhoneVirtualCaller); caller != "" {
+		parts = append(parts, "仅"+caller+"可呼叫")
+	}
+	if snapshot.PhoneVirtualExpiresAtMs > 0 {
+		at := time.UnixMilli(snapshot.PhoneVirtualExpiresAtMs).Local()
+		parts = append(parts, fmt.Sprintf("%02d-%02d %02d:%02d后失效", at.Month(), at.Day(), at.Hour(), at.Minute()))
+	}
+	return "(" + strings.Join(parts, ",") + ")"
 }
 
 // interviewMethodLabels 是契约封闭枚举 enums.interviewMethod 的展示文案;

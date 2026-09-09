@@ -7,6 +7,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -326,22 +327,44 @@ func AcceptCandidatePhoneObservation(phone, panelName, peerDisplayName string) b
 	return panel[0] == peer[0]
 }
 
-// SaveCandidatePhoneObservation 追加一行电话观察事实(不覆盖旧行,消费方取最新)。
+// CandidatePhoneObservationInput 是一次电话观察的收编输入。Kind 空串按 real;
+// 两项虚拟号附属事实只在 Kind=virtual 时落行,真实号行一律置零。
+type CandidatePhoneObservationInput struct {
+	Phone              string
+	Kind               CandidatePhoneKind
+	VirtualCaller      string
+	VirtualExpiresAtMs int64
+}
+
+// SaveCandidatePhoneObservation 追加一行电话观察事实(不覆盖旧行,消费方按
+// LatestCandidatePhoneObservation 的优先级取用)。
 func (s *Store) SaveCandidatePhoneObservation(
 	profileID string,
-	phone string,
+	input CandidatePhoneObservationInput,
 	observedAtMs int64,
 	at time.Time,
 ) error {
-	if strings.TrimSpace(profileID) == "" || strings.TrimSpace(phone) == "" {
+	phone := strings.TrimSpace(input.Phone)
+	if strings.TrimSpace(profileID) == "" || phone == "" {
 		return errors.New("电话观察事实参数不完整")
 	}
-	return s.db.Create(&CandidatePhoneObservation{
+	row := CandidatePhoneObservation{
 		ProfileID:    profileID,
 		Phone:        phone,
+		Kind:         CandidatePhoneKindReal,
 		ObservedAtMs: observedAtMs,
 		CreatedAt:    at,
-	}).Error
+	}
+	if input.Kind == CandidatePhoneKindVirtual {
+		row.Kind = CandidatePhoneKindVirtual
+		row.VirtualCaller = strings.TrimSpace(input.VirtualCaller)
+		if input.VirtualExpiresAtMs > 0 {
+			row.VirtualExpiresAtMs = input.VirtualExpiresAtMs
+		}
+	} else if input.Kind != "" && input.Kind != CandidatePhoneKindReal {
+		return fmt.Errorf("未知的电话种类 %q", string(input.Kind))
+	}
+	return s.db.Create(&row).Error
 }
 
 // TryMarkPhoneRevealAttempt 标记先行:首次落行返回 true(允许派发揭示),
@@ -360,20 +383,28 @@ func (s *Store) TryMarkPhoneRevealAttempt(profileID string, at time.Time) (bool,
 	return result.RowsAffected == 1, nil
 }
 
-// LatestCandidatePhone 返回该候选人最新一行电话观察事实的号码;无则空串。
-func (s *Store) LatestCandidatePhone(profileID string) (string, error) {
+// LatestCandidatePhoneObservation 返回该候选人当前应采用的电话观察事实:有真实号
+// 观察事实取最新一行真实号,否则取最新一行(即虚拟号);无则 nil。真实号优先于
+// 虚拟号,虚拟号不顶掉真实号(2026-09-09 甲方裁决)。
+func (s *Store) LatestCandidatePhoneObservation(profileID string) (*CandidatePhoneObservation, error) {
 	var row CandidatePhoneObservation
 	err := s.db.
-		Where("profile_id = ?", profileID).
+		Where("profile_id = ? AND kind = ?", profileID, CandidatePhoneKindReal).
 		Order("id DESC").
 		First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", nil
+		err = s.db.
+			Where("profile_id = ?", profileID).
+			Order("id DESC").
+			First(&row).Error
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return row.Phone, nil
+	return &row, nil
 }
 
 // LatestCandidateScreenshots 返回该候选人各 kind 的最新截图行。
@@ -412,8 +443,13 @@ type NotificationRenderSnapshot struct {
 	WechatID      string
 	// PhoneNumber 来自取证顺访的电话观察事实(2026-08-06 裁决),缺失渲染侧
 	// 整行省略;与 WechatID 同受"不回流进日志/审计/管理 API"边界约束。
-	PhoneNumber         string
-	InterviewStartsAtMs *int64
+	// PhoneKind=virtual 时(2026-09-09 裁决)渲染侧标「虚拟号」并附主叫号与失效
+	// 时间两项附属事实,各自缺失只省略对应段。
+	PhoneNumber             string
+	PhoneKind               CandidatePhoneKind
+	PhoneVirtualCaller      string
+	PhoneVirtualExpiresAtMs int64
+	InterviewStartsAtMs     *int64
 	// InterviewMethod 取自同一张邀面卡(契约封闭枚举 wechatVideo/onsite,
 	// 2026-08-07 甲方裁决进通知),空串=未知,渲染侧整行省略。
 	InterviewMethod string
@@ -549,11 +585,18 @@ func (s *Store) NotificationRenderSnapshotForProfile(profileID string) (*Notific
 			break
 		}
 	}
-	phone, err := s.LatestCandidatePhone(profileID)
+	phoneRow, err := s.LatestCandidatePhoneObservation(profileID)
 	if err != nil {
 		return nil, err
 	}
-	snapshot.PhoneNumber = phone
+	if phoneRow != nil {
+		snapshot.PhoneNumber = phoneRow.Phone
+		snapshot.PhoneKind = phoneRow.Kind
+		if phoneRow.Kind == CandidatePhoneKindVirtual {
+			snapshot.PhoneVirtualCaller = phoneRow.VirtualCaller
+			snapshot.PhoneVirtualExpiresAtMs = phoneRow.VirtualExpiresAtMs
+		}
+	}
 	// 画像摘要:没有活动快照就整行不出,读取失败也只当没有,绝不阻断通知。
 	if profile.ActiveResumeSnapshotID != nil {
 		var resume CandidateResumeSnapshot

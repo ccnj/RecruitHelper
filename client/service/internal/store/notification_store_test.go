@@ -1,11 +1,14 @@
 package store
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"recruithelper/client/service/internal/communication"
 )
@@ -281,30 +284,129 @@ func TestCandidatePhoneObservationLifecycleAndSnapshot(t *testing.T) {
 	at := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	fixture, _ := seedSuccessfulV4Greeting(t, s, "notify-phone", "conversation-notify-phone", at)
 
-	if phone, err := s.LatestCandidatePhone(fixture.ProfileID); err != nil || phone != "" {
-		t.Fatalf("无观察时应为空: phone=%q err=%v", phone, err)
+	if row, err := s.LatestCandidatePhoneObservation(fixture.ProfileID); err != nil || row != nil {
+		t.Fatalf("无观察时应为 nil: row=%+v err=%v", row, err)
 	}
 	snapshot, err := s.NotificationRenderSnapshotForProfile(fixture.ProfileID)
-	if err != nil || snapshot == nil || snapshot.PhoneNumber != "" {
+	if err != nil || snapshot == nil || snapshot.PhoneNumber != "" || snapshot.PhoneKind != "" {
 		t.Fatalf("无观察时快照不应带号: %+v err=%v", snapshot, err)
 	}
 
-	if err := s.SaveCandidatePhoneObservation(fixture.ProfileID, "13800000001", at.UnixMilli(), at); err != nil {
+	// 先只读到虚拟号(2026-09-09 裁决):取虚拟号,两项附属事实随行进快照。
+	expires := at.Add(48 * time.Hour).UnixMilli()
+	if err := s.SaveCandidatePhoneObservation(fixture.ProfileID, CandidatePhoneObservationInput{
+		Phone: "18000000001", Kind: CandidatePhoneKindVirtual,
+		VirtualCaller: "139****0000", VirtualExpiresAtMs: expires,
+	}, at.UnixMilli(), at); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveCandidatePhoneObservation(fixture.ProfileID, "13800000002", at.UnixMilli()+1, at.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if phone, err := s.LatestCandidatePhone(fixture.ProfileID); err != nil || phone != "13800000002" {
-		t.Fatalf("应取最新观察: phone=%q err=%v", phone, err)
+	row, err := s.LatestCandidatePhoneObservation(fixture.ProfileID)
+	if err != nil || row == nil || row.Phone != "18000000001" || row.Kind != CandidatePhoneKindVirtual ||
+		row.VirtualCaller != "139****0000" || row.VirtualExpiresAtMs != expires {
+		t.Fatalf("只有虚拟号时应取虚拟号并带附属事实: %+v err=%v", row, err)
 	}
 	snapshot, err = s.NotificationRenderSnapshotForProfile(fixture.ProfileID)
-	if err != nil || snapshot == nil || snapshot.PhoneNumber != "13800000002" {
-		t.Fatalf("快照未带最新号: %+v err=%v", snapshot, err)
+	if err != nil || snapshot == nil || snapshot.PhoneNumber != "18000000001" ||
+		snapshot.PhoneKind != CandidatePhoneKindVirtual || snapshot.PhoneVirtualCaller != "139****0000" ||
+		snapshot.PhoneVirtualExpiresAtMs != expires {
+		t.Fatalf("快照未带虚拟号附属事实: %+v err=%v", snapshot, err)
+	}
+
+	// 真实号到手:真实号优先。Kind 空串按 real;真实号行不落任何附属事实,哪怕输入里残留。
+	if err := s.SaveCandidatePhoneObservation(fixture.ProfileID, CandidatePhoneObservationInput{
+		Phone: "13800000001", VirtualCaller: "残留", VirtualExpiresAtMs: expires,
+	}, at.UnixMilli()+1, at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	row, err = s.LatestCandidatePhoneObservation(fixture.ProfileID)
+	if err != nil || row == nil || row.Phone != "13800000001" || row.Kind != CandidatePhoneKindReal ||
+		row.VirtualCaller != "" || row.VirtualExpiresAtMs != 0 {
+		t.Fatalf("真实号应优先且不带附属事实: %+v err=%v", row, err)
+	}
+
+	// 之后再读到虚拟号:仍取真实号——虚拟号不顶掉真实号;更新的真实号取最新一行。
+	if err := s.SaveCandidatePhoneObservation(fixture.ProfileID, CandidatePhoneObservationInput{
+		Phone: "18000000002", Kind: CandidatePhoneKindVirtual,
+	}, at.UnixMilli()+2, at.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if row, err := s.LatestCandidatePhoneObservation(fixture.ProfileID); err != nil || row == nil || row.Phone != "13800000001" {
+		t.Fatalf("虚拟号不得顶掉真实号: %+v err=%v", row, err)
+	}
+	if err := s.SaveCandidatePhoneObservation(fixture.ProfileID, CandidatePhoneObservationInput{
+		Phone: "13800000002", Kind: CandidatePhoneKindReal,
+	}, at.UnixMilli()+3, at.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = s.NotificationRenderSnapshotForProfile(fixture.ProfileID)
+	if err != nil || snapshot == nil || snapshot.PhoneNumber != "13800000002" ||
+		snapshot.PhoneKind != CandidatePhoneKindReal || snapshot.PhoneVirtualCaller != "" ||
+		snapshot.PhoneVirtualExpiresAtMs != 0 {
+		t.Fatalf("快照未取最新真实号: %+v err=%v", snapshot, err)
+	}
+
+	// 未知种类拒绝落行;观察行只追加不删除。
+	if err := s.SaveCandidatePhoneObservation(fixture.ProfileID, CandidatePhoneObservationInput{
+		Phone: "13800000003", Kind: "bogus",
+	}, at.UnixMilli()+4, at.Add(4*time.Minute)); err == nil {
+		t.Fatal("未知种类应拒绝")
 	}
 	var total int64
-	if err := s.db.Model(&CandidatePhoneObservation{}).Count(&total).Error; err != nil || total != 2 {
+	if err := s.db.Model(&CandidatePhoneObservation{}).Count(&total).Error; err != nil || total != 4 {
 		t.Fatalf("观察行应追加保留: %d err=%v", total, err)
+	}
+}
+
+// legacyCandidatePhoneObservation 是 2026-09-09 增量之前的观察行结构(无种类与
+// 附属事实列),只用来在测试里造一个升级前的客户机库。
+type legacyCandidatePhoneObservation struct {
+	ID           uint64 `gorm:"primaryKey;autoIncrement"`
+	ProfileID    string `gorm:"not null;index"`
+	Phone        string `gorm:"not null"`
+	ObservedAtMs int64  `gorm:"not null"`
+	CreatedAt    time.Time
+}
+
+func (legacyCandidatePhoneObservation) TableName() string { return "candidate_phone_observations" }
+
+// 存量观察行没有种类列:升级后 AutoMigrate 补列,旧行按真实号解释、附属事实为零值,
+// 新虚拟号行照常能追加到同一张表(2026-09-09 增量「存量行按 real 解释」)。
+func TestCandidatePhoneObservationLegacyRowsReadAsReal(t *testing.T) {
+	dir := t.TempDir()
+	legacy, err := gorm.Open(sqlite.Open(filepath.Join(dir, "brain.db")), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.AutoMigrate(&legacyCandidatePhoneObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	if err := legacy.Create(&legacyCandidatePhoneObservation{
+		ProfileID: "p-legacy", Phone: "13800000009", ObservedAtMs: at.UnixMilli(), CreatedAt: at,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if sqlDB, err := legacy.DB(); err != nil || sqlDB.Close() != nil {
+		t.Fatalf("关闭旧库: %v", err)
+	}
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("升级打开: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	row, err := s.LatestCandidatePhoneObservation("p-legacy")
+	if err != nil || row == nil || row.Phone != "13800000009" || row.Kind != CandidatePhoneKindReal ||
+		row.VirtualCaller != "" || row.VirtualExpiresAtMs != 0 {
+		t.Fatalf("存量行应按真实号解释: %+v err=%v", row, err)
+	}
+	if err := s.SaveCandidatePhoneObservation("p-legacy", CandidatePhoneObservationInput{
+		Phone: "18000000009", Kind: CandidatePhoneKindVirtual, VirtualCaller: "139****0000",
+	}, at.UnixMilli()+1, at.Add(time.Minute)); err != nil {
+		t.Fatalf("升级后追加虚拟号行: %v", err)
+	}
+	if row, err := s.LatestCandidatePhoneObservation("p-legacy"); err != nil || row == nil || row.Phone != "13800000009" {
+		t.Fatalf("存量真实号仍应优先: %+v err=%v", row, err)
 	}
 }
 
