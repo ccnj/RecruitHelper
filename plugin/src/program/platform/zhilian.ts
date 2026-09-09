@@ -9730,7 +9730,29 @@ async function mainReadThreadPage(
   const unrecognizedTypeCodes = new Set<string>()
   let rejectNoticeTs: number | null = null
   const sorted = [...rows].sort((a, b) => Number(a.time ?? 0) - Number(b.time ?? 0))
+  // 整读拒绝时的行级留痕(错误留痕条款 2026-08-26;2026-09-09 甲方裁决补上):把被拒
+  // 那一行的结构事实作后缀带进错误码——序号、类型码、from 与我方/对方的关系、status、
+  // 各身份字段有无。只记有无与类型,不记正文、不记 idServer/微信号等值。立案起因:
+  // 09-03 起 message_identity_missing 在王永利04 累计 45 条 suspect,手侧不留是哪一行,
+  // 根因无从定位。
+  const presence = (value: unknown): string => value === undefined
+    ? 'absent'
+    : value === null
+      ? 'null'
+      : typeof value === 'string' && value.length === 0 ? 'empty' : typeof value
+  const describeRow = (
+    index: number, row: AnyRecord, rawType: unknown, customType: number, from: string, details: AnyRecord,
+  ): string => {
+    const fromRel = !from ? 'none' : from === staffID ? 'staff' : from === target ? 'peer' : 'other'
+    return `[idx=${index}/${sorted.length} rawType=${clean(rawType) || '-'}` +
+      ` customType=${Number.isFinite(customType) ? customType : '-'} innerType=${clean(details.type) || '-'}` +
+      ` originType=${clean(details.originType) || '-'} from=${fromRel} status=${clean(row.status) || '-'}` +
+      ` idServer=${presence(row.idServer)} idClient=${presence(row.idClient)}` +
+      ` sendMessageId=${presence(row.sendMessageId)} time=${presence(row.time)}]`
+  }
+  let rowIndex = -1
   for (const row of sorted) {
+    rowIndex += 1
     const envelope = parseObject(row.content)
     const inner = parseObject(envelope.content)
     const details = Object.keys(inner).length > 0 ? inner : envelope
@@ -9810,7 +9832,7 @@ async function mainReadThreadPage(
       state = 'accepted'
       identity = stableMessageIdentity(row.idServer)
     } else if (rawType === 'text') {
-      if (!from) throw new Error('message_direction_unresolved')
+      if (!from) throw new Error(`message_direction_unresolved${describeRow(rowIndex, row, rawType, customType, from, details)}`)
       kind = 'text'
       text = clean(row.text)
     } else if (isCandidateWechatRequest) {
@@ -9872,7 +9894,7 @@ async function mainReadThreadPage(
       state = 'unknown'
       identity = stableMessageIdentity(row.idServer)
     } else if (customType === 131) {
-      if (!from) throw new Error('message_direction_unresolved')
+      if (!from) throw new Error(`message_direction_unresolved${describeRow(rowIndex, row, rawType, customType, from, details)}`)
       kind = 'text'
       text = clean(details.greetingText ?? envelope.greetingText)
     } else if (rawType === 'custom' && customType === 148 && Boolean(from) && direction === 'in' &&
@@ -9915,13 +9937,15 @@ async function mainReadThreadPage(
           !stableMessageIdentity(row.idServer)) {
         continue
       }
-      throw new Error('outbound_delivery_unconfirmed')
+      throw new Error(`outbound_delivery_unconfirmed${describeRow(rowIndex, row, rawType, customType, from, details)}`)
     }
 
     // 脑侧 ambiguity verifier 复用 chat.readThread；client sendMessageId 可能只是
     // 乐观本地行，不能被结构化成“已发送”正证词。稳定消息身份只认服务端 idServer。
     const stableMessageID = stableMessageIdentity(row.idServer)
-    if (!stableMessageID) throw new Error('message_identity_missing')
+    if (!stableMessageID) {
+      throw new Error(`message_identity_missing${describeRow(rowIndex, row, rawType, customType, from, details)}`)
+    }
     // contentHash 是脑手共享的规范内容哈希，不是平台消息主键：文本/系统只哈希
     // NFC+空白规范化文本，媒体使用固定占位符；卡片只哈希类型+稳定身份且排除状态。
     // 方向在 anchor 中另列，不能再次混入 hash。
@@ -10004,8 +10028,14 @@ async function mainReadThreadPage(
       'outbound_delivery_unconfirmed',
       'message_identity_missing',
     ].find((code) => raw.includes(code)) ?? 'unexpected'
+    // 已知码之后若紧跟 describeRow 的方括号留痕,原样带出(截到 240 字符,契约
+    // ErrorBody.message 上限 500 字符);其余异常原文一概不带,防止把行内容带进错误码。
+    const detailStart = known === 'unexpected' ? -1 : raw.indexOf(known) + known.length
+    const detail = detailStart >= 0 && raw.charAt(detailStart) === '['
+      ? raw.slice(detailStart, detailStart + 240)
+      : ''
     return {
-      __recruitHelperMainError: `read_thread_main_failed:${diagnosticStage}:${known}`,
+      __recruitHelperMainError: `read_thread_main_failed:${diagnosticStage}:${known}${detail}`,
     } as unknown as MainThreadPageResult
   }
 }

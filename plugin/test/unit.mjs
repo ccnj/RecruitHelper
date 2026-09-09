@@ -7235,6 +7235,9 @@ test('智联 MAIN 线程解析：方向不猜、105 按已证实发起方形状�
   ]
   const unresolvedDirection = await zhilianTestHooks.mainReadThreadPage('conversation-1', 8, null)
   assert.match(unresolvedDirection.__recruitHelperMainError, /message_direction_unresolved/u)
+  assert.match(unresolvedDirection.__recruitHelperMainError,
+    /message_direction_unresolved\[idx=0\/1 rawType=text .* from=none status=- idServer=string /u,
+    '整读拒绝必须带被拒行的结构留痕(2026-08-26 错误留痕条款)')
 
   window.imEngine.getHistoryMsgs = async () => [
     { sendMessageId: 'client-only-out', status: 'success', time: 2, type: 'text', from: 'staff', text: '乐观同文' },
@@ -7242,6 +7245,15 @@ test('智联 MAIN 线程解析：方向不猜、105 按已证实发起方形状�
   const missingServerIdentity = await zhilianTestHooks.mainReadThreadPage('conversation-1', 8, null)
   assert.match(missingServerIdentity.__recruitHelperMainError, /message_identity_missing/u,
     'ambiguity verifier 复用的 readThread 不得结构化 client-only 乐观行')
+  assert.equal(
+    missingServerIdentity.__recruitHelperMainError,
+    'read_thread_main_failed:normalize_messages:message_identity_missing' +
+      '[idx=0/1 rawType=text customType=- innerType=- originType=- from=staff status=success' +
+      ' idServer=absent idClient=absent sendMessageId=string time=number]',
+    '缺 idServer 的整读拒绝要留下被拒行的结构事实:第几行、什么类型、谁发的、什么状态、身份字段有无',
+  )
+  assert.doesNotMatch(missingServerIdentity.__recruitHelperMainError, /乐观同文|client-only-out/u,
+    '留痕只记有无与类型,不得带正文或身份字段的值')
 
   window.imEngine.getHistoryMsgs = async () => [
     { idServer: 'server-pending-out', status: 'pending', time: 3, type: 'text', from: 'staff', text: '未确认同文' },
@@ -7249,6 +7261,9 @@ test('智联 MAIN 线程解析：方向不猜、105 按已证实发起方形状�
   const unconfirmedOutbound = await zhilianTestHooks.mainReadThreadPage('conversation-1', 8, null)
   assert.match(unconfirmedOutbound.__recruitHelperMainError, /outbound_delivery_unconfirmed/u,
     '带 idServer 但非 success 的 out 行也不得成为 verifier 正证据')
+  assert.match(unconfirmedOutbound.__recruitHelperMainError,
+    /outbound_delivery_unconfirmed\[idx=0\/1 .* from=staff status=pending idServer=string /u,
+    '非 success 出站行的整读拒绝同样带行级留痕')
 })
 
 test('智联 148 拒绝模板在读取、发送基线与最终 evaluator 中严格同义', async () => {
