@@ -235,6 +235,57 @@ func TestUploadErrorKeepsServerBodyShort(t *testing.T) {
 	}
 }
 
+func TestUploadUnauthorizedCarriesBackendCodeWithoutBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"detail":{"code":"binding_inactive","message":"机器授权已停用 secret-shaped"}}`))
+	}))
+	defer server.Close()
+
+	err := Upload(context.Background(), &Payload{}, Target{
+		BaseURL: server.URL, MachineID: "M1", LicenseToken: "T1",
+	})
+	var unauthorized *UnauthorizedError
+	if !errors.As(err, &unauthorized) || unauthorized.Code != "binding_inactive" {
+		t.Fatalf("401 应带回拒绝码: %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-shaped") {
+		t.Fatalf("错误文本不得带正文: %v", err)
+	}
+	// 老后台的 detail 是一段文案:仍是 401 错误,但码为空。
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"detail":"授权不存在"}`, http.StatusUnauthorized)
+	}))
+	defer legacy.Close()
+	err = Upload(context.Background(), &Payload{}, Target{BaseURL: legacy.URL, MachineID: "M1", LicenseToken: "T1"})
+	if !errors.As(err, &unauthorized) || unauthorized.Code != "" {
+		t.Fatalf("老后台 401 应为空码: %v", err)
+	}
+}
+
+func TestRunnerForwardsUnauthorizedCodeAndOnlyThat(t *testing.T) {
+	var forwarded []string
+	deps := RunnerDeps{
+		Deps:   fullDeps(),
+		Target: func() (Target, bool) { return Target{BaseURL: "http://x", MachineID: "M1", LicenseToken: "T1"}, true },
+		Upload: func(context.Context, *Payload, Target) error {
+			return &UnauthorizedError{Code: "license_not_found"}
+		},
+		OnUnauthorized: func(code string) { forwarded = append(forwarded, code) },
+	}
+	runOnce(context.Background(), deps, &noiseGate{})
+	if len(forwarded) != 1 || forwarded[0] != "license_not_found" {
+		t.Fatalf("401 的拒绝码应转告一次: %v", forwarded)
+	}
+
+	// 其他失败(网络、5xx)不转告。
+	deps.Upload = func(context.Context, *Payload, Target) error { return errors.New("上传失败: transport") }
+	runOnce(context.Background(), deps, &noiseGate{})
+	if len(forwarded) != 1 {
+		t.Fatalf("非 401 不该转告: %v", forwarded)
+	}
+}
+
 func TestNoiseGateLogsOnceThenDigestsHourly(t *testing.T) {
 	base := time.Date(2026, 8, 6, 9, 0, 0, 0, time.Local)
 	gate := &noiseGate{digestEvery: time.Hour}
