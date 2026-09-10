@@ -27,6 +27,9 @@ var (
 	ErrLoginRequired        = errors.New("平台登录不可用")
 	ErrWechatNotConfigured  = errors.New("平台个人中心尚未配置微信号")
 	ErrWechatCheckFailed    = errors.New("微信号配置检查未完成")
+	// ErrAuthorizationRevoked:后台已停用本机授权(激活码停用),一切开始/恢复入口拒绝,
+	// 直到拿新码重新激活(2026-09-10 甲方裁决「停用激活码即硬停机」)。
+	ErrAuthorizationRevoked = errors.New("授权已被后台停用")
 	// ErrHandCapabilityMissing:该平台的插件未声明/未实现这条原语(2026-09-02 甲方裁决,
 	// hello 按平台声明能力)。开工闸类与尽力而为类调用遇到它一律"跳过并留痕",不算失败、
 	// 不重试;由 appbridge 把脑闸 ErrCapability 与手侧 PROTO_UNSUPPORTED_CMD 两种信号翻成它。
@@ -124,6 +127,8 @@ type Controller struct {
 	noticeCollector NoticeCollector
 	// platformSource 读客户快照的平台归属(模型 1);nil 或空串按 DefaultPlatform。
 	platformSource CustomerPlatformSource
+	// authorization:授权闸探针,见 SetAuthorizationProbe。
+	authorization func() (bool, string)
 }
 
 // SetAccountResolver 注入"开始"时的账号解析器(装配期一次,非并发安全)。
@@ -143,6 +148,27 @@ func (c *Controller) SetAccountResolver(resolver AccountResolver) *Controller {
 func (c *Controller) SetWechatSettingReader(reader WechatSettingReader) *Controller {
 	c.wechatReader = reader
 	return c
+}
+
+// SetAuthorizationProbe 注入授权闸的探针(装配期一次,非并发安全):返回本机授权是否已被
+// 后台停用及拒绝码。nil 探针视为从未停用——单测与旧装配路径不受影响。
+func (c *Controller) SetAuthorizationProbe(probe func() (revoked bool, reason string)) *Controller {
+	c.authorization = probe
+	return c
+}
+
+// gateAuthorization 是授权闸(2026-09-10 甲方裁决「停用激活码即硬停机」)。开始与恢复
+// 入口各查两次:入口处拦已知的停用;配置面刷新之后再拦刚在刷新中被 401 发现的停用——
+// 仅回复/接续/恢复的刷新是尽力而为、失败照常继续,若只在入口查,刷新时才得知的停用
+// 会漏过去。它只读本地标记,不出站。
+func (c *Controller) gateAuthorization() error {
+	if c.authorization == nil {
+		return nil
+	}
+	if revoked, reason := c.authorization(); revoked {
+		return fmt.Errorf("%w: %s", ErrAuthorizationRevoked, strings.TrimSpace(reason))
+	}
+	return nil
 }
 
 // SetNoticeCollector 注入平台通知读取上报器(装配期一次,非并发安全)。
@@ -238,6 +264,9 @@ func (c *Controller) Start(
 	default:
 		return workflow.ErrInvalidMode
 	}
+	if err := c.gateAuthorization(); err != nil {
+		return err
+	}
 	// Capture the user's click-time window before any backend request or
 	// durable write. The workflow manager performs the second check at actual
 	// start, so a 06:59 click cannot become an implicit 07:00 reservation and
@@ -261,6 +290,9 @@ func (c *Controller) Start(
 	c.collectNoticesBestEffort(ctx, key)
 	if mode == string(workflow.ModeReplyOnly) {
 		c.syncJobsBestEffort(ctx, "startReplyOnly")
+		if err := c.gateAuthorization(); err != nil {
+			return err
+		}
 		_, err = c.workflow.StartReplyOnly(key)
 		return err
 	}
@@ -309,6 +341,9 @@ func (c *Controller) Start(
 		// 最新提示词;已冻结批次与当日计划的 revision 绑定是不可变事实,
 		// 不受影响。失败不拦——接续/幂等返回不需要名单。
 		c.syncJobsBestEffort(ctx, "startFullActive")
+	}
+	if err := c.gateAuthorization(); err != nil {
+		return err
 	}
 	_, err = c.workflow.StartFullDailyPlan(key)
 	return err
@@ -522,7 +557,13 @@ func (c *Controller) Resume(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := c.gateAuthorization(); err != nil {
+		return err
+	}
 	c.syncJobsBestEffort(ctx, "resume")
+	if err := c.gateAuthorization(); err != nil {
+		return err
+	}
 	_, err := c.workflow.Resume()
 	return err
 }

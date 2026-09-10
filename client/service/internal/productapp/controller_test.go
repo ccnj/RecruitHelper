@@ -160,6 +160,72 @@ func TestFullStartSyncsConfigPlaneThenStartsDailyPlan(t *testing.T) {
 	}
 }
 
+// 授权闸(2026-09-10 甲方裁决「停用激活码即硬停机」):本机已标停用时,完整流程、仅回复
+// 与恢复三个入口一律拒绝,不碰后台、不碰工作流;文案指向「拿新码重新激活」。
+func TestStartAndResumeRefuseWhenAuthorizationRevoked(t *testing.T) {
+	db, _ := controllerFixture(t)
+	flow := &fakeWorkflow{}
+	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+	controller, err := New(
+		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.SetAuthorizationProbe(func() (bool, string) { return true, "binding_inactive" })
+
+	for _, mode := range []string{string(workflow.ModeFull), string(workflow.ModeReplyOnly)} {
+		if err := controller.Start(context.Background(), mode, ""); !errors.Is(err, ErrAuthorizationRevoked) {
+			t.Fatalf("%s 应被授权闸拒绝: %v", mode, err)
+		}
+	}
+	err = controller.Resume(context.Background())
+	if !errors.Is(err, ErrAuthorizationRevoked) {
+		t.Fatalf("恢复应被授权闸拒绝: %v", err)
+	}
+	if source.calls != 0 || source.allCalls != 0 || len(flow.callOrder) != 0 || flow.resumeCalls != 0 {
+		t.Fatalf("停用态不该碰后台或工作流: source=%d/%d order=%v resume=%d",
+			source.calls, source.allCalls, flow.callOrder, flow.resumeCalls)
+	}
+	if text := StartFailureText(err); !strings.Contains(text, "重新激活") {
+		t.Fatalf("文案应指向重新激活: %s", text)
+	}
+}
+
+// 停用是在配置面刷新时才被 401 发现的(入口处尚未标记):刷新之后的第二道闸仍拦住,
+// 仅回复与恢复的"尽力刷新、失败照常继续"不得让它漏过去。
+func TestStartRefusesWhenRevocationDiscoveredDuringRefresh(t *testing.T) {
+	db, _ := controllerFixture(t)
+	flow := &fakeWorkflow{}
+	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	source.callOrder = &flow.callOrder
+	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+	controller, err := New(
+		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 刷新碰过后台之后才"发现"停用。
+	controller.SetAuthorizationProbe(func() (bool, string) { return source.calls > 0, "license_not_found" })
+
+	if err := controller.Start(context.Background(), string(workflow.ModeReplyOnly), ""); !errors.Is(err, ErrAuthorizationRevoked) {
+		t.Fatalf("刷新后发现停用应拒绝: %v", err)
+	}
+	if err := controller.Resume(context.Background()); !errors.Is(err, ErrAuthorizationRevoked) {
+		t.Fatalf("恢复刷新后发现停用应拒绝: %v", err)
+	}
+	for _, step := range flow.callOrder {
+		if step != "fetch" && step != "fetchAll" {
+			t.Fatalf("工作流不该被推进: %v", flow.callOrder)
+		}
+	}
+	if flow.resumeCalls != 0 {
+		t.Fatalf("恢复不该落到工作流: %d", flow.resumeCalls)
+	}
+}
+
 // 仅回复开始也做与「同步职位」相同的尽力全刷(2026-09-01 甲方裁决:所有开始/
 // 恢复入口全刷),当前职位 head 随之推进,在聊候选人下一轮即用新配置。
 func TestReplyOnlyStartRefreshesConfigPlane(t *testing.T) {

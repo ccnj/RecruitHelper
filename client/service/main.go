@@ -338,6 +338,15 @@ func main() {
 	productController.SetWechatSettingReader(appbridge.WechatSettingReader{
 		Hub: hub, Runner: runner, Store: st,
 	})
+	// 授权闸(2026-09-10 甲方裁决「停用激活码即硬停机」):本地配置带停用标记时,
+	// 一切开始/恢复入口拒绝。只读本机文件,不出站。
+	productController.SetAuthorizationProbe(func() (bool, string) {
+		config, loadErr := jobConfigSource.LoadConfig()
+		if loadErr != nil || config == nil {
+			return false, ""
+		}
+		return config.RevokedAt != "", config.RevokedReason
+	})
 	// 平台通知上报(AGENTS.md 第十一项出站,2026-09-02 甲方裁决):微信闸通过后
 	// 同步读个人中心「通知」页签第一页,读到即异步上报旧后台。不是闸——读不到、
 	// 传不上只记日志,开始照常;不重试,下次开始自愈。

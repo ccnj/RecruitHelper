@@ -41,6 +41,8 @@ func StartFailureText(err error) string {
 		return "尚未在智联个人中心配置微信号，请到智联招聘端「个人中心」填写微信号后再开始"
 	case errors.Is(err, ErrWechatCheckFailed):
 		return "微信号配置检查未完成，请稍后重试"
+	case errors.Is(err, ErrAuthorizationRevoked):
+		return "这台电脑的授权已被停用，需要新的激活码重新激活后才能开始"
 	}
 	return "当前状态无法启动工作流"
 }
