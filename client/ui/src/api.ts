@@ -503,6 +503,10 @@ export interface JobConfigSourceView {
   machineMatch: boolean
   customerName?: string
   customerStatus?: string
+  // 后台已停用本机授权(激活码停用,2026-09-10):configured 仍为 true,但需要新码重新激活。
+  revoked?: boolean
+  revokedAt?: string
+  revokedReason?: string
 }
 
 // 后台地址不再由产品 UI 收集:脑内置默认地址,API 层的 base_url 仅供开发覆盖。
