@@ -38,10 +38,13 @@ type ProjectionStore interface {
 }
 
 type RuntimeSnapshot struct {
-	Available             bool   `json:"available"`
-	CustomerName          string `json:"customerName,omitempty"`
-	CustomerStatus        string `json:"customerStatus,omitempty"`
-	Authorized            bool   `json:"authorized"`
+	Available      bool   `json:"available"`
+	CustomerName   string `json:"customerName,omitempty"`
+	CustomerStatus string `json:"customerStatus,omitempty"`
+	Authorized     bool   `json:"authorized"`
+	// AuthorizationRevoked:后台已停用本机授权(激活码停用),需要新码重新激活。此时
+	// Authorized 一定为 false;UI 据它把「等待激活」改成「授权已停用」。
+	AuthorizationRevoked  bool   `json:"authorizationRevoked"`
 	ProviderConfigured    bool   `json:"providerConfigured"`
 	Provider              string `json:"provider,omitempty"`
 	Model                 string `json:"model,omitempty"`

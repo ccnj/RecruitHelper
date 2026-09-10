@@ -78,11 +78,17 @@ export function ActivationPage({ onActivated }: ActivationPageProps) {
     }
   }
 
+  // 后台停用了这台电脑的授权(激活码停用,2026-09-10):同一张激活页,但要把话说清——
+  // 不是"首次使用",是"原来的码失效了,要新码"。停用时刻来自本机标记,给客户对时间用。
+  const revoked = Boolean(source?.revoked)
+  const revokedAtText = source?.revokedAt ? formatRevokedAt(source.revokedAt) : ''
   const sourceStatus = sourceLoading
     ? '正在读取本机授权配置…'
     : sourceError
       ? '本机授权配置暂时无法读取'
-      : '输入激活码即可完成绑定'
+      : revoked
+        ? '原激活码已失效，输入新的激活码重新绑定'
+        : '输入激活码即可完成绑定'
 
   return (
     <main className="rh-activation-page">
@@ -93,9 +99,16 @@ export function ActivationPage({ onActivated }: ActivationPageProps) {
             <span>招聘自动化助手</span>
           </div>
           <div className="rh-activation-intro">
-            <span className="rh-activation-eyebrow">首次使用</span>
-            <h1>激活这台电脑</h1>
-            <p>输入管理员提供的激活码，客户端会绑定当前客户并同步正在使用的职位配置。</p>
+            <span className="rh-activation-eyebrow">{revoked ? '授权已停用' : '首次使用'}</span>
+            <h1>{revoked ? '重新激活这台电脑' : '激活这台电脑'}</h1>
+            {revoked ? (
+              <p>
+                这台电脑的授权已被管理员停用{revokedAtText ? `（${revokedAtText}）` : ''}，原有激活码已失效，
+                自动任务不会再开始。请向管理员索取新的激活码，输入后客户端会重新绑定并同步职位配置。
+              </p>
+            ) : (
+              <p>输入管理员提供的激活码，客户端会绑定当前客户并同步正在使用的职位配置。</p>
+            )}
           </div>
           <ol className="rh-activation-steps">
             <li className="is-current">
@@ -195,4 +208,10 @@ function activationNotice(result: JobConfigActivationResult): Notice {
 
 function errorText(reason: unknown): string {
   return reason instanceof Error ? reason.message : '激活请求失败'
+}
+
+function formatRevokedAt(raw: string): string {
+  const at = new Date(raw)
+  if (Number.isNaN(at.getTime())) return ''
+  return at.toLocaleString('zh-CN', { hour12: false })
 }

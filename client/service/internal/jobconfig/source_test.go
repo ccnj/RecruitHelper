@@ -144,6 +144,88 @@ func TestFetchCurrentDoesNotRetryRejectedRequest(t *testing.T) {
 	if !errors.Is(err, ErrUpstreamRejected) || calls != 1 || strings.Contains(err.Error(), "secret-shaped") {
 		t.Fatalf("拒绝语义错误: calls=%d err=%v", calls, err)
 	}
+	// 老后台的 401 正文是一段文案,没有拒绝码:不得据此自标需重新激活。
+	if config, _ := store.Load(); config == nil || config.RevokedAt != "" {
+		t.Fatalf("无码 401 不该标记停用: %+v", config)
+	}
+}
+
+func TestFetchUnauthorizedWithRevocationCodeMarksConfigRevoked(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"detail":{"code":"binding_inactive","message":"机器授权已停用 secret-shaped"}}`))
+	}))
+	defer backend.Close()
+	store, _ := NewConfigStore(t.TempDir())
+	_ = store.Save(Config{BaseURL: backend.URL, MachineID: testMachineID, LicenseToken: "token-private"})
+	source := NewSource(store, backend.Client(), fixedMachineID)
+
+	_, err := source.FetchCurrent(context.Background())
+	if !errors.Is(err, ErrUpstreamRejected) || strings.Contains(err.Error(), "secret-shaped") ||
+		!strings.Contains(err.Error(), "code=binding_inactive") {
+		t.Fatalf("拒绝语义错误: %v", err)
+	}
+	config, _ := store.Load()
+	if config == nil || config.RevokedAt == "" || config.RevokedReason != "binding_inactive" ||
+		config.LicenseToken != "token-private" {
+		t.Fatalf("应标记停用且保留 token: %+v", config)
+	}
+	view, _ := source.Status(context.Background())
+	if !view.Revoked || !view.Configured || view.RevokedReason != "binding_inactive" {
+		t.Fatalf("视图应报 revoked 且仍 configured: %+v", view)
+	}
+	// 再来一次 401 不改写首次标记时刻。
+	_, _ = source.FetchCurrent(context.Background())
+	if again, _ := store.Load(); again.RevokedAt != config.RevokedAt {
+		t.Fatalf("重复 401 改写了标记时刻: %s -> %s", config.RevokedAt, again.RevokedAt)
+	}
+}
+
+func TestFetchUnauthorizedWithRecoverableCodeDoesNotRevoke(t *testing.T) {
+	// 订阅过期在后台侧改回来就能继续,不该逼客户重新激活。
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"detail":{"code":"subscription_expired","message":"订阅已过期"}}`))
+	}))
+	defer backend.Close()
+	store, _ := NewConfigStore(t.TempDir())
+	_ = store.Save(Config{BaseURL: backend.URL, MachineID: testMachineID, LicenseToken: "token-private"})
+	source := NewSource(store, backend.Client(), fixedMachineID)
+
+	_, err := source.FetchCurrent(context.Background())
+	if !errors.Is(err, ErrUpstreamRejected) || !strings.Contains(err.Error(), "code=subscription_expired") {
+		t.Fatalf("拒绝语义错误: %v", err)
+	}
+	if config, _ := store.Load(); config.RevokedAt != "" {
+		t.Fatalf("可恢复拒绝不该标记停用: %+v", config)
+	}
+	if view, _ := source.Status(context.Background()); view.Revoked {
+		t.Fatalf("视图不该报 revoked: %+v", view)
+	}
+}
+
+func TestNoteUnauthorizedOnlyHonoursRevocationCodes(t *testing.T) {
+	store, _ := NewConfigStore(t.TempDir())
+	_ = store.Save(Config{BaseURL: "http://127.0.0.1:1", MachineID: testMachineID, LicenseToken: "token-private"})
+	source := NewSource(store, nil, fixedMachineID)
+
+	source.NoteUnauthorized("subscription_expired")
+	source.NoteUnauthorized("<script>")
+	if config, _ := store.Load(); config.RevokedAt != "" {
+		t.Fatalf("非停用码不该标记: %+v", config)
+	}
+	source.NoteUnauthorized("license_not_found")
+	config, _ := store.Load()
+	if config.RevokedAt == "" || config.RevokedReason != "license_not_found" {
+		t.Fatalf("停用码应标记: %+v", config)
+	}
+	// 没有配置文件时静默:全新机器收不到 401,这只是防御。
+	empty, _ := NewConfigStore(t.TempDir())
+	NewSource(empty, nil, fixedMachineID).NoteUnauthorized("binding_inactive")
+	if config, _ := empty.Load(); config != nil {
+		t.Fatalf("无配置不该凭空造文件: %+v", config)
+	}
 }
 
 func TestBindUsesOneApprovedRequestAndPersistsCredentialWithoutInviteCode(t *testing.T) {
@@ -184,6 +266,35 @@ func TestBindUsesOneApprovedRequestAndPersistsCredentialWithoutInviteCode(t *tes
 		if strings.Contains(string(viewRaw), secret) {
 			t.Fatalf("激活状态泄漏秘密: %s", viewRaw)
 		}
+	}
+}
+
+func TestBindSuccessClearsRevocationMark(t *testing.T) {
+	// 被停用的机器拿新码重新激活:一次成功的 bind 整体覆盖本地配置,停用标记随之清掉。
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"authorized":true,"status":"bound","licenseToken":"token-new","customer":{"customerId":7,"customerName":"合成客户","status":"active","subscriptionEndsAt":""}}`))
+	}))
+	defer backend.Close()
+	store, _ := NewConfigStore(t.TempDir())
+	_ = store.Save(Config{
+		BaseURL: backend.URL, MachineID: testMachineID, LicenseToken: "token-old",
+		RevokedAt: "2026-09-10T10:00:00+08:00", RevokedReason: "binding_inactive",
+	})
+	source := NewSource(store, backend.Client(), fixedMachineID)
+	if view, _ := source.Status(context.Background()); !view.Revoked {
+		t.Fatalf("前置:应处于停用态: %+v", view)
+	}
+
+	if _, err := source.Bind(context.Background(), "", "invite-private"); err != nil {
+		t.Fatalf("重新激活失败: %v", err)
+	}
+	loaded, _ := store.Load()
+	if loaded.RevokedAt != "" || loaded.RevokedReason != "" || loaded.LicenseToken != "token-new" {
+		t.Fatalf("重新激活后停用标记未清: %+v", loaded)
+	}
+	if view, _ := source.Status(context.Background()); view.Revoked {
+		t.Fatalf("重新激活后视图仍报 revoked: %+v", view)
 	}
 }
 

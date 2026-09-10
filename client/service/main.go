@@ -338,6 +338,15 @@ func main() {
 	productController.SetWechatSettingReader(appbridge.WechatSettingReader{
 		Hub: hub, Runner: runner, Store: st,
 	})
+	// 授权闸(2026-09-10 甲方裁决「停用激活码即硬停机」):本地配置带停用标记时,
+	// 一切开始/恢复入口拒绝。只读本机文件,不出站。
+	productController.SetAuthorizationProbe(func() (bool, string) {
+		config, loadErr := jobConfigSource.LoadConfig()
+		if loadErr != nil || config == nil {
+			return false, ""
+		}
+		return config.RevokedAt != "", config.RevokedReason
+	})
 	// 平台通知上报(AGENTS.md 第十一项出站,2026-09-02 甲方裁决):微信闸通过后
 	// 同步读个人中心「通知」页签第一页,读到即异步上报旧后台。不是闸——读不到、
 	// 传不上只记日志,开始照常;不重试,下次开始自愈。
@@ -703,12 +712,20 @@ func main() {
 				if configErr != nil || config == nil {
 					return statusreport.Target{}, false
 				}
+				// 授权已被后台停用:token 已不被认,不再每 5 分钟去撞 401。重新激活会
+				// 覆盖配置文件、清掉标记,下一轮自然恢复。
+				if config.RevokedAt != "" {
+					return statusreport.Target{}, false
+				}
 				return statusreport.Target{
 					BaseURL:      config.BaseURL,
 					MachineID:    config.MachineID,
 					LicenseToken: config.LicenseToken,
 				}, true
 			},
+			// 上报被 401 且带停用类拒绝码 → 配置源把本机标成需重新激活。这是最快的
+			// 发现路径:机器空闲时也每 5 分钟报一次,15 分钟内 UI 就会回到激活页。
+			OnUnauthorized: jobConfigSource.NoteUnauthorized,
 		})
 	})
 	// 职位类别与关键词在后台配置值精确匹配不上时改由大模型从平台候选里选,
@@ -795,7 +812,10 @@ func main() {
 					Available:      true,
 					CustomerName:   view.CustomerName,
 					CustomerStatus: view.CustomerStatus,
-					Authorized:     view.Configured && view.MachineIdentityReady && view.MachineMatch,
+					// 后台停用本机授权后(view.Revoked)不再算已授权:产品 UI 回到激活页,
+					// 一切开始入口由 productapp 的授权闸拒绝(2026-09-10 甲方裁决「硬停机」)。
+					Authorized:           view.Configured && view.MachineIdentityReady && view.MachineMatch && !view.Revoked,
+					AuthorizationRevoked: view.Revoked,
 				}
 				windowOpen, windowErr := dailyWindow.Evaluate(time.Now(), time.Local)
 				if windowErr != nil {

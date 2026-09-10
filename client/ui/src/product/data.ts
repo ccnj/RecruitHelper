@@ -90,6 +90,8 @@ export interface AppRuntimeRaw {
   customerName?: string
   customerStatus?: string
   authorized: boolean
+  // 后台已停用本机授权(2026-09-10):authorized 一定为 false,文案改说「授权已停用」。
+  authorizationRevoked?: boolean
   providerConfigured: boolean
   provider?: string
   model?: string
@@ -286,7 +288,7 @@ export function adaptOverviewSnapshot(
   const businessWindowOpen = runtime.businessWindowOpen
   const customerName = clean(runtime.customerName) || (
     runtime.available
-      ? runtime.authorized ? '当前客户' : '尚未激活'
+      ? runtime.authorized ? '当前客户' : runtime.authorizationRevoked ? '授权已停用' : '尚未激活'
       : '客户状态暂不可读取'
   )
   const job = adaptJob(rawOverview.job)
@@ -441,7 +443,11 @@ function adaptWorkflow(
       : null
   let unavailableReason: string | null = null
   if (!runtime.available) unavailableReason = '授权状态暂不可读取'
-  else if (!runtime.authorized) unavailableReason = '完成激活后可开始'
+  else if (!runtime.authorized) {
+    unavailableReason = runtime.authorizationRevoked
+      ? '授权已被停用，需要新的激活码重新激活'
+      : '完成激活后可开始'
+  }
   else if (!businessWindowOpen) unavailableReason = '运行时间为 07:00～24:00'
 
   const labels: Record<WorkflowView['state'], string> = {
@@ -1108,8 +1114,8 @@ function adaptConnections(
   return [
     {
       label: '客户授权',
-      value: runtime.authorized ? '授权有效' : '等待激活',
-      tone: runtime.authorized ? 'success' : 'warning',
+      value: runtime.authorized ? '授权有效' : runtime.authorizationRevoked ? '授权已停用' : '等待激活',
+      tone: runtime.authorized ? 'success' : runtime.authorizationRevoked ? 'danger' : 'warning',
       detail: clean(runtime.customerStatus) || (runtime.available ? '已读取本机授权状态' : '授权状态暂不可读取'),
     },
     {
@@ -1142,6 +1148,7 @@ function adaptConnections(
 function authorizationLabel(runtime: AppRuntimeRaw): string {
   if (runtime.authorized) return '授权有效'
   if (!runtime.available) return '授权状态暂不可读取'
+  if (runtime.authorizationRevoked) return '授权已停用，需重新激活'
   const status = clean(runtime.customerStatus)
   if (status === 'inactive' || status === 'disabled') return '客户授权已停用'
   return '等待激活'

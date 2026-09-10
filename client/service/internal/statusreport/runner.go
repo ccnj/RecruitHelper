@@ -2,6 +2,7 @@ package statusreport
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -23,6 +24,10 @@ type RunnerDeps struct {
 	Target func() (target Target, ready bool)
 	// Upload 默认走 HTTP;测试替换它。
 	Upload func(context.Context, *Payload, Target) error
+	// OnUnauthorized 在上报被 401 拒时收到旧后台的拒绝码(2026-09-10 甲方裁决「停用激活码
+	// 即硬停机」)。装配期接到 jobconfig.Source.NoteUnauthorized:停用类的码由它把本机标成
+	// 需重新激活,之后 Target 就不再 ready,本循环自然静默。该不该停的判断只在那一处。
+	OnUnauthorized func(code string)
 	// Interval 零值用默认 5 分钟。只有测试会设它。
 	Interval time.Duration
 }
@@ -74,6 +79,10 @@ func runOnce(ctx context.Context, deps RunnerDeps, gate *noiseGate) {
 	payload, err := Collect(deps.Deps)
 	if err == nil {
 		err = deps.upload(ctx, payload, target)
+	}
+	var unauthorized *UnauthorizedError
+	if errors.As(err, &unauthorized) && deps.OnUnauthorized != nil {
+		deps.OnUnauthorized(unauthorized.Code)
 	}
 	log(gate.decide(err == nil, deps.now()), err)
 }

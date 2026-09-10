@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"log/slog"
 	"recruithelper/client/service/internal/machineid"
 )
 
@@ -60,6 +61,14 @@ type Config struct {
 	MachineID    string   `json:"machine_id"`
 	LicenseToken string   `json:"license_token"`
 	Customer     Customer `json:"customer,omitempty"`
+	// RevokedAt / RevokedReason:旧后台已判定本机授权失效——激活码被停用、授权不存在、
+	// 机器不匹配(2026-09-10 甲方裁决「停用激活码即硬停机」)。非空即视为需重新激活:
+	// 运行快照不再报 authorized,开始/恢复入口拒绝,工作状态上报停发。只有一次成功的
+	// bind 会整体覆盖本文件、把它们清掉。订阅过期与客户停用不在此列:那两样在后台侧
+	// 改回来就能继续,不该逼客户重新激活。token 保留不删:verify 端已不认它,留着便于
+	// 诊断,也免得把"被停用"混同成"从没激活过"。
+	RevokedAt     string `json:"revoked_at,omitempty"`
+	RevokedReason string `json:"revoked_reason,omitempty"`
 }
 
 type ConfigView struct {
@@ -72,6 +81,11 @@ type ConfigView struct {
 	CustomerName           string `json:"customerName,omitempty"`
 	CustomerStatus         string `json:"customerStatus,omitempty"`
 	CustomerPlatform       string `json:"customerPlatform,omitempty"`
+	// Revoked:后台已停用本机授权,需要新激活码。Configured 仍为 true(文件在、token 在),
+	// 消费方必须用 Revoked 另行判断,不能只看 Configured。
+	Revoked       bool   `json:"revoked"`
+	RevokedAt     string `json:"revokedAt,omitempty"`
+	RevokedReason string `json:"revokedReason,omitempty"`
 }
 
 func (c Config) View() ConfigView {
@@ -82,6 +96,9 @@ func (c Config) View() ConfigView {
 		CustomerName:           strings.TrimSpace(c.Customer.Name),
 		CustomerStatus:         strings.TrimSpace(c.Customer.Status),
 		CustomerPlatform:       strings.TrimSpace(c.Customer.Platform),
+		Revoked:                strings.TrimSpace(c.RevokedAt) != "",
+		RevokedAt:              strings.TrimSpace(c.RevokedAt),
+		RevokedReason:          strings.TrimSpace(c.RevokedReason),
 	}
 	view.Configured = view.BaseURLConfigured && view.MachineIDConfigured && view.LicenseTokenConfigured
 	return view
@@ -99,6 +116,8 @@ func normalizeConfig(config Config) (Config, error) {
 	config.Customer.Status = strings.TrimSpace(config.Customer.Status)
 	config.Customer.SubscriptionEndsAt = strings.TrimSpace(config.Customer.SubscriptionEndsAt)
 	config.Customer.Platform = strings.TrimSpace(config.Customer.Platform)
+	config.RevokedAt = strings.TrimSpace(config.RevokedAt)
+	config.RevokedReason = strings.TrimSpace(config.RevokedReason)
 	if !validMachineID(config.MachineID) || config.LicenseToken == "" {
 		return Config{}, ErrConfigInvalid
 	}
@@ -288,7 +307,7 @@ func (s *Source) Bind(ctx context.Context, rawBaseURL, inviteCode string) (BindR
 		return BindResult{}, fmt.Errorf("%w: %v", ErrConfigInvalid, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	raw, err := s.do(request, ErrUpstreamRejected)
+	raw, err := s.do(request, ErrUpstreamRejected, false)
 	if err != nil {
 		return BindResult{}, err
 	}
@@ -378,7 +397,7 @@ func (s *Source) postConfigPlane(ctx context.Context, path string, extra map[str
 		return nil, fmt.Errorf("%w: %v", ErrConfigInvalid, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	raw, err := s.do(request, ErrUpstreamRejected)
+	raw, err := s.do(request, ErrUpstreamRejected, true)
 	if err != nil {
 		return nil, err
 	}
@@ -433,12 +452,25 @@ func (s *Source) currentMachineID(ctx context.Context) (string, error) {
 	return machineID, nil
 }
 
-func (s *Source) do(request *http.Request, rejected error) ([]byte, error) {
+// do 发一次请求、不重试。authenticated 标记请求带了 licenseToken:只有这类请求的 401
+// 才可能意味着"本机授权已被停用",要看 detail.code 决定是否自标需重新激活;bind 不带
+// token,它的 401 只是普通拒绝。
+func (s *Source) do(request *http.Request, rejected error, authenticated bool) ([]byte, error) {
 	response, err := s.client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("%w: transport", ErrUpstreamFailed)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized && authenticated {
+		// 旧后台自 2026-09-10 起在 401 的 detail.code 里说明是哪一种拒绝。只取这一个
+		// 封闭枚举值进错误链,不带正文——正文可能回显请求,而请求里有 token,错误信息
+		// 是要进普通日志的。老后台 detail 是一段文案,取不到码就按普通拒绝处理。
+		code := unauthorizedCode(response.Body)
+		if revocationCode(code) {
+			s.markRevoked(code)
+		}
+		return nil, fmt.Errorf("%w: status=%d code=%s", rejected, response.StatusCode, code)
+	}
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: status=%d", rejected, response.StatusCode)
 	}
@@ -460,4 +492,75 @@ func safeStatus(raw string) string {
 		}
 	}
 	return status
+}
+
+// unauthorizedCode 从 401 响应正文里取旧后台的拒绝码(`{"detail":{"code":...}}`)。
+// 老后台的 detail 是一段文案,取不到码就返回空串——空串不属于任何停用码,只当普通拒绝。
+func unauthorizedCode(body io.Reader) string {
+	raw, err := io.ReadAll(io.LimitReader(body, 4096))
+	if err != nil {
+		return ""
+	}
+	var payload struct {
+		Detail json.RawMessage `json:"detail"`
+	}
+	if json.Unmarshal(raw, &payload) != nil || len(payload.Detail) == 0 {
+		return ""
+	}
+	var detail struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(payload.Detail, &detail) != nil {
+		return ""
+	}
+	return safeCode(detail.Code)
+}
+
+// safeCode 只放行 snake_case 枚举形状,其余(含空)归为空串。它会进日志与错误链。
+func safeCode(code string) string {
+	code = strings.TrimSpace(code)
+	if code == "" || len(code) > 40 {
+		return ""
+	}
+	for _, char := range code {
+		if (char < 'a' || char > 'z') && char != '_' {
+			return ""
+		}
+	}
+	return code
+}
+
+// revocationCode 判断一个拒绝码是不是"没有新激活码就回不来"的那一类。订阅过期
+// (subscription_expired)与客户停用(customer_inactive)不算:那两样在后台侧改回来
+// 客户端就能继续,不该逼客户重新激活。
+func revocationCode(code string) bool {
+	switch code {
+	case "binding_inactive", "license_not_found", "machine_mismatch":
+		return true
+	}
+	return false
+}
+
+// NoteUnauthorized 供其他带 licenseToken 出站的模块(工作状态上报)在收到 401 时转告:
+// 同一套判断、同一处落盘,不各自维护一份"该不该停"的名单。
+func (s *Source) NoteUnauthorized(code string) {
+	if code = safeCode(code); revocationCode(code) {
+		s.markRevoked(code)
+	}
+}
+
+// markRevoked 把"授权已失效"写进本地配置(2026-09-10 甲方裁决「停用激活码即硬停机」)。
+// 只写一次;保存失败只记日志——下一次 401 会再来。
+func (s *Source) markRevoked(code string) {
+	config, err := s.LoadConfig()
+	if err != nil || config == nil || strings.TrimSpace(config.RevokedAt) != "" {
+		return
+	}
+	config.RevokedAt = time.Now().Format(time.RFC3339)
+	config.RevokedReason = code
+	if saveErr := s.config.Save(*config); saveErr != nil {
+		slog.Error("授权失效标记写入失败", "errorCode", "authorizationRevoked", "code", code, "err", saveErr.Error())
+		return
+	}
+	slog.Error("旧后台判定本机授权已失效,已标记需重新激活", "errorCode", "authorizationRevoked", "code", code)
 }

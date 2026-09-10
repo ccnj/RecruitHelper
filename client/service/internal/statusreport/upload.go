@@ -78,10 +78,52 @@ func Upload(ctx context.Context, payload *Payload, target Target) error {
 	// 正文一定要读掉再关,否则连接不能复用 —— 这是每 5 分钟一次的常驻调用。
 	snippet, _ := io.ReadAll(io.LimitReader(response.Body, 512))
 
+	if response.StatusCode == http.StatusUnauthorized {
+		// 旧后台自 2026-09-10 起在 401 的 detail.code 里说明是哪一种拒绝。带类型的错误
+		// 让上报循环能把 code 转告配置源(停用类的码 → 本机自标需重新激活)。错误文本
+		// 只含 code,不带正文。
+		return &UnauthorizedError{Code: unauthorizedCode(snippet)}
+	}
 	if response.StatusCode != http.StatusOK {
 		// 只带回状态码与一小段服务端说明。整段正文可能回显请求内容,而请求里有
 		// licenseToken,错误信息是要进普通日志的。
 		return fmt.Errorf("上传被拒(HTTP %d): %s", response.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 	return nil
+}
+
+// UnauthorizedError 是上报被 401 拒绝。Code 是旧后台的拒绝码(取不到时为空串)。
+type UnauthorizedError struct {
+	Code string
+}
+
+func (e *UnauthorizedError) Error() string {
+	return fmt.Sprintf("上传被拒(HTTP 401): code=%s", e.Code)
+}
+
+// unauthorizedCode 从 401 正文取 `{"detail":{"code":...}}` 里的码,只放行 snake_case 形状。
+// 老后台 detail 是一段文案,取不到码就返回空串。
+func unauthorizedCode(body []byte) string {
+	var payload struct {
+		Detail json.RawMessage `json:"detail"`
+	}
+	if json.Unmarshal(body, &payload) != nil || len(payload.Detail) == 0 {
+		return ""
+	}
+	var detail struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(payload.Detail, &detail) != nil {
+		return ""
+	}
+	code := strings.TrimSpace(detail.Code)
+	if code == "" || len(code) > 40 {
+		return ""
+	}
+	for _, char := range code {
+		if (char < 'a' || char > 'z') && char != '_' {
+			return ""
+		}
+	}
+	return code
 }
